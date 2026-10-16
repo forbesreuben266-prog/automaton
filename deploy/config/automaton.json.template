@@ -1,0 +1,50 @@
+{
+  "name": "REPLACE_NAME",
+  "genesisPrompt": "REPLACE_WITH_APPROVED_GENESIS_PROMPT",
+  "creatorMessage": "",
+  "creatorAddress": "REPLACE_WITH_YOUR_PUBLIC_0x_ADDRESS",
+  "walletAddress": "REPLACE_WITH_ADDRESS_PRINTED_BY_--init",
+  "registeredWithConway": false,
+  "sandboxId": "",
+  "chainType": "evm",
+  "conwayApiUrl": "https://api.conway.tech",
+  "openaiApiKey": "REPLACE_ON_SERVER_ONLY",
+  "inferenceModel": "gpt-5-mini",
+  "maxTokensPerTurn": 2048,
+  "maxTurnsPerCycle": 3,
+  "heartbeatConfigPath": "~/.automaton/heartbeat.yml",
+  "dbPath": "~/.automaton/state.db",
+  "skillsDir": "~/.automaton/skills",
+  "logLevel": "info",
+  "version": "0.2.1",
+  "maxChildren": 0,
+  "socialRelayUrl": "",
+  "treasuryPolicy": {
+    "maxSingleTransferCents": 0,
+    "maxHourlyTransferCents": 0,
+    "maxDailyTransferCents": 0,
+    "minimumReserveCents": 0,
+    "maxX402PaymentCents": 0,
+    "x402AllowedDomains": [],
+    "transferCooldownMs": 0,
+    "maxTransfersPerTurn": 0,
+    "maxInferenceDailyCents": 200,
+    "requireConfirmationAboveCents": 0
+  },
+  "modelStrategy": {
+    "inferenceModel": "gpt-5-mini",
+    "lowComputeModel": "gpt-5-mini",
+    "criticalModel": "gpt-5-mini",
+    "maxTokensPerTurn": 2048,
+    "hourlyBudgetCents": 25,
+    "sessionBudgetCents": 100,
+    "perCallCeilingCents": 5,
+    "enableModelFallback": false,
+    "anthropicApiVersion": "2023-06-01"
+  },
+  "soulConfig": {
+    "soulAlignmentThreshold": 0.5,
+    "requireCreatorApprovalForPurposeChange": true,
+    "enableSoulReflection": false
+  }
+}

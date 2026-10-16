@@ -1,0 +1,32 @@
+# Safe first-run heartbeat. Entries set to enabled: false are kept disabled
+# across restarts (verified in src/heartbeat/config.ts mergeWithDefaults).
+# NOTE: the agent's modify_heartbeat tool can re-enable these from inside a
+# turn unless that tool is denied by the safe-mode policy (see
+# docs/SECURITY-REVIEW.md).
+entries:
+  - name: heartbeat_ping        # local KV only
+    schedule: "*/15 * * * *"
+    task: heartbeat_ping
+    enabled: true
+  - name: check_credits         # reads Conway balance (fails closed offline)
+    schedule: "0 */6 * * *"
+    task: check_credits
+    enabled: true
+  - name: health_check
+    schedule: "*/30 * * * *"
+    task: health_check
+    enabled: true
+  - name: check_usdc_balance    # can BUY credits with USDC automatically
+    schedule: "*/5 * * * *"
+    task: check_usdc_balance
+    enabled: false
+  - name: check_for_updates     # wakes agent to pull upstream code
+    schedule: "0 */4 * * *"
+    task: check_for_updates
+    enabled: false
+  - name: check_social_inbox    # untrusted public messages
+    schedule: "*/2 * * * *"
+    task: check_social_inbox
+    enabled: false
+defaultIntervalMs: 60000
+lowComputeMultiplier: 4

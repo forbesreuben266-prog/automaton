@@ -1,0 +1,63 @@
+# Isolated, non-root Automaton deployment (safe first-run profile).
+#
+# Nothing here starts the agent loop by default: the service command is
+# `--status`. Every lifecycle step is an explicit `docker compose run`.
+# See docs/SECURITY-REVIEW.md for the full procedure.
+
+name: automaton
+
+services:
+  egress:
+    build: ./egress
+    restart: unless-stopped
+    networks: [internal, outbound]
+    read_only: true
+    tmpfs: ["/var/run/tinyproxy:size=1m", "/var/log/tinyproxy:size=8m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    pids_limit: 64
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  automaton:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: automaton:safe
+    command: ["--status"]
+    depends_on: [egress]
+    # No published ports. Only network is internal (no internet route);
+    # outbound HTTPS must go through the allowlisting proxy.
+    networks: [internal]
+    environment:
+      NODE_USE_ENV_PROXY: "1"
+      HTTPS_PROXY: "http://egress:8888"
+      HTTP_PROXY: "http://egress:8888"
+      NO_PROXY: "localhost,127.0.0.1"
+    volumes:
+      - state:/home/automaton/.automaton
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 0.5
+    pids_limit: 128
+    restart: "no"
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    stdin_open: true
+    tty: true
+    logging: *logging
+
+networks:
+  internal:
+    internal: true
+  outbound: {}
+
+volumes:
+  state: {}
