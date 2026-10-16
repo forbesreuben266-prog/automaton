@@ -346,7 +346,9 @@ export function createTestConfig(
     sandboxId: "test-sandbox-id",
     conwayApiUrl: "https://api.conway.tech",
     conwayApiKey: "test-api-key",
-    inferenceModel: "mock-model",
+    // Must match modelStrategy.inferenceModel (default "gpt-5.2"): the router
+    // refuses conflicting model configuration.
+    inferenceModel: "gpt-5.2",
     maxTokensPerTurn: 4096,
     heartbeatConfigPath: "/tmp/test-heartbeat.yml",
     dbPath: "/tmp/test-state.db",

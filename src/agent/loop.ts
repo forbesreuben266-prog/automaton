@@ -119,6 +119,12 @@ export async function runAgentLoop(
     ...(config.modelStrategy ?? {}),
     dailyBudgetCents: (config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY).maxInferenceDailyCents,
   };
+  // The top-level inferenceModel and modelStrategy.inferenceModel must agree;
+  // if they don't, refuse rather than guess which one was meant.
+  if (config.inferenceModel && config.inferenceModel !== modelStrategyConfig.inferenceModel) {
+    modelStrategyConfig.modelConfigError =
+      `Conflicting model configuration: inferenceModel "${config.inferenceModel}" vs modelStrategy.inferenceModel "${modelStrategyConfig.inferenceModel}"`;
+  }
   const modelRegistry = new ModelRegistry(db.raw);
   modelRegistry.initialize();
 

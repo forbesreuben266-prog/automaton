@@ -185,13 +185,12 @@ export class InferenceRoutingError extends Error {
   }
 }
 
-const DIRECT_PROVIDERS = new Set(["openai", "anthropic", "ollama"]);
-
 /**
- * Resolve which backend to use for a model. Fails closed: a model is never
- * silently sent to a different (possibly billable) provider than the one it
- * is registered for. Conway is used only outside safe mode, and only when no
- * bring-your-own provider is configured at all (Conway-only setups).
+ * Resolve which backend to use for a model. Fails closed: a model is sent
+ * only to the provider it is registered for, using that provider's own
+ * credentials. There is no fallback to Conway or any other provider. Conway
+ * is used only for models registered as Conway models, and never in safe
+ * mode.
  */
 export function resolveInferenceBackend(
   model: string,
@@ -203,33 +202,24 @@ export function resolveInferenceBackend(
   },
 ): InferenceBackend {
   const safeMode = isSafeModeActive();
-  const hasDirectProvider = !!(keys.openaiApiKey || keys.anthropicApiKey || keys.ollamaBaseUrl);
-  const conwayAllowed = !safeMode && !hasDirectProvider;
+  const refuse = (why: string): never => {
+    throw new InferenceRoutingError(`${why}. Refusing to fall back to another provider.`);
+  };
 
   // Registry-based routing: most accurate, no name guessing
   const provider = keys.getModelProvider?.(model);
-  if (provider === "ollama" && keys.ollamaBaseUrl) return "ollama";
-  if (provider === "anthropic" && keys.anthropicApiKey) return "anthropic";
-  if (provider === "openai" && keys.openaiApiKey) return "openai";
-  if (provider === "conway" && !safeMode) return "conway";
-  if (provider === "conway" || (provider && DIRECT_PROVIDERS.has(provider))) {
-    if (conwayAllowed) return "conway";
-    throw new InferenceRoutingError(
-      `Model ${model} is registered for provider "${provider}", which is not configured` +
-        (safeMode ? " (Conway inference is disabled in safe mode)" : "") +
-        ". Refusing to fall back to another provider.",
-    );
+  if (provider) {
+    if (provider === "openai") return keys.openaiApiKey ? "openai" : refuse(`Model ${model} needs an OpenAI API key, which is not configured`);
+    if (provider === "anthropic") return keys.anthropicApiKey ? "anthropic" : refuse(`Model ${model} needs an Anthropic API key, which is not configured`);
+    if (provider === "ollama") return keys.ollamaBaseUrl ? "ollama" : refuse(`Model ${model} needs an Ollama base URL, which is not configured`);
+    if (provider === "conway") return safeMode ? refuse(`Model ${model} is a Conway model; Conway inference is disabled in safe mode`) : "conway";
+    refuse(`Model ${model} is registered for unsupported provider "${provider}"`);
   }
 
-  // Heuristic fallback (model not in registry yet)
+  // Model not in the registry: only an unambiguous direct-provider match.
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt)/i.test(model)) return "openai";
-  if (conwayAllowed) return "conway";
-  throw new InferenceRoutingError(
-    `No configured provider for model ${model}` +
-      (safeMode ? " (Conway inference is disabled in safe mode)" : "") +
-      ". Refusing to fall back to another provider.",
-  );
+  return refuse(`No configured provider for unregistered model ${model}` + (safeMode ? " (Conway inference is disabled in safe mode)" : ""));
 }
 
 async function chatViaOpenAiCompatible(params: {

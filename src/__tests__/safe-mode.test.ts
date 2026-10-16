@@ -510,7 +510,8 @@ describe("safe mode sinks", () => {
 
   beforeEach(() => {
     activateSafeMode("test");
-    fetchSpy = vi.spyOn(globalThis, "fetch");
+    // Never touch the network, even if a guard regressed.
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network disabled in tests"));
   });
 
   afterEach(() => {
@@ -633,9 +634,14 @@ describe("inference provider routing fails closed", () => {
     expect(resolveInferenceBackend("llama", { ollamaBaseUrl: "http://localhost:11434", getModelProvider: registered("ollama") })).toBe("ollama");
   });
 
-  it("keeps Conway-only setups working outside safe mode", () => {
-    expect(resolveInferenceBackend("gpt-5.2", { getModelProvider: registered("openai") })).toBe("conway");
+  it("never re-routes a direct-provider model to Conway, even with no keys at all", () => {
+    expect(() => resolveInferenceBackend("gpt-5.2", { getModelProvider: registered("openai") })).toThrow(InferenceRoutingError);
+    expect(() => resolveInferenceBackend("mystery-model", {})).toThrow(InferenceRoutingError);
+  });
+
+  it("uses Conway only for models registered as Conway models, outside safe mode", () => {
     expect(resolveInferenceBackend("kimi", { openaiApiKey: "o", getModelProvider: registered("conway") })).toBe("conway");
+    expect(() => resolveInferenceBackend("x", { openaiApiKey: "o", getModelProvider: registered("other") })).toThrow(InferenceRoutingError);
   });
 
   it("never routes to Conway in safe mode", () => {

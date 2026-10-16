@@ -1246,6 +1246,8 @@ export interface ModelStrategyConfig {
   anthropicApiVersion: string; // default: "2023-06-01"
   /** Daily inference cap in cents, fed from treasuryPolicy.maxInferenceDailyCents. */
   dailyBudgetCents?: number;
+  /** Set when the model configuration is ambiguous; the router refuses all calls. */
+  modelConfigError?: string;
 }
 
 export const DEFAULT_MODEL_STRATEGY_CONFIG: ModelStrategyConfig = {

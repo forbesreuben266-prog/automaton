@@ -252,11 +252,11 @@ describe("InferenceRouter", () => {
       expect(model).toBeNull();
     });
 
-    it("skips disabled models and picks next candidate", () => {
+    it("fails closed when the configured model is disabled (no substitution)", () => {
       registry.setEnabled("gpt-5.2", false);
-      const model = router.selectModel("normal", "agent_turn");
-      expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      const selection = router.selectModelWithReason("normal", "agent_turn");
+      expect(selection.model).toBeNull();
+      expect(selection.reason).toMatch(/disabled; refusing to substitute/);
     });
   });
 

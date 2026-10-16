@@ -80,11 +80,12 @@ export class InferenceRouter {
   ): Promise<InferenceResult> {
     const { messages, taskType, tier, sessionId, turnId, tools } = request;
 
-    // 1. Select model from routing matrix
-    const model = this.selectModel(tier, taskType);
+    // 1. Select the configured model (never substituted)
+    const selection = this.selectModelWithReason(tier, taskType);
+    const model = selection.model;
     if (!model) {
       return {
-        content: "",
+        content: `Model selection refused: ${selection.reason}`,
         model: "none",
         provider: "other",
         inputTokens: 0,
@@ -247,51 +248,47 @@ export class InferenceRouter {
   }
 
   /**
-   * Select the best model for a given tier and task type.
-   *
-   * Priority:
-   *   1. First routing-matrix candidate present in the registry
-   *   2. User-configured model(s) from ModelStrategyConfig
-   *      (free/Ollama models are allowed at any tier, including dead)
+   * Select the model for a tier and task type: exactly the configured model
+   * (inferenceModel for normal/high, lowComputeModel for low_compute,
+   * criticalModel for critical/dead). The routing matrix only decides
+   * whether the task runs at this tier at all; it never picks or substitutes
+   * a model. If the configured model can't be used, selection fails closed.
    */
-  selectModel(tier: SurvivalTier, taskType: InferenceTaskType): ModelEntry | null {
-    const TIER_ORDER: Record<string, number> = {
-      dead: 0, critical: 1, low_compute: 2, normal: 3, high: 4,
-    };
-
-    const tierRank = TIER_ORDER[tier] ?? 0;
-
-    // 1. Try routing-matrix candidates
-    const preference = this.getPreference(tier, taskType);
-    if (preference && preference.candidates.length > 0) {
-      for (const candidateId of preference.candidates) {
-        const entry = this.registry.get(candidateId);
-        if (entry && entry.enabled) {
-          return entry;
-        }
-      }
-    }
-
-    // 2. Fall back to user-configured models.
-    //    This handles local/Ollama setups where routing-matrix models are absent.
+  selectModelWithReason(
+    tier: SurvivalTier,
+    taskType: InferenceTaskType,
+  ): { model: ModelEntry; reason?: undefined } | { model: null; reason: string } {
     const strategy = this.budget.config;
-    const fallbackIds: (string | undefined)[] =
-      tier === "critical" || tier === "dead"
-        ? [strategy.criticalModel, strategy.inferenceModel, strategy.lowComputeModel]
-        : [strategy.inferenceModel, strategy.lowComputeModel, strategy.criticalModel];
 
-    for (const modelId of fallbackIds) {
-      if (!modelId) continue;
-      const entry = this.registry.get(modelId);
-      if (!entry || !entry.enabled) continue;
-      const isFree = entry.costPer1kInput === 0 && entry.costPer1kOutput === 0;
-      const tierOk = tierRank >= (TIER_ORDER[entry.tierMinimum] ?? 0);
-      if (isFree || tierOk) {
-        return entry;
-      }
+    if (strategy.modelConfigError) {
+      return { model: null, reason: strategy.modelConfigError };
     }
 
-    return null;
+    const preference = this.getPreference(tier, taskType);
+    if (preference && preference.candidates.length === 0) {
+      return { model: null, reason: `Task "${taskType}" is not allowed at survival tier "${tier}"` };
+    }
+
+    const modelId =
+      tier === "critical" || tier === "dead" ? strategy.criticalModel
+      : tier === "low_compute" ? strategy.lowComputeModel
+      : strategy.inferenceModel;
+    if (!modelId) {
+      return { model: null, reason: `No model configured for tier "${tier}"` };
+    }
+
+    const entry = this.registry.get(modelId);
+    if (!entry) {
+      return { model: null, reason: `Configured model "${modelId}" is unknown (not in the model registry); refusing to substitute another model` };
+    }
+    if (!entry.enabled) {
+      return { model: null, reason: `Configured model "${modelId}" is disabled; refusing to substitute another model` };
+    }
+    return { model: entry };
+  }
+
+  selectModel(tier: SurvivalTier, taskType: InferenceTaskType): ModelEntry | null {
+    return this.selectModelWithReason(tier, taskType).model;
   }
 
   /**
