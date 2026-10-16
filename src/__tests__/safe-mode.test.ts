@@ -48,7 +48,7 @@ import { GeneralHarness } from "../agent/harnesses/general-harness.js";
 import { AgentWorkspace } from "../orchestration/workspace.js";
 import { createDatabase } from "../state/database.js";
 import type { HarnessContext } from "../agent/harness-types.js";
-import { DEFAULT_MODEL_STRATEGY_CONFIG } from "../types.js";
+import { DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { AutomatonDatabase, HeartbeatConfig, ToolContext } from "../types.js";
 import {
   MockConwayClient,
@@ -67,6 +67,24 @@ const fakeAccount = {
   signTypedData: vi.fn(),
   signTransaction: vi.fn(),
 } as any;
+
+/** Valid safe-mode config mirroring deploy/config/automaton.json.template caps. */
+function safeConfig(overrides: Record<string, unknown> = {}) {
+  return createTestConfig({
+    safeMode: true,
+    inferenceModel: "gpt-5-mini",
+    modelStrategy: {
+      ...DEFAULT_MODEL_STRATEGY_CONFIG,
+      inferenceModel: "gpt-5-mini",
+      lowComputeModel: "gpt-5-mini",
+      criticalModel: "gpt-5-mini",
+      perCallCeilingCents: 5,
+      hourlyBudgetCents: 25,
+    },
+    treasuryPolicy: { ...DEFAULT_TREASURY_POLICY, maxInferenceDailyCents: 200 },
+    ...overrides,
+  } as any);
+}
 
 function blocked(fn: () => unknown): Promise<void> {
   return expect(Promise.resolve().then(fn)).rejects.toBeInstanceOf(SafeModeBlockedError);
@@ -156,7 +174,7 @@ describe("safe mode tools", () => {
   function toolContext(overrides: Partial<ToolContext> = {}): ToolContext {
     return {
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true }),
+      config: safeConfig(),
       db: createTestDb(),
       conway: new MockConwayClient(),
       inference: new MockInferenceClient(),
@@ -284,7 +302,7 @@ describe("safe mode agent loop", () => {
 
     await runAgentLoop({
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true, maxTurnsPerCycle: 3 }),
+      config: safeConfig({ maxTurnsPerCycle: 3 }),
       db,
       conway,
       inference,
@@ -308,7 +326,7 @@ describe("safe mode agent loop", () => {
 
     await runAgentLoop({
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true }),
+      config: safeConfig(),
       db,
       conway,
       inference,
@@ -340,7 +358,7 @@ describe("safe mode agent loop", () => {
 
     await runAgentLoop({
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true, maxTurnsPerCycle: 3 }),
+      config: safeConfig({ maxTurnsPerCycle: 3 }),
       db,
       conway: new MockConwayClient(),
       inference,
@@ -357,7 +375,7 @@ describe("safe mode agent loop", () => {
     expect(isSafeModeActive()).toBe(false);
     await runAgentLoop({
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true }),
+      config: safeConfig(),
       db,
       conway: new MockConwayClient(),
       inference: new MockInferenceClient([noToolResponse("ok")]),
@@ -371,7 +389,7 @@ describe("safe mode agent loop", () => {
     const inference = new MockInferenceClient([noToolResponse("ok")]);
     await runAgentLoop({
       identity: createTestIdentity(),
-      config: createTestConfig({ safeMode: true }),
+      config: safeConfig(),
       db,
       conway: new MockConwayClient(),
       inference,
@@ -458,7 +476,7 @@ describe("safe mode heartbeat", () => {
     const wakes: string[] = [];
     const scheduler = new DurableScheduler(
       db.raw, HB, new Map(tasks),
-      { identity: createTestIdentity(), config: createTestConfig({ safeMode: true }), db, conway: new MockConwayClient() },
+      { identity: createTestIdentity(), config: safeConfig(), db, conway: new MockConwayClient() },
       (reason) => wakes.push(reason),
     );
 
@@ -530,10 +548,9 @@ describe("safe mode sinks", () => {
     await blocked(() => client.addDnsRecord("x.com", "A", "@", "1.2.3.4"));
     await blocked(() => client.deleteDnsRecord("x.com", "id"));
     await blocked(() => client.registerAutomaton({} as any));
-    // Remote-sandbox mode is blocked before any API request.
-    const remote = createConwayClient({ apiUrl: "http://127.0.0.1:9", apiKey: "k", sandboxId: "sbx-1" });
-    await blocked(() => remote.exec("echo hi"));
-    // A child-scoped client is blocked too.
+    // Remote-sandbox mode is refused at construction, before any API request.
+    await blocked(() => createConwayClient({ apiUrl: "http://127.0.0.1:9", apiKey: "k", sandboxId: "sbx-1" }));
+    // A child-scoped client is refused too.
     await blocked(() => client.createScopedClient("sbx").transferCredits("0xabc", 1));
   });
 

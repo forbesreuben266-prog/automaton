@@ -13,6 +13,7 @@ import { getWallet, getAutomatonDir, getWalletPath, createNoWalletIdentity } fro
 import { activateSafeMode, getSafeModeReason, isSafeModeActive } from "./safety/safe-mode.js";
 import { assertRunBounded, CycleLimiter, parseMaxCycles, RunGuardError } from "./safety/run-guard.js";
 import { acquireInstanceLock, type InstanceLock } from "./safety/instance-lock.js";
+import { spendCapsFromConfig, validateSafeModeSpendCaps } from "./safety/spend-caps.js";
 import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
 import { getConfigPath, loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
@@ -227,6 +228,21 @@ export async function run(maxCycles: number | null): Promise<void> {
     throw err;
   }
   const cycleLimiter = new CycleLimiter(maxCycles);
+
+  // Safe mode: spending caps are mandatory and bounded. Never fall back to
+  // permissive defaults (no per-call/hourly limit, $500/day).
+  if (safeMode) {
+    const capProblems = validateSafeModeSpendCaps(spendCapsFromConfig(config));
+    if (capProblems.length > 0) {
+      logger.error(`Safe mode: invalid spending caps. Refusing to start.\n- ${capProblems.join("\n- ")}`);
+      process.exit(1);
+    }
+    // Remote Conway sandboxes route file/shell operations over the network.
+    if ((config.sandboxId || "").trim()) {
+      logger.error("Safe mode: a Conway sandboxId is configured. Only local mode is allowed. Refusing to start.");
+      process.exit(1);
+    }
+  }
 
   // One runtime per state database, so spend checks can't race.
   let instanceLock: InstanceLock;

@@ -15,6 +15,8 @@ import {
   inferenceGetHourlyCost,
   inferenceGetModelCosts,
 } from "../state/database.js";
+import { isSafeModeActive } from "../safety/safe-mode.js";
+import { validateSafeModeSpendCaps } from "../safety/spend-caps.js";
 
 type Database = BetterSqlite3.Database;
 
@@ -35,6 +37,18 @@ export class InferenceBudgetTracker {
     estimatedCostCents: number,
     model: string,
   ): { allowed: boolean; reason?: string } {
+    // Safe mode: caps are mandatory and bounded; refuse every call otherwise.
+    if (isSafeModeActive()) {
+      const problems = validateSafeModeSpendCaps({
+        perCallCents: this.config.perCallCeilingCents,
+        hourlyCents: this.config.hourlyBudgetCents,
+        dailyCents: this.config.dailyBudgetCents,
+      });
+      if (problems.length > 0) {
+        return { allowed: false, reason: `Safe mode spending caps invalid: ${problems.join("; ")}` };
+      }
+    }
+
     // Per-call ceiling check
     if (this.config.perCallCeilingCents > 0 && estimatedCostCents > this.config.perCallCeilingCents) {
       return {

@@ -41,6 +41,9 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   // Normalize sandbox ID defensively so values like whitespace/"undefined"/"null"
   // never produce malformed API paths such as /v1/sandboxes//exec.
   const sandboxId = normalizeSandboxId(options.sandboxId);
+  // Safe mode: remote (Conway sandbox) mode would route file and shell
+  // operations over the network. Only local mode is allowed.
+  if (sandboxId) assertSafeModeAllows("conway.remoteSandbox");
   const httpClient = new ResilientHttpClient();
 
   async function request(
@@ -49,6 +52,9 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     body?: unknown,
     requestOptions?: { idempotencyKey?: string; retries404?: number },
   ): Promise<any> {
+    // Every Conway API request (current and future client methods) passes
+    // through here: refused in safe mode before any network I/O.
+    assertSafeModeAllows(`conway.api ${method} ${path.split("?")[0]}`);
     // Conway LB has an intermittent routing bug that returns 404 for valid
     // sandbox endpoints. Retry 404s here (outside ResilientHttpClient) to
     // avoid tripping the circuit breaker on transient routing failures.
@@ -551,6 +557,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   // ─── Model Discovery ───────────────────────────────────────────
 
   const listModels = async (): Promise<ModelInfo[]> => {
+    assertSafeModeAllows("conway.listModels");
     // Try inference.conway.tech first (has availability info), fall back to control plane
     const urls = [
       "https://inference.conway.tech/v1/models",

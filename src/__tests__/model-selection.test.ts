@@ -168,9 +168,11 @@ describe("per-call budget rejection happens before any network request", () => {
 
 describe("safe mode never falls back to Conway", () => {
   beforeEach(() => activateSafeMode("test"));
+  // Valid safe-mode caps so the routing check (not the cap check) is exercised.
+  const safeCaps = { perCallCeilingCents: 5, hourlyBudgetCents: 25, dailyBudgetCents: 200 };
 
   it("refuses an OpenAI-registered model with only a Conway key", async () => {
-    const { db, registry, router } = setup({ inferenceModel: "gpt-5-mini" });
+    const { db, registry, router } = setup({ inferenceModel: "gpt-5-mini", ...safeCaps });
     const client = inferenceClient({ apiKey: "conway-key-not-real" }, registry);
     await expect(router.route(request(), (m, o) => client.chat(m, o))).rejects.toThrow(/needs an OpenAI API key/);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -178,7 +180,7 @@ describe("safe mode never falls back to Conway", () => {
   });
 
   it("refuses a Conway-registered model even with a Conway key", async () => {
-    const { db, registry, router } = setup({ inferenceModel: "conway-only-model" });
+    const { db, registry, router } = setup({ inferenceModel: "conway-only-model", ...safeCaps });
     const now = new Date().toISOString();
     registry.upsert({
       modelId: "conway-only-model", provider: "conway" as any, displayName: "c", tierMinimum: "normal",
