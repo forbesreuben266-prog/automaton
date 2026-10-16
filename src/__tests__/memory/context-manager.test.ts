@@ -87,6 +87,22 @@ describe("createTokenCounter", () => {
     expect(counter.cache.has("default::evict-0")).toBe(false);
     expect(counter.cache.has("default::evict-10004")).toBe(true);
   });
+
+  it("counts long whitespace-free runs quickly and conservatively", () => {
+    const counter = createTokenCounter();
+    const run = "x".repeat(500_000);
+
+    const start = Date.now();
+    const tokens = counter.countTokens(run);
+
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(tokens).toBeGreaterThanOrEqual(run.length / 4);
+  });
+
+  it("still encodes ordinary prose exactly", () => {
+    const counter = createTokenCounter();
+    expect(counter.countTokens("hello world")).toBe(2);
+  });
 });
 
 describe("ContextManager.assembleContext", () => {

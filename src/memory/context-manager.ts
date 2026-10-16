@@ -12,6 +12,11 @@ const DEFAULT_RESERVE_TOKENS = 4_096;
 const COMPRESSION_HEADROOM_RATIO = 0.1;
 const MAX_EVENT_CONTENT_CHARS = 220;
 const MAX_TOOL_RESULT_CHARS = 10_000;
+// js-tiktoken's BPE merge is quadratic in the length of a single pre-token,
+// so a long whitespace-free run (base64, minified code, "xxxx…") can block
+// the event loop for minutes. Such runs are estimated instead of encoded.
+const LONG_RUN_PATTERN = /\S{64,}/g;
+const LONG_RUN_CHARS_PER_TOKEN = 4;
 
 export interface ContextBudget {
   totalTokens: number;
@@ -152,7 +157,12 @@ export function createTokenCounter(): TokenCounter {
     let count: number;
     if (encoder) {
       try {
-        count = encoder.encode(normalizedText).length;
+        let estimatedRunTokens = 0;
+        const encodable = normalizedText.replace(LONG_RUN_PATTERN, (run) => {
+          estimatedRunTokens += Math.ceil(run.length / LONG_RUN_CHARS_PER_TOKEN);
+          return "";
+        });
+        count = encoder.encode(encodable).length + estimatedRunTokens;
       } catch {
         count = Math.ceil(normalizedText.length / 3.5);
       }
