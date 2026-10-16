@@ -13,10 +13,14 @@ const COMPRESSION_HEADROOM_RATIO = 0.1;
 const MAX_EVENT_CONTENT_CHARS = 220;
 const MAX_TOOL_RESULT_CHARS = 10_000;
 // js-tiktoken's BPE merge is quadratic in the length of a single pre-token,
-// so a long whitespace-free run (base64, minified code, "xxxx…") can block
-// the event loop for minutes. Such runs are estimated instead of encoded.
-const LONG_RUN_PATTERN = /\S{64,}/g;
-const LONG_RUN_CHARS_PER_TOKEN = 4;
+// so a long whitespace-free run (base64, minified code, CJK prose, "xxxx…")
+// can block the event loop for minutes. Such runs are encoded in small
+// chunks instead: merges cannot cross a chunk boundary, so the count stays
+// at or slightly above the exact one. Text past MAX_ENCODED_CHARS is counted
+// as UTF-8 bytes, a hard upper bound on BPE tokens, to cap CPU time.
+const LONG_RUN_PATTERN = /\S{64,}/gu;
+const RUN_CHUNK_PATTERN = /[\s\S]{1,32}/gu;
+const MAX_ENCODED_CHARS = 50_000;
 
 export interface ContextBudget {
   totalTokens: number;
@@ -133,6 +137,21 @@ function formatCacheKey(text: string, model?: string): string {
   return `${model ?? "default"}::${text}`;
 }
 
+function countWithBoundedBpe(encoder: Tiktoken, text: string): number {
+  const head = text.slice(0, MAX_ENCODED_CHARS);
+  const tail = text.slice(MAX_ENCODED_CHARS);
+
+  let runTokens = 0;
+  const encodable = head.replace(LONG_RUN_PATTERN, (run) => {
+    for (const chunk of run.match(RUN_CHUNK_PATTERN) ?? []) {
+      runTokens += encoder.encode(chunk).length;
+    }
+    return "";
+  });
+
+  return encoder.encode(encodable).length + runTokens + Buffer.byteLength(tail, "utf8");
+}
+
 export function createTokenCounter(): TokenCounter {
   const cache = new Map<string, number>();
   let encoder: Tiktoken | null = null;
@@ -157,12 +176,7 @@ export function createTokenCounter(): TokenCounter {
     let count: number;
     if (encoder) {
       try {
-        let estimatedRunTokens = 0;
-        const encodable = normalizedText.replace(LONG_RUN_PATTERN, (run) => {
-          estimatedRunTokens += Math.ceil(run.length / LONG_RUN_CHARS_PER_TOKEN);
-          return "";
-        });
-        count = encoder.encode(encodable).length + estimatedRunTokens;
+        count = countWithBoundedBpe(encoder, normalizedText);
       } catch {
         count = Math.ceil(normalizedText.length / 3.5);
       }

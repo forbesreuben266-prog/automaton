@@ -1,3 +1,5 @@
+import { randomBytes } from "crypto";
+import { getEncoding } from "js-tiktoken";
 import { describe, expect, it } from "vitest";
 import {
   ContextManager,
@@ -88,20 +90,65 @@ describe("createTokenCounter", () => {
     expect(counter.cache.has("default::evict-10004")).toBe(true);
   });
 
-  it("counts long whitespace-free runs quickly and conservatively", () => {
+});
+
+describe("createTokenCounter bounded BPE", () => {
+  const encoder = getEncoding("cl100k_base");
+  const exact = (text: string) => encoder.encode(text).length;
+  const cjk = "人工智能正在改变世界我们需要确保它安全可靠并且对人类有益";
+
+  it("encodes ordinary prose exactly", () => {
     const counter = createTokenCounter();
-    const run = "x".repeat(500_000);
-
-    const start = Date.now();
-    const tokens = counter.countTokens(run);
-
-    expect(Date.now() - start).toBeLessThan(2_000);
-    expect(tokens).toBeGreaterThanOrEqual(run.length / 4);
+    const prose = "The quick brown fox jumps over the lazy dog. ".repeat(100);
+    expect(counter.countTokens("hello world")).toBe(2);
+    expect(counter.countTokens(prose)).toBe(exact(prose));
   });
 
-  it("still encodes ordinary prose exactly", () => {
+  it.each([
+    ["base64", randomBytes(3_000).toString("base64")],
+    ["hex", randomBytes(1_500).toString("hex")],
+    ["chinese", cjk.repeat(50)],
+    ["emoji", "🚀🔥💰🤖".repeat(200)],
+    ["minified js", 'function(a,b){return a.map(function(c){return c*b+1})};var x={k:"v"};'.repeat(30)],
+  ])("never under-counts long %s runs and stays close to exact", (_label, text) => {
     const counter = createTokenCounter();
-    expect(counter.countTokens("hello world")).toBe(2);
+    const count = counter.countTokens(text);
+    expect(count).toBeGreaterThanOrEqual(exact(text));
+    expect(count).toBeLessThanOrEqual(Math.ceil(exact(text) * 1.25));
+  });
+
+  it("is exact on both sides of the long-run threshold", () => {
+    const counter = createTokenCounter();
+    for (const length of [63, 64, 65]) {
+      const run = "z".repeat(length);
+      expect(counter.countTokens(run)).toBe(exact(run));
+    }
+  });
+
+  it("does not split surrogate pairs across chunk boundaries", () => {
+    const counter = createTokenCounter();
+    const text = "a" + "🤖".repeat(100);
+    expect(counter.countTokens(text)).toBe(exact(text));
+  });
+
+  it("never under-counts text beyond the encoded prefix", () => {
+    const counter = createTokenCounter();
+    const text = "a ".repeat(30_000) + randomBytes(5_000).toString("base64");
+    const count = counter.countTokens(text);
+    expect(count).toBeGreaterThanOrEqual(exact(text));
+    expect(count).toBeLessThanOrEqual(Buffer.byteLength(text, "utf8"));
+  });
+
+  it.each([
+    ["repeated ascii", "x".repeat(500_000)],
+    ["chinese", cjk.repeat(18_000).slice(0, 500_000)],
+    ["63-char chunks", ("y".repeat(63) + " ").repeat(7_800)],
+  ])("counts 500k chars of %s without hanging", (_label, text) => {
+    const counter = createTokenCounter();
+    const start = Date.now();
+    const count = counter.countTokens(text);
+    expect(Date.now() - start).toBeLessThan(15_000);
+    expect(count).toBeGreaterThanOrEqual(text.length / 4);
   });
 });
 
