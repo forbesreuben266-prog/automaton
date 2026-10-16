@@ -54,6 +54,23 @@ export class InferenceBudgetTracker {
       }
     }
 
+    // Daily budget check (treasuryPolicy.maxInferenceDailyCents). Unlike the
+    // hourly/session limits, 0 is a real cap here, and an invalid value
+    // fails closed.
+    const dailyCap = this.config.dailyBudgetCents;
+    if (dailyCap !== undefined) {
+      if (typeof dailyCap !== "number" || !Number.isFinite(dailyCap) || dailyCap < 0) {
+        return { allowed: false, reason: `Invalid daily inference budget: ${String(dailyCap)}` };
+      }
+      const dailyCost = this.getDailyCost();
+      if (dailyCost + estimatedCostCents > dailyCap) {
+        return {
+          allowed: false,
+          reason: `Daily inference budget exhausted: ${dailyCost}c spent + ${estimatedCostCents}c estimated > ${dailyCap}c limit`,
+        };
+      }
+    }
+
     // Session budget check
     if (this.config.sessionBudgetCents > 0) {
       // Session budget is enforced via getSessionCost when sessionId is known

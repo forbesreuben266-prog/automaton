@@ -11,6 +11,7 @@ declare module "@conway/automaton/config.js" {
     openaiApiKey?: string;
     anthropicApiKey?: string;
     socialRelayUrl?: string;
+    safeMode?: boolean;
   }
 
   export function loadConfig(): AutomatonCliConfig | null;
@@ -55,4 +56,8 @@ declare module "@conway/automaton/state/database.js" {
   }
 
   export function createDatabase(path: string): AutomatonCliDatabase;
+}
+
+declare module "@conway/automaton/safety/safe-mode.js" {
+  export function isSafeModeActive(config?: { safeMode?: boolean } | null): boolean;
 }

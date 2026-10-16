@@ -22,6 +22,7 @@ import type {
 import type { PolicyEngine } from "./policy-engine.js";
 import { sanitizeToolResult, sanitizeInput } from "./injection-defense.js";
 import { createLogger } from "../observability/logger.js";
+import { isSafeModeActive, isToolAllowedInSafeMode } from "../safety/safe-mode.js";
 
 const logger = createLogger("tools");
 
@@ -186,7 +187,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         const filePath = args.path as string;
         // Block reads of sensitive files (wallet, env, config secrets)
         const basename = filePath.split("/").pop() || "";
-        const sensitiveFiles = ["wallet.json", ".env", "automaton.json"];
+        const sensitiveFiles = ["wallet.json", ".env", "automaton.json", "config.json"];
         const sensitiveExtensions = [".key", ".pem"];
         if (
           sensitiveFiles.includes(basename) ||
@@ -1648,6 +1649,7 @@ Model: ${ctx.inference.getDefaultModel()}
             ctx.db,
             genesis,
             lifecycle,
+            { maxChildren: ctx.config.maxChildren },
           );
         } catch (err: any) {
           // Auto-topup on 402 insufficient credits and retry once
@@ -1681,6 +1683,7 @@ Model: ${ctx.inference.getDefaultModel()}
                   ctx.db,
                   retryGenesis,
                   retryLifecycle,
+                  { maxChildren: ctx.config.maxChildren },
                 );
               }
             }
@@ -3290,6 +3293,18 @@ export function toolsToInferenceFormat(
  * Execute a tool call and return the result.
  * Optionally evaluates against the policy engine before execution.
  */
+/**
+ * Tools exposed to the model. In safe mode only allowlisted tools are
+ * registered, so disabled tools (exec included) are never even offered.
+ */
+export function filterToolsForMode(
+  tools: AutomatonTool[],
+  config: { safeMode?: boolean },
+): AutomatonTool[] {
+  if (!isSafeModeActive(config)) return tools;
+  return tools.filter((tool) => isToolAllowedInSafeMode(tool.name));
+}
+
 export async function executeTool(
   toolName: string,
   args: Record<string, unknown>,
@@ -3302,6 +3317,19 @@ export async function executeTool(
     sessionSpend: SpendTrackerInterface;
   },
 ): Promise<ToolCallResult> {
+  // Safe mode is enforced here unconditionally — before tool lookup and
+  // independent of whether a policy engine or turn context was supplied.
+  if (isSafeModeActive(context.config) && !isToolAllowedInSafeMode(toolName)) {
+    return {
+      id: ulid(),
+      name: toolName,
+      arguments: args,
+      result: "",
+      durationMs: 0,
+      error: `Blocked by safe mode: ${toolName} is disabled`,
+    };
+  }
+
   const tool = tools.find((t) => t.name === toolName);
   const startTime = Date.now();
 

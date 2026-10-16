@@ -20,6 +20,7 @@ import type {
   AutomatonDatabase,
 } from "../types.js";
 import { logModification } from "./audit-log.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 // ─── IMMUTABLE SAFETY INVARIANTS ─────────────────────────────
 // These are hard-coded and CANNOT be changed by the agent.
@@ -224,6 +225,7 @@ export async function editFile(
   newContent: string,
   reason: string,
 ): Promise<{ success: boolean; error?: string }> {
+  assertSafeModeAllows("self_mod.editFile");
   // 1. Protected file check
   if (isProtectedFile(filePath)) {
     return {

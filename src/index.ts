@@ -9,9 +9,12 @@
 
 import fs from "fs";
 import path from "path";
-import { getWallet, getAutomatonDir } from "./identity/wallet.js";
+import { getWallet, getAutomatonDir, getWalletPath, createNoWalletIdentity } from "./identity/wallet.js";
+import { activateSafeMode, getSafeModeReason, isSafeModeActive } from "./safety/safe-mode.js";
+import { assertRunBounded, CycleLimiter, parseMaxCycles, RunGuardError } from "./safety/run-guard.js";
+import { acquireInstanceLock, type InstanceLock } from "./safety/instance-lock.js";
 import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
-import { loadConfig, resolvePath } from "./config.js";
+import { getConfigPath, loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
 import { createConwayClient } from "./conway/client.js";
 import { createInferenceClient } from "./conway/inference.js";
@@ -57,6 +60,8 @@ Sovereign AI Agent Runtime
 
 Usage:
   automaton --run          Start the automaton (first run triggers setup wizard)
+  automaton --run --max-cycles N
+                           Stop after N agent-loop cycles (required in safe mode)
   automaton --setup        Re-run the interactive setup wizard
   automaton --configure    Edit configuration (providers, model, treasury, general)
   automaton --pick-model   Interactively pick the active inference model
@@ -70,6 +75,7 @@ Environment:
   CONWAY_API_URL           Conway API URL (default: https://api.conway.tech)
   CONWAY_API_KEY           Conway API key (overrides config)
   OLLAMA_BASE_URL          Ollama base URL (overrides config, e.g. http://localhost:11434)
+  AUTOMATON_SAFE_MODE      Safe mode is ON by default; only 0/false/off/no opts out
 `);
     process.exit(0);
   }
@@ -131,7 +137,14 @@ Environment:
 
   if (args.includes("--run")) {
     StructuredLogger.setSink(prettySink);
-    await run();
+    let maxCycles: number | null;
+    try {
+      maxCycles = parseMaxCycles(args);
+    } catch (err: any) {
+      logger.error(err.message);
+      process.exit(1);
+    }
+    await run(maxCycles);
     return;
   }
 
@@ -174,6 +187,7 @@ Heartbeats: ${heartbeats.filter((h) => h.enabled).length} active
 Children:   ${children.filter((c) => c.status !== "dead").length} alive / ${children.length} total
 Agent ID:   ${registry?.agentId || "not registered"}
 Model:      ${config.inferenceModel}
+Safe mode:  ${isSafeModeActive(config) ? `ON (${getSafeModeReason() ?? "config.safeMode"})` : "off"}
 Version:    ${config.version}
 ========================
 `);
@@ -183,21 +197,58 @@ Version:    ${config.version}
 
 // ─── Main Run ──────────────────────────────────────────────────
 
-async function run(): Promise<void> {
+export async function run(maxCycles: number | null): Promise<void> {
   logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
 
-  // Load config — first run triggers interactive setup wizard
-  let config = loadConfig();
+  // Load config. `--run` never starts the setup wizard (it creates a wallet
+  // and a Conway account): a missing or unreadable config refuses to start.
+  const config = loadConfig();
   if (!config) {
-    const { runSetupWizard } = await import("./setup/wizard.js");
-    config = await runSetupWizard();
+    if (fs.existsSync(getConfigPath())) {
+      logger.error(`Configuration at ${getConfigPath()} is unreadable or invalid. Refusing to start.`);
+    } else {
+      logger.error(`No configuration at ${getConfigPath()}. Run "automaton --setup" explicitly first. Refusing to start.`);
+    }
+    process.exit(1);
   }
 
-  // Load wallet (chain-aware)
-  const { account, chainIdentity, chainType: walletChainType } = await getWallet();
+  const safeMode = isSafeModeActive(config);
+  if (safeMode) activateSafeMode(getSafeModeReason() ?? "config.safeMode");
+
+  // Refuse to start an unbounded run in safe mode, or any run whose cycle
+  // limit cannot be enforced.
+  try {
+    assertRunBounded({ safeMode, maxCycles, maxTurnsPerCycle: config.maxTurnsPerCycle });
+  } catch (err) {
+    if (err instanceof RunGuardError) {
+      logger.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+  const cycleLimiter = new CycleLimiter(maxCycles);
+
+  // One runtime per state database, so spend checks can't race.
+  let instanceLock: InstanceLock;
+  try {
+    instanceLock = acquireInstanceLock(resolvePath(config.dbPath));
+  } catch (err: any) {
+    logger.error(err.message);
+    process.exit(1);
+  }
+
+  // Load wallet (chain-aware). Safe mode never creates one: without an
+  // existing wallet it runs with an identity that cannot sign anything.
+  const useNoWallet = safeMode && !fs.existsSync(getWalletPath());
+  if (useNoWallet) {
+    logger.warn("Safe mode: no wallet found; running without one (no signing possible).");
+  }
+  const { account, chainIdentity, chainType: walletChainType } = useNoWallet
+    ? createNoWalletIdentity()
+    : await getWallet();
   const resolvedChainType = config.chainType || walletChainType || "evm";
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
-  if (!apiKey) {
+  const apiKey = config.conwayApiKey || loadApiKeyFromConfig() || "";
+  if (!apiKey && !safeMode) {
     logger.error("No API key found. Run: automaton --provision");
     process.exit(1);
   }
@@ -247,7 +298,9 @@ async function run(): Promise<void> {
 
   // Register automaton identity (one-time, immutable)
   const registrationState = db.getIdentity("conwayRegistrationStatus");
-  if (registrationState !== "registered") {
+  if (safeMode) {
+    logger.info("Safe mode: Conway identity registration skipped.");
+  } else if (registrationState !== "registered") {
     try {
       const genesisPromptHash = config.genesisPrompt
         ? keccak256(toHex(config.genesisPrompt))
@@ -302,7 +355,7 @@ async function run(): Promise<void> {
 
   // Create social client (chain-aware: pass ChainIdentity for Solana signing)
   let social: SocialClientInterface | undefined;
-  if (config.socialRelayUrl) {
+  if (config.socialRelayUrl && !safeMode) {
     social = createSocialClient(config.socialRelayUrl, resolvedChainType === "solana" ? chainIdentity : account);
     logger.info(`[${new Date().toISOString()}] Social relay: ${config.socialRelayUrl}`);
   }
@@ -328,8 +381,10 @@ async function run(): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] Skills loading failed: ${err.message}`);
   }
 
-  // Initialize state repo (git)
-  try {
+  // Initialize state repo (git). Needs shell access, which safe mode blocks.
+  if (safeMode) {
+    logger.info("Safe mode: state repo (git) initialization skipped.");
+  } else try {
     await initStateRepo(conway);
     logger.info(`[${new Date().toISOString()}] State repo initialized.`);
   } catch (err: any) {
@@ -338,7 +393,9 @@ async function run(): Promise<void> {
 
   // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
   // The agent decides larger topups itself via the topup_credits tool.
-  try {
+  if (safeMode) {
+    logger.info("Safe mode: bootstrap topup skipped.");
+  } else try {
     let bootstrapTimer: ReturnType<typeof setTimeout>;
     const bootstrapTimeout = new Promise<null>((_, reject) => {
       bootstrapTimer = setTimeout(() => reject(new Error("bootstrap topup timed out")), 15_000);
@@ -393,6 +450,7 @@ async function run(): Promise<void> {
     heartbeat.stop();
     db.setAgentState("sleeping");
     db.close();
+    instanceLock.release();
     process.exit(0);
   };
 
@@ -404,6 +462,13 @@ async function run(): Promise<void> {
   // The heartbeat can wake it up.
 
   while (true) {
+    // Every attempt counts toward --max-cycles, including failed ones.
+    if (!cycleLimiter.tryBeginCycle()) {
+      logger.info(`Cycle limit reached (${maxCycles}). Stopping.`);
+      shutdown();
+      return;
+    }
+
     try {
       // Reload skills (may have changed since last loop)
       try {
@@ -433,6 +498,12 @@ async function run(): Promise<void> {
           );
         },
       });
+
+      if (cycleLimiter.isExhausted()) {
+        logger.info(`Completed ${cycleLimiter.cyclesStarted} of ${maxCycles} allowed cycle(s). Stopping.`);
+        shutdown();
+        return;
+      }
 
       // Agent loop exited (sleeping or dead)
       const state = db.getAgentState();
@@ -481,6 +552,11 @@ async function run(): Promise<void> {
       logger.error(
         `[${new Date().toISOString()}] Fatal error in run loop: ${err.message}`,
       );
+      if (cycleLimiter.isExhausted()) {
+        logger.info(`Cycle limit reached after an error (${maxCycles}). Stopping.`);
+        shutdown();
+        return;
+      }
       // Wait before retrying
       await sleep(30_000);
     }
@@ -493,7 +569,8 @@ function sleep(ms: number): Promise<void> {
 
 // ─── Entry Point ───────────────────────────────────────────────
 
-main().catch((err) => {
+// Tests import run() directly; never auto-start under the test runner.
+if (!process.env.VITEST) main().catch((err) => {
   logger.error(`Fatal: ${err.message}`);
   process.exit(1);
 });

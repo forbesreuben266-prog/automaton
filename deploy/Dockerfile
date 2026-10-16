@@ -35,8 +35,11 @@ COPY --from=build /src/packages/cli/dist ./packages/cli/dist
 COPY --from=build /src/packages/cli/node_modules ./packages/cli/node_modules
 COPY constitution.md ./
 
+# Fail-closed by default: turning safe mode off requires an explicit
+# AUTOMATON_SAFE_MODE=0 override at run time.
 ENV HOME=/home/automaton \
-    NODE_ENV=production
+    NODE_ENV=production \
+    AUTOMATON_SAFE_MODE=1
 USER automaton
 VOLUME ["/home/automaton/.automaton"]
 

@@ -15,6 +15,7 @@ import {
 import { base, baseSepolia } from "viem/chains";
 import { ResilientHttpClient } from "./http-client.js";
 import type { ChainType } from "../identity/chain.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 const x402HttpClient = new ResilientHttpClient();
 
@@ -318,6 +319,7 @@ export async function x402Fetch(
   maxPaymentCents?: number,
   chainType?: ChainType,
 ): Promise<X402PaymentResult> {
+  assertSafeModeAllows("x402.payment");
   // Solana wallets cannot sign EVM x402 payments
   if (chainType === "solana") {
     return {

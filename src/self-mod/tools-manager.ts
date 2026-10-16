@@ -11,6 +11,7 @@ import type {
 } from "../types.js";
 import { logModification } from "./audit-log.js";
 import { ulid } from "ulid";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 /**
  * Install an npm package globally in the sandbox.
@@ -20,6 +21,7 @@ export async function installNpmPackage(
   db: AutomatonDatabase,
   packageName: string,
 ): Promise<{ success: boolean; error?: string }> {
+  assertSafeModeAllows("self_mod.installNpmPackage");
   // Sanitize package name (prevent command injection)
   if (!/^[@a-zA-Z0-9._/-]+$/.test(packageName)) {
     return {
@@ -71,6 +73,7 @@ export async function installMcpServer(
   args?: string[],
   env?: Record<string, string>,
 ): Promise<{ success: boolean; error?: string }> {
+  assertSafeModeAllows("self_mod.installMcpServer");
   // Record in database
   const tool: InstalledTool = {
     id: ulid(),

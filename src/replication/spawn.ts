@@ -34,6 +34,7 @@ function selectSandboxTier(requestedMemoryMb: number) {
 
 import { isValidAddress } from "../identity/chain.js";
 import type { ChainType } from "../identity/chain.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 /**
  * Validate that an address is a well-formed, non-zero wallet address.
@@ -58,7 +59,9 @@ export async function spawnChild(
   db: AutomatonDatabase,
   genesis: GenesisConfig,
   lifecycle?: ChildLifecycle,
+  options: { maxChildren?: number } = {},
 ): Promise<ChildAutomaton> {
+  assertSafeModeAllows("replication.spawnChild");
   // Check child limit from config
   const existing = db
     .getChildren()
@@ -68,7 +71,10 @@ export async function spawnChild(
         c.status !== "cleaned_up" &&
         c.status !== "failed",
     );
-  const maxChildren = (db as any).config?.maxChildren ?? 3;
+  const maxChildren = options.maxChildren ?? 3;
+  if (!Number.isSafeInteger(maxChildren) || maxChildren < 0) {
+    throw new Error(`Cannot spawn: invalid maxChildren ${String(maxChildren)}`);
+  }
   if (existing.length >= maxChildren) {
     throw new Error(
       `Cannot spawn: already at max children (${maxChildren}). Kill or wait for existing children to die.`,

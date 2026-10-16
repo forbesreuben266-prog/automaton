@@ -2,6 +2,8 @@
 #
 # Nothing here starts the agent loop by default: the service command is
 # `--status`. Every lifecycle step is an explicit `docker compose run`.
+# Safe mode is on (image default and here); a safe-mode `--run` refuses to
+# start without `--max-cycles N`.
 # See docs/SECURITY-REVIEW.md for the full procedure.
 
 name: automaton
@@ -32,6 +34,7 @@ services:
     # outbound HTTPS must go through the allowlisting proxy.
     networks: [internal]
     environment:
+      AUTOMATON_SAFE_MODE: "1"
       NODE_USE_ENV_PROXY: "1"
       HTTPS_PROXY: "http://egress:8888"
       HTTP_PROXY: "http://egress:8888"

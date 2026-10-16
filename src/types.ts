@@ -75,6 +75,8 @@ export interface AutomatonConfig {
   rpcUrl?: string;
   /** Chain type for this automaton. Defaults to "evm" if absent. */
   chainType?: ChainType;
+  /** Fail-closed supervised mode (see src/safety/safe-mode.ts). */
+  safeMode?: boolean;
 }
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
@@ -1242,6 +1244,8 @@ export interface ModelStrategyConfig {
   perCallCeilingCents: number; // default: 0 (no limit)
   enableModelFallback: boolean; // default: true
   anthropicApiVersion: string; // default: "2023-06-01"
+  /** Daily inference cap in cents, fed from treasuryPolicy.maxInferenceDailyCents. */
+  dailyBudgetCents?: number;
 }
 
 export const DEFAULT_MODEL_STRATEGY_CONFIG: ModelStrategyConfig = {

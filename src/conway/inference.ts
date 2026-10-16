@@ -15,8 +15,17 @@ import type {
   InferenceToolDefinition,
 } from "../types.js";
 import { ResilientHttpClient } from "./http-client.js";
+import { isSafeModeActive } from "../safety/safe-mode.js";
 
 const INFERENCE_TIMEOUT_MS = 60_000;
+
+/** Non-OK inference response, with the HTTP status for billing decisions. */
+export class InferenceHttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "InferenceHttpError";
+  }
+}
 
 interface InferenceClientOptions {
   apiUrl: string;
@@ -169,12 +178,22 @@ function formatMessage(
   return formatted;
 }
 
+export class InferenceRoutingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InferenceRoutingError";
+  }
+}
+
+const DIRECT_PROVIDERS = new Set(["openai", "anthropic", "ollama"]);
+
 /**
- * Resolve which backend to use for a model.
- * When InferenceRouter is available, it uses the model registry's provider field.
- * This function is kept for backward compatibility with direct inference calls.
+ * Resolve which backend to use for a model. Fails closed: a model is never
+ * silently sent to a different (possibly billable) provider than the one it
+ * is registered for. Conway is used only outside safe mode, and only when no
+ * bring-your-own provider is configured at all (Conway-only setups).
  */
-function resolveInferenceBackend(
+export function resolveInferenceBackend(
   model: string,
   keys: {
     openaiApiKey?: string;
@@ -183,21 +202,34 @@ function resolveInferenceBackend(
     getModelProvider?: (modelId: string) => string | undefined;
   },
 ): InferenceBackend {
+  const safeMode = isSafeModeActive();
+  const hasDirectProvider = !!(keys.openaiApiKey || keys.anthropicApiKey || keys.ollamaBaseUrl);
+  const conwayAllowed = !safeMode && !hasDirectProvider;
+
   // Registry-based routing: most accurate, no name guessing
-  if (keys.getModelProvider) {
-    const provider = keys.getModelProvider(model);
-    if (provider === "ollama" && keys.ollamaBaseUrl) return "ollama";
-    if (provider === "anthropic" && keys.anthropicApiKey) return "anthropic";
-    if (provider === "openai" && keys.openaiApiKey) return "openai";
-    if (provider === "conway") return "conway";
-    // provider unknown or key not configured — fall through to heuristics
+  const provider = keys.getModelProvider?.(model);
+  if (provider === "ollama" && keys.ollamaBaseUrl) return "ollama";
+  if (provider === "anthropic" && keys.anthropicApiKey) return "anthropic";
+  if (provider === "openai" && keys.openaiApiKey) return "openai";
+  if (provider === "conway" && !safeMode) return "conway";
+  if (provider === "conway" || (provider && DIRECT_PROVIDERS.has(provider))) {
+    if (conwayAllowed) return "conway";
+    throw new InferenceRoutingError(
+      `Model ${model} is registered for provider "${provider}", which is not configured` +
+        (safeMode ? " (Conway inference is disabled in safe mode)" : "") +
+        ". Refusing to fall back to another provider.",
+    );
   }
 
   // Heuristic fallback (model not in registry yet)
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt)/i.test(model)) return "openai";
-  return "conway";
-
+  if (conwayAllowed) return "conway";
+  throw new InferenceRoutingError(
+    `No configured provider for model ${model}` +
+      (safeMode ? " (Conway inference is disabled in safe mode)" : "") +
+      ". Refusing to fall back to another provider.",
+  );
 }
 
 async function chatViaOpenAiCompatible(params: {
@@ -219,12 +251,14 @@ async function chatViaOpenAiCompatible(params: {
     },
     body: JSON.stringify(params.body),
     timeout: INFERENCE_TIMEOUT_MS,
+    nonIdempotent: true,
   });
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(
+    throw new InferenceHttpError(
       `Inference error (${params.backend}): ${resp.status}: ${text}`,
+      resp.status,
     );
   }
 
@@ -311,11 +345,12 @@ async function chatViaAnthropic(params: {
     },
     body: JSON.stringify(body),
     timeout: INFERENCE_TIMEOUT_MS,
+    nonIdempotent: true,
   });
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Inference error (anthropic): ${resp.status}: ${text}`);
+    throw new InferenceHttpError(`Inference error (anthropic): ${resp.status}: ${text}`, resp.status);
   }
 
   const data = await resp.json() as any;

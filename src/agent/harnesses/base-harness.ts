@@ -2,6 +2,7 @@ import { createLogger } from "../../observability/logger.js";
 import type { ChatMessage, InferenceToolCall } from "../../types.js";
 import type { TaskNode, TaskResult } from "../../orchestration/task-graph.js";
 import { LoopDetector } from "../loop-detector.js";
+import { isSafeModeActive, SAFE_MODE_HARNESS_TOOL_ALLOWLIST } from "../../safety/safe-mode.js";
 import type {
   AgentHarness,
   HarnessContext,
@@ -169,7 +170,10 @@ export abstract class BaseHarness implements AgentHarness {
           const tool = tools.find((entry) => entry.name === toolCall.function.name);
           let output: string;
 
-          if (!tool) {
+          if (isSafeModeActive() && !SAFE_MODE_HARNESS_TOOL_ALLOWLIST.has(toolCall.function.name)) {
+            output = `Blocked by safe mode: ${toolCall.function.name}`;
+            logger.warn(`[${this.id}] Safe mode refused tool: ${toolCall.function.name}`);
+          } else if (!tool) {
             output = `Error: Unknown tool '${toolCall.function.name}'. Available tools: ${tools.map((entry) => entry.name).join(", ")}`;
             logger.warn(`[${this.id}] Unknown tool: ${toolCall.function.name}`);
           } else {

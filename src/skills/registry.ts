@@ -21,6 +21,7 @@ import type {
   ConwayClient,
 } from "../types.js";
 import { parseSkillMd } from "./format.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 // Validation patterns to prevent injection via path/URL arguments
 const SKILL_NAME_RE = /^[a-zA-Z0-9-]+$/;
@@ -54,6 +55,7 @@ export async function installSkillFromGit(
   db: AutomatonDatabase,
   _conway: ConwayClient,
 ): Promise<Skill | null> {
+  assertSafeModeAllows("skills.installFromGit");
   // Validate inputs to prevent injection
   if (!SKILL_NAME_RE.test(name)) {
     throw new Error(`Invalid skill name: "${name}". Must match ${SKILL_NAME_RE.source}`);
@@ -102,6 +104,7 @@ export async function installSkillFromUrl(
   db: AutomatonDatabase,
   _conway: ConwayClient,
 ): Promise<Skill | null> {
+  assertSafeModeAllows("skills.installFromUrl");
   // Validate inputs to prevent injection
   if (!SKILL_NAME_RE.test(name)) {
     throw new Error(`Invalid skill name: "${name}". Must match ${SKILL_NAME_RE.source}`);
@@ -150,6 +153,7 @@ export async function createSkill(
   db: AutomatonDatabase,
   conway: ConwayClient,
 ): Promise<Skill> {
+  assertSafeModeAllows("skills.create");
   // Validate name to prevent path traversal/injection
   if (!SKILL_NAME_RE.test(name)) {
     throw new Error(`Invalid skill name: "${name}". Must match ${SKILL_NAME_RE.source}`);
@@ -202,6 +206,7 @@ export async function removeSkill(
   skillsDir: string,
   deleteFiles: boolean = false,
 ): Promise<void> {
+  assertSafeModeAllows("skills.remove");
   // Validate name to prevent path traversal/injection
   if (!SKILL_NAME_RE.test(name)) {
     throw new Error(`Invalid skill name: "${name}". Must match ${SKILL_NAME_RE.source}`);

@@ -14,6 +14,7 @@ import type { ProvisionResult } from "../types.js";
 import { ResilientHttpClient } from "../conway/http-client.js";
 import type { ChainIdentity } from "./chain.js";
 import { buildSiwsMessage, signSiwsMessage } from "./siws.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 const httpClient = new ResilientHttpClient();
 
@@ -65,6 +66,7 @@ export async function provision(
   apiUrl?: string,
   solanaIdentity?: ChainIdentity,
 ): Promise<ProvisionResult> {
+  assertSafeModeAllows("conway.provisionApiKey");
   const url = apiUrl || process.env.CONWAY_API_URL || DEFAULT_API_URL;
 
   // 1. Load wallet
@@ -175,6 +177,7 @@ export async function registerParent(
   creatorAddress: string,
   apiUrl?: string,
 ): Promise<void> {
+  assertSafeModeAllows("conway.registerParent");
   const url = apiUrl || process.env.CONWAY_API_URL || DEFAULT_API_URL;
   const apiKey = loadApiKeyFromConfig();
   if (!apiKey) {

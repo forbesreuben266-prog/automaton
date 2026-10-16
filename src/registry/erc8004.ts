@@ -32,6 +32,7 @@ import type {
 import { ulid } from "ulid";
 import { createLogger } from "../observability/logger.js";
 import type { ChainType } from "../identity/chain.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 const logger = createLogger("registry.erc8004");
 
 /**
@@ -231,6 +232,7 @@ export async function registerAgent(
   db: AutomatonDatabase,
   rpcUrl?: string,
 ): Promise<RegistryEntry> {
+  assertSafeModeAllows("erc8004.registerAgent");
   const contracts = CONTRACTS[network];
   const chain = contracts.chain;
   const rpc = resolveRpcUrl(rpcUrl);
@@ -319,6 +321,7 @@ export async function updateAgentURI(
   db: AutomatonDatabase,
   rpcUrl?: string,
 ): Promise<string> {
+  assertSafeModeAllows("erc8004.updateAgentURI");
   const contracts = CONTRACTS[network];
   const chain = contracts.chain;
 
@@ -380,6 +383,7 @@ export async function leaveFeedback(
   db: AutomatonDatabase,
   rpcUrl?: string,
 ): Promise<string> {
+  assertSafeModeAllows("erc8004.leaveFeedback");
   // Phase 3.2: Validate score range 1-5
   if (!Number.isInteger(score) || score < 1 || score > 5) {
     throw new Error(

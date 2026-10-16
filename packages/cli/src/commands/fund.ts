@@ -5,6 +5,7 @@
  */
 
 import { loadConfig } from "@conway/automaton/config.js";
+import { isSafeModeActive } from "@conway/automaton/safety/safe-mode.js";
 
 const args = process.argv.slice(3);
 const amount = args[0];
@@ -22,6 +23,11 @@ if (!amount) {
 const config = loadConfig();
 if (!config) {
   console.log("No automaton configuration found.");
+  process.exit(1);
+}
+
+if (isSafeModeActive(config)) {
+  console.log("Blocked by safe mode: credit transfers are disabled.");
   process.exit(1);
 }
 

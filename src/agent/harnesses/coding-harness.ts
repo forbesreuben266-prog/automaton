@@ -7,6 +7,7 @@ import { BaseHarness } from "./base-harness.js";
 import type { HarnessTool } from "../harness-types.js";
 import { getForbiddenCommandMatch, isForbiddenCommand } from "../policy-rules/command-safety.js";
 import { isSensitiveFile } from "../policy-rules/path-protection.js";
+import { assertSafeModeAllows } from "../../safety/safe-mode.js";
 
 const MAX_EXEC_TIMEOUT_MS = 60_000;
 const MAX_READ_SIZE = 20_000;
@@ -305,6 +306,7 @@ function formatExecResult(stdout: string, stderr: string): string {
 }
 
 function localExec(command: string, timeoutMs: number): Promise<string> {
+  assertSafeModeAllows("harness.localExec");
   return new Promise((resolve) => {
     execCb(command, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       if (error && !stdout && !stderr) {

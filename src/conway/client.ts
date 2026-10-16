@@ -7,6 +7,7 @@
  */
 
 import { execSync } from "child_process";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 import fs from "fs";
 import nodePath from "path";
 import type {
@@ -109,6 +110,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   const isLocal = !sandboxId;
 
   const execLocal = (command: string, timeout?: number): ExecResult => {
+    assertSafeModeAllows("conway.execLocal");
     try {
       const stdout = execSync(command, {
         timeout: timeout || 30_000,
@@ -130,6 +132,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     command: string,
     timeout?: number,
   ): Promise<ExecResult> => {
+    assertSafeModeAllows("conway.exec");
     if (isLocal) return execLocal(command, timeout);
 
     // Remote sandboxes default to / as cwd. Wrap commands to run from /root
@@ -223,6 +226,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   };
 
   const exposePort = async (port: number): Promise<PortInfo> => {
+    assertSafeModeAllows("conway.exposePort");
     if (isLocal) {
       return {
         port,
@@ -243,6 +247,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   };
 
   const removePort = async (port: number): Promise<void> => {
+    assertSafeModeAllows("conway.removePort");
     if (isLocal) return;
     await request("DELETE", `/v1/sandboxes/${sandboxId}/ports/${port}`);
   };
@@ -252,6 +257,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   const createSandbox = async (
     options: CreateSandboxOptions,
   ): Promise<SandboxInfo> => {
+    assertSafeModeAllows("conway.createSandbox");
     const result = await request("POST", "/v1/sandboxes", {
       name: options.name,
       vcpu: options.vcpu || 1,
@@ -272,6 +278,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   };
 
   const deleteSandbox = async (_targetId: string): Promise<void> => {
+    assertSafeModeAllows("conway.deleteSandbox");
     // Conway API no longer supports sandbox deletion.
     // Sandboxes are prepaid and non-refundable — this is a no-op.
   };
@@ -315,6 +322,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     amountCents: number,
     note?: string,
   ): Promise<CreditTransferResult> => {
+    assertSafeModeAllows("conway.transferCredits");
     const payload = {
       to_address: toAddress,
       amount_cents: amountCents,
@@ -374,6 +382,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     chainType?: ChainType;
     chainIdentity?: ChainIdentity;
   }): Promise<{ automaton: Record<string, unknown> }> => {
+    assertSafeModeAllows("conway.registerAutomaton");
     const {
       automatonId,
       automatonAddress,
@@ -477,6 +486,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     domain: string,
     years: number = 1,
   ): Promise<DomainRegistration> => {
+    assertSafeModeAllows("conway.registerDomain");
     const result = await request("POST", "/v1/domains/register", {
       domain,
       years,
@@ -512,6 +522,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     value: string,
     ttl?: number,
   ): Promise<DnsRecord> => {
+    assertSafeModeAllows("conway.addDnsRecord");
     const result = await request(
       "POST",
       `/v1/domains/${encodeURIComponent(domain)}/dns`,
@@ -530,6 +541,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     domain: string,
     recordId: string,
   ): Promise<void> => {
+    assertSafeModeAllows("conway.deleteDnsRecord");
     await request(
       "DELETE",
       `/v1/domains/${encodeURIComponent(domain)}/dns/${encodeURIComponent(recordId)}`,

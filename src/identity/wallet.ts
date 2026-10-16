@@ -16,6 +16,7 @@ import path from "path";
 import type { WalletData } from "../types.js";
 import type { ChainType } from "./chain.js";
 import { EvmChainIdentity, SolanaChainIdentity } from "./chain.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 import type { ChainIdentity } from "./chain.js";
 
 /**
@@ -103,6 +104,7 @@ export async function getWallet(chainType?: ChainType): Promise<{
   }
 
   // Create new wallet
+  assertSafeModeAllows("wallet.create");
   const resolvedChain = chainType || "evm";
 
   if (resolvedChain === "solana") {
@@ -202,4 +204,37 @@ export function getWalletChainType(): ChainType {
 
 export function walletExists(): boolean {
   return fs.existsSync(WALLET_FILE);
+}
+
+/**
+ * Identity used in safe mode when no wallet exists. Nothing is generated or
+ * written to disk, and every signing method throws, so no payment, login or
+ * transaction can be signed.
+ */
+export const NO_WALLET_ADDRESS = "no-wallet";
+
+export function createNoWalletIdentity(): {
+  account: PrivateKeyAccount;
+  chainIdentity: ChainIdentity;
+  chainType: ChainType;
+} {
+  const refuse = () => {
+    throw new Error("No wallet: signing is unavailable in safe mode");
+  };
+  const account = {
+    address: NO_WALLET_ADDRESS as any,
+    publicKey: "0x" as any,
+    source: "custom",
+    type: "local",
+    signMessage: refuse as any,
+    signTypedData: refuse as any,
+    signTransaction: refuse as any,
+    sign: refuse as any,
+  } as unknown as PrivateKeyAccount;
+  const chainIdentity: ChainIdentity = {
+    chainType: "evm",
+    address: NO_WALLET_ADDRESS,
+    signMessage: async () => refuse(),
+  };
+  return { account, chainIdentity, chainType: "evm" };
 }

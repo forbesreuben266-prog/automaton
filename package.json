@@ -17,6 +17,10 @@
     "./state/database.js": {
       "types": "./dist/state/database.d.ts",
       "default": "./dist/state/database.js"
+    },
+    "./safety/safe-mode.js": {
+      "types": "./dist/safety/safe-mode.d.ts",
+      "default": "./dist/safety/safe-mode.js"
     }
   },
   "bin": {

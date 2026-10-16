@@ -8,6 +8,7 @@
 import type { SocialClientInterface, ParentChildMessage } from "../types.js";
 import { MESSAGE_LIMITS } from "../types.js";
 import { ulid } from "ulid";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 /**
  * Send a message to a child via the social relay.
@@ -18,6 +19,7 @@ export async function sendToChild(
   content: string,
   type: string = "parent_message",
 ): Promise<{ id: string }> {
+  assertSafeModeAllows("replication.sendToChild");
   if (content.length > MESSAGE_LIMITS.maxContentLength) {
     throw new Error(`Message too long: ${content.length} bytes (max ${MESSAGE_LIMITS.maxContentLength})`);
   }
@@ -40,6 +42,7 @@ export async function sendToParent(
   content: string,
   type: string = "child_message",
 ): Promise<{ id: string }> {
+  assertSafeModeAllows("replication.sendToParent");
   if (content.length > MESSAGE_LIMITS.maxContentLength) {
     throw new Error(`Message too long: ${content.length} bytes (max ${MESSAGE_LIMITS.maxContentLength})`);
   }

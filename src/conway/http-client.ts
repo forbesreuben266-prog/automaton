@@ -63,6 +63,12 @@ export class ResilientHttpClient {
       timeout?: number;
       idempotencyKey?: string;
       retries?: number;
+      /**
+       * Billable, non-idempotent request (e.g. inference). Never retried:
+       * after any response or network failure the provider may already have
+       * processed and billed it, and providers don't document 429s as free.
+       */
+      nonIdempotent?: boolean;
     },
   ): Promise<Response> {
     assertSecureUrl(url, this.config.allowHttpOnLoopback);
@@ -100,7 +106,8 @@ export class ResilientHttpClient {
           if (this.consecutiveFailures >= this.config.circuitBreakerThreshold) {
             this.circuitOpenUntil = Date.now() + this.config.circuitBreakerResetMs;
           }
-          if (attempt < maxRetries) {
+          const mayRetry = !opts.nonIdempotent;
+          if (mayRetry && attempt < maxRetries) {
             await this.backoff(attempt);
             continue;
           }
@@ -119,7 +126,7 @@ export class ResilientHttpClient {
           this.circuitOpenUntil =
             Date.now() + this.config.circuitBreakerResetMs;
         }
-        if (attempt === maxRetries) throw error;
+        if (opts.nonIdempotent || attempt === maxRetries) throw error;
         await this.backoff(attempt);
       }
     }

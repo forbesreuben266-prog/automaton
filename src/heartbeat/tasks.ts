@@ -23,6 +23,7 @@ import { getMetrics } from "../observability/metrics.js";
 import { AlertEngine, createDefaultAlertRules } from "../observability/alerts.js";
 import { metricsInsertSnapshot, metricsPruneOld } from "../state/database.js";
 import { ulid } from "ulid";
+import { isSafeModeActive } from "../safety/safe-mode.js";
 
 const logger = createLogger("heartbeat.tasks");
 
@@ -146,6 +147,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   check_usdc_balance: async (ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    if (isSafeModeActive(taskCtx.config)) return { shouldWake: false };
     // Use ctx.usdcBalance instead of calling getUsdcBalance()
     const balance = ctx.usdcBalance;
     const credits = ctx.creditBalance;
@@ -199,6 +201,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   check_social_inbox: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    if (isSafeModeActive(taskCtx.config)) return { shouldWake: false };
     if (!taskCtx.social) return { shouldWake: false };
 
     // If we've recently encountered an error polling the inbox, back off.
@@ -274,6 +277,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   check_for_updates: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    if (isSafeModeActive(taskCtx.config)) return { shouldWake: false };
     try {
       const { checkUpstream, getRepoInfo } = await import("../self-mod/upstream.js");
       const repo = getRepoInfo();

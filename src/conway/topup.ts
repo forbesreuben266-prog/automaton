@@ -17,6 +17,7 @@ import type { PrivateKeyAccount, Address } from "viem";
 import { x402Fetch, getUsdcBalance } from "./x402.js";
 import { createLogger } from "../observability/logger.js";
 import type { ChainType } from "../identity/chain.js";
+import { assertSafeModeAllows, isSafeModeActive } from "../safety/safe-mode.js";
 
 const logger = createLogger("topup");
 
@@ -42,6 +43,7 @@ export async function topupCredits(
   amountUsd: number,
   recipientAddress?: Address,
 ): Promise<TopupResult> {
+  assertSafeModeAllows("topup.topupCredits");
   const address = recipientAddress || account.address;
   const url = `${apiUrl}/pay/${amountUsd}/${address}`;
 
@@ -85,6 +87,11 @@ export async function topupForSandbox(params: {
   chainType?: ChainType;
 }): Promise<TopupResult | null> {
   const { apiUrl, account, error, chainType } = params;
+
+  if (isSafeModeActive()) {
+    logger.warn("Sandbox topup skipped: blocked by safe mode");
+    return null;
+  }
 
   // Solana wallets cannot use x402 for topup (EVM-only payment protocol)
   if (chainType === "solana") {
@@ -153,6 +160,11 @@ export async function bootstrapTopup(params: {
   chainType?: ChainType;
 }): Promise<TopupResult | null> {
   const { apiUrl, account, creditsCents, creditThresholdCents = 500, chainType } = params;
+
+  if (isSafeModeActive()) {
+    logger.warn("Bootstrap topup skipped: blocked by safe mode");
+    return null;
+  }
 
   // Solana wallets cannot use x402 for topup (EVM-only payment protocol)
   if (chainType === "solana") {

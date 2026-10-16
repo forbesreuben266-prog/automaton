@@ -24,7 +24,8 @@ import type {
   InputSource,
   ModelStrategyConfig,
 } from "../types.js";
-import { DEFAULT_MODEL_STRATEGY_CONFIG } from "../types.js";
+import { DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_TREASURY_POLICY } from "../types.js";
+import { activateSafeMode, isSafeModeActive } from "../safety/safe-mode.js";
 import type { PolicyEngine } from "./policy-engine.js";
 import { buildSystemPrompt, buildWakeupPrompt } from "./system-prompt.js";
 import { buildContextMessages, trimContext } from "./context.js";
@@ -65,6 +66,7 @@ import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
+import { filterToolsForMode } from "./tools.js";
 
 const logger = createLogger("loop");
 const MAX_TOOL_CALLS_PER_TURN = 10;
@@ -96,9 +98,12 @@ export async function runAgentLoop(
   const { identity, config, db, conway, inference, social, skills, policyEngine, spendTracker, onStateChange, onTurnComplete, ollamaBaseUrl } =
     options;
 
+  const safeMode = isSafeModeActive(config);
+  if (safeMode) activateSafeMode("agent loop");
+
   const builtinTools = createBuiltinTools(identity.sandboxId);
   const installedTools = loadInstalledTools(db);
-  const tools = [...builtinTools, ...installedTools];
+  const tools = filterToolsForMode([...builtinTools, ...installedTools], config);
   const toolContext: ToolContext = {
     identity,
     config,
@@ -112,6 +117,7 @@ export async function runAgentLoop(
   const modelStrategyConfig: ModelStrategyConfig = {
     ...DEFAULT_MODEL_STRATEGY_CONFIG,
     ...(config.modelStrategy ?? {}),
+    dailyBudgetCents: (config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY).maxInferenceDailyCents,
   };
   const modelRegistry = new ModelRegistry(db.raw);
   modelRegistry.initialize();
@@ -129,7 +135,9 @@ export async function runAgentLoop(
   let orchestrator: Orchestrator | undefined;
   let workerPool: LocalWorkerPool | undefined;
 
-  if (hasTable(db.raw, "goals")) {
+  // Safe mode: no orchestrator and no workers. The orchestrator can fund and
+  // spawn children, and worker harnesses carry their own shell tools.
+  if (!safeMode && hasTable(db.raw, "goals")) {
     try {
       planModeController = new PlanModeController(db.raw);
 
@@ -150,8 +158,11 @@ export async function runAgentLoop(
         process.env.CONWAY_API_KEY = config.conwayApiKey;
       }
       // If no OpenAI key is set but Conway key is available, use Conway as
-      // the OpenAI provider (Conway Compute is OpenAI API-compatible).
-      if (!process.env.OPENAI_API_KEY && config.conwayApiKey) {
+      // the OpenAI provider (Conway Compute is OpenAI API-compatible) — but
+      // only for Conway-only setups. If another direct provider is
+      // configured, never silently re-route to Conway billing.
+      const hasOtherDirectProvider = !!(config.anthropicApiKey || process.env.ANTHROPIC_API_KEY || ollamaBaseUrl);
+      if (!process.env.OPENAI_API_KEY && config.conwayApiKey && !hasOtherDirectProvider) {
         process.env.OPENAI_API_KEY = config.conwayApiKey;
         process.env.OPENAI_BASE_URL = `${config.conwayApiUrl}/v1`;
       }
@@ -234,7 +245,7 @@ export async function runAgentLoop(
               });
 
               const lifecycle = new ChildLifecycle(db.raw);
-              const child = await spawnChild(conway, identity, db, genesis, lifecycle);
+              const child = await spawnChild(conway, identity, db, genesis, lifecycle, { maxChildren: config.maxChildren });
 
               return {
                 address: child.address,
@@ -279,7 +290,7 @@ export async function runAgentLoop(
                           specialization: `${retryRole}: ${task.title}`,
                         });
                         const retryLifecycle = new RetryLifecycle(db.raw);
-                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle);
+                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle, { maxChildren: config.maxChildren });
                         return {
                           address: child.address,
                           name: child.name,
@@ -358,7 +369,7 @@ export async function runAgentLoop(
   onStateChange?.("waking");
 
   // Get financial state
-  let financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+  let financial = await readFinancialState(safeMode, conway, identity.address, db, config.chainType || identity.chainType || "evm");
 
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
@@ -375,7 +386,7 @@ export async function runAgentLoop(
   db.setAgentState("running");
   onStateChange?.("running");
 
-  log(config, `[WAKE UP] ${config.name} is alive. Credits: $${(financial.creditsCents / 100).toFixed(2)}`);
+  log(config, `[WAKE UP] ${config.name} is alive. Credits: ${safeMode ? "n/a (safe mode)" : `$${(financial.creditsCents / 100).toFixed(2)}`}`);
 
   // ─── The Loop ──────────────────────────────────────────────
 
@@ -408,7 +419,8 @@ export async function runAgentLoop(
 
       // Check for unprocessed inbox messages using the state machine:
       // received → in_progress (claim) → processed (on success) or received/failed (on failure)
-      if (!pendingInput) {
+      // Safe mode: inbox messages are external input and are never processed.
+      if (!pendingInput && !safeMode) {
         claimedMessages = claimInboxMessages(db.raw, 10);
         if (claimedMessages.length > 0) {
           const formatted = claimedMessages
@@ -426,12 +438,14 @@ export async function runAgentLoop(
       }
 
       // Refresh financial state periodically
-      financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+      financial = await readFinancialState(safeMode, conway, identity.address, db, config.chainType || identity.chainType || "evm");
 
       // Check survival tier
       // api_unreachable: creditsCents === -1 means API failed with no cache.
       // Do NOT kill the agent; continue in low-compute mode and retry next tick.
-      if (financial.creditsCents === -1) {
+      if (safeMode) {
+        // Safe mode: no survival tiers, no top-ups, no balance-driven behaviour.
+      } else if (financial.creditsCents === -1) {
         log(config, "[API_UNREACHABLE] Balance API unreachable, continuing in low-compute mode.");
         inference.setLowComputeMode(true);
       } else {
@@ -461,7 +475,7 @@ export async function runAgentLoop(
                 log(config, `[AUTO-TOPUP] Bought $${topupResult.amountUsd} credits from USDC mid-loop`);
                 // Re-fetch financial state after topup so the rest of
                 // the turn sees the updated balance.
-                financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+                financial = await readFinancialState(safeMode, conway, identity.address, db, config.chainType || identity.chainType || "evm");
               }
             } catch (err: any) {
               logger.warn(`Inline auto-topup failed: ${err.message}`);
@@ -596,7 +610,7 @@ export async function runAgentLoop(
       pendingInput = undefined;
 
       // ── Inference Call (via router when available) ──
-      const survivalTier = getSurvivalTier(financial.creditsCents);
+      const survivalTier = safeMode ? "normal" : getSurvivalTier(financial.creditsCents);
       log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
@@ -942,6 +956,24 @@ export async function runAgentLoop(
 // cause the automaton to believe it has $0 and kill itself.
 let _lastKnownCredits = 0;
 let _lastKnownUsdc = 0;
+
+/**
+ * Safe mode never looks up balances (Conway API, Base RPC). The -1 sentinel
+ * is the loop's existing "balance unknown" value, which skips the survival
+ * tier logic and every automatic top-up branch.
+ */
+async function readFinancialState(
+  safeMode: boolean,
+  conway: ConwayClient,
+  address: string,
+  db?: AutomatonDatabase,
+  chainType?: string,
+): Promise<FinancialState> {
+  if (safeMode) {
+    return { creditsCents: -1, usdcBalance: -1, lastChecked: new Date().toISOString() };
+  }
+  return getFinancialState(conway, address, db, chainType);
+}
 
 async function getFinancialState(
   conway: ConwayClient,

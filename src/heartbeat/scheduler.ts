@@ -28,6 +28,7 @@ import {
   insertWakeEvent,
 } from "../state/database.js";
 import { createLogger } from "../observability/logger.js";
+import { isHeartbeatTaskAllowedInSafeMode, isSafeModeActive } from "../safety/safe-mode.js";
 
 type DatabaseType = BetterSqlite3.Database;
 const logger = createLogger("heartbeat.scheduler");
@@ -174,6 +175,11 @@ export class DurableScheduler {
   async executeTask(taskName: string, ctx: TickContext): Promise<void> {
     const taskFn = this.tasks.get(taskName);
     if (!taskFn) return;
+
+    if (isSafeModeActive(this.legacyContext.config) && !isHeartbeatTaskAllowedInSafeMode(taskName)) {
+      logger.warn(`Safe mode: heartbeat task "${taskName}" not run`);
+      return;
+    }
 
     const schedule = getHeartbeatSchedule(this.db).find(
       (r) => r.taskName === taskName,

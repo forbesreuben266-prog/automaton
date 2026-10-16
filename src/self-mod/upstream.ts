@@ -7,6 +7,7 @@
  */
 
 import { execFileSync } from "child_process";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 
 const REPO_ROOT = process.cwd();
 
@@ -14,6 +15,7 @@ const REPO_ROOT = process.cwd();
  * Run a git command using execFileSync with argument array (no shell interpolation).
  */
 function git(args: string[]): string {
+  assertSafeModeAllows(`upstream.git ${args[0] ?? ""}`);
   return execFileSync("git", args, {
     cwd: REPO_ROOT,
     encoding: "utf-8",

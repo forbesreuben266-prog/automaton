@@ -25,6 +25,7 @@ import { getActiveSkillInstructions } from "../skills/loader.js";
 import { getLineageSummary } from "../replication/lineage.js";
 import { sanitizeInput } from "./injection-defense.js";
 import { loadCurrentSoul } from "../soul/model.js";
+import { isSafeModeActive, SAFE_MODE_CHARTER, SAFE_MODE_CONSTITUTION } from "../safety/safe-mode.js";
 
 function getCoreRules(chainType?: string): string {
   const usdcNetwork = chainType === "solana" ? "USDC on Solana" : "USDC on Base";
@@ -562,6 +563,10 @@ export function buildSystemPrompt(params: {
   skills?: Skill[];
   isFirstRun: boolean;
 }): string {
+  if (isSafeModeActive(params.config)) {
+    return buildSafeModeSystemPrompt(params.config, params.tools);
+  }
+
   const {
     identity,
     config,
@@ -758,6 +763,29 @@ ${orchestratorStatus}
 }
 
 /**
+ * Safe-mode system prompt: research charter, constitution, creator's brief
+ * and the (already filtered) tool list. Survival, revenue, self-modification,
+ * replication, SOUL/worklog and skill layers are deliberately left out.
+ */
+function buildSafeModeSystemPrompt(config: AutomatonConfig, tools: AutomatonTool[]): string {
+  const sections: string[] = [SAFE_MODE_CHARTER];
+
+  sections.push(`--- CONSTITUTION ---\n${SAFE_MODE_CONSTITUTION}\n--- END CONSTITUTION ---`);
+
+  sections.push(`Your name is ${config.name}. Your creator's address is ${config.creatorAddress}.`);
+
+  if (config.genesisPrompt) {
+    const sanitized = sanitizeInput(config.genesisPrompt, "genesis", "skill_instruction");
+    sections.push(`## Research Brief [FROM YOUR CREATOR]\n${sanitized.content.slice(0, 2000)}\n## End Brief`);
+  }
+
+  const toolDescriptions = tools.map((t) => `- ${t.name} (${t.category}): ${t.description}`).join("\n");
+  sections.push(`--- AVAILABLE TOOLS ---\n${toolDescriptions}\n--- END TOOLS ---`);
+
+  return sections.join("\n\n");
+}
+
+/**
  * Load SOUL.md from the automaton's state directory.
  */
 function loadSoulMd(): string | null {
@@ -800,6 +828,12 @@ export function buildWakeupPrompt(params: {
 }): string {
   const { identity, config, financial, db } = params;
   const turnCount = db.getTurnCount();
+
+  if (isSafeModeActive(config)) {
+    return turnCount === 0
+      ? "Safe-mode supervised session starting. Read your research brief, use only the tools listed, record what you learn with your memory tools, then call sleep."
+      : `Safe-mode supervised session resuming after ${turnCount} turns. Review your memory and research brief, continue the research task, then call sleep.`;
+  }
 
   const chainType = config.chainType || "evm";
   const usdcNetwork = chainType === "solana" ? "Solana" : "Base";

@@ -21,8 +21,43 @@ import type {
 import { ModelRegistry } from "./registry.js";
 import { InferenceBudgetTracker } from "./budget.js";
 import { DEFAULT_ROUTING_MATRIX, TASK_TIMEOUTS } from "./types.js";
+import { isSafeModeActive } from "../safety/safe-mode.js";
 
 type Database = BetterSqlite3.Database;
+
+/** Errors raised before any request reached a provider. */
+const NOT_SENT_ERRORS = new Set(["InferenceRoutingError", "SafeModeBlockedError", "CircuitOpenError"]);
+
+/**
+ * Upper bound on a call's cost. Input is the UTF-8 size of everything sent
+ * (messages, tool calls, tool schemas): byte-level BPE tokenizers emit at
+ * most one token per byte, so base64, CJK and emoji can't be under-counted
+ * the way a characters/4 guess is. Output assumes the full max_tokens.
+ */
+export function estimateCostCentsUpperBound(
+  messages: unknown[],
+  tools: unknown[] | undefined,
+  maxTokens: number,
+  model: Pick<ModelEntry, "costPer1kInput" | "costPer1kOutput">,
+): number {
+  const inputTokens =
+    Buffer.byteLength(JSON.stringify(messages), "utf8") +
+    Buffer.byteLength(JSON.stringify(tools ?? []), "utf8");
+  return Math.ceil(
+    (inputTokens / 1000) * model.costPer1kInput / 100 +
+    (maxTokens / 1000) * model.costPer1kOutput / 100,
+  );
+}
+
+/**
+ * Could the provider have billed this failed call? Providers don't document
+ * which error responses are free, so any failure after the request was sent
+ * (any HTTP status, timeout or network error) counts as billed. Only errors
+ * raised before sending are free.
+ */
+export function mayHaveBeenBilled(error: any): boolean {
+  return !NOT_SENT_ERRORS.has(error?.name);
+}
 
 export class InferenceRouter {
   private db: Database;
@@ -61,12 +96,26 @@ export class InferenceRouter {
       };
     }
 
-    // 2. Estimate cost and check budget
-    const estimatedTokens = messages.reduce((sum, m) => sum + (m.content?.length || 0) / 4, 0);
-    const estimatedCostCents = Math.ceil(
-      (estimatedTokens / 1000) * model.costPer1kInput / 100 +
-      (request.maxTokens || 1000) / 1000 * model.costPer1kOutput / 100,
-    );
+    // 1b. Safe mode: spend limits are computed from registry prices, so a
+    // remote model with no price would never trip them. Refuse it.
+    const isUnpriced = model.costPer1kInput <= 0 && model.costPer1kOutput <= 0;
+    if (isSafeModeActive() && isUnpriced && model.provider !== "ollama") {
+      return {
+        content: `Blocked by safe mode: model ${model.modelId} (${model.provider}) has no price, so spend limits cannot be enforced`,
+        model: model.modelId,
+        provider: model.provider,
+        inputTokens: 0,
+        outputTokens: 0,
+        costCents: 0,
+        latencyMs: 0,
+        finishReason: "budget_exceeded",
+      };
+    }
+
+    // 2. Estimate cost (upper bound) and check budget
+    const preference = this.getPreference(tier, taskType);
+    const maxTokens = request.maxTokens || preference?.maxTokens || model.maxTokens;
+    const estimatedCostCents = estimateCostCentsUpperBound(messages, tools, maxTokens, model);
 
     const budgetCheck = this.budget.checkBudget(estimatedCostCents, model.modelId);
     if (!budgetCheck.allowed) {
@@ -103,8 +152,6 @@ export class InferenceRouter {
     const transformedMessages = this.transformMessagesForProvider(messages, model.provider);
 
     // 5. Build inference options
-    const preference = this.getPreference(tier, taskType);
-    const maxTokens = request.maxTokens || preference?.maxTokens || model.maxTokens;
     const timeout = TASK_TIMEOUTS[taskType] || 120_000;
 
     const inferenceOptions: any = {
@@ -127,6 +174,24 @@ export class InferenceRouter {
       }
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
+      // The provider may have processed (and billed) this request even though
+      // we got no usable response. Record the worst-case estimate so budgets
+      // stay conservative. Errors raised before sending are not recorded.
+      if (mayHaveBeenBilled(error)) {
+        this.budget.recordCost({
+          sessionId,
+          turnId: turnId || null,
+          model: model.modelId,
+          provider: model.provider,
+          inputTokens: 0,
+          outputTokens: 0,
+          costCents: estimatedCostCents,
+          latencyMs,
+          tier,
+          taskType,
+          cacheHit: false,
+        });
+      }
       // If fallback is enabled, try next candidate
       if (error.name === "AbortError") {
         return {

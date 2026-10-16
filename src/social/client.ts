@@ -15,6 +15,7 @@ import { ResilientHttpClient } from "../conway/http-client.js";
 import { signSendPayload, signPollPayload, MESSAGE_LIMITS } from "./signing.js";
 import { validateRelayUrl, validateMessage } from "./validation.js";
 import { createLogger } from "../observability/logger.js";
+import { assertSafeModeAllows } from "../safety/safe-mode.js";
 const logger = createLogger("social");
 
 // Request timeout for all fetch calls (30 seconds)
@@ -81,6 +82,7 @@ export function createSocialClient(
       content: string,
       replyTo?: string,
     ): Promise<{ id: string }> => {
+      assertSafeModeAllows("social.send");
       // Phase 3.2: Rate limit check
       checkRateLimit();
 
@@ -120,6 +122,7 @@ export function createSocialClient(
       cursor?: string,
       limit?: number,
     ): Promise<{ messages: InboxMessage[]; nextCursor?: string }> => {
+      assertSafeModeAllows("social.poll");
       // Phase 3.2: Use shared signing module
       const pollAuth = await signPollPayload(account);
 
@@ -180,6 +183,7 @@ export function createSocialClient(
     },
 
     unreadCount: async (): Promise<number> => {
+      assertSafeModeAllows("social.unreadCount");
       // Phase 3.2: Use shared signing module
       const pollAuth = await signPollPayload(account);
 

@@ -16,6 +16,7 @@ import type {
 import { getSurvivalTier } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
 import { createLogger } from "../observability/logger.js";
+import { isSafeModeActive } from "../safety/safe-mode.js";
 
 type DatabaseType = BetterSqlite3.Database;
 const logger = createLogger("heartbeat.tick");
@@ -46,6 +47,21 @@ export async function buildTickContext(
 ): Promise<TickContext> {
   const tickId = generateTickId();
   const startedAt = new Date();
+
+  // Safe mode: no balance lookups (Conway API, Base RPC) and no survival
+  // pressure. Money-related tasks are refused by the scheduler anyway.
+  if (isSafeModeActive()) {
+    return {
+      tickId,
+      startedAt,
+      creditBalance: 0,
+      usdcBalance: 0,
+      survivalTier: "normal",
+      lowComputeMultiplier: config.lowComputeMultiplier ?? 4,
+      config,
+      db,
+    };
+  }
 
   // Fetch balances ONCE
   let creditBalance = 0;
