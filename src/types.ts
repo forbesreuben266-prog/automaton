@@ -1246,6 +1246,17 @@ export interface ModelStrategyConfig {
   anthropicApiVersion: string; // default: "2023-06-01"
   /** Daily inference cap in cents, fed from treasuryPolicy.maxInferenceDailyCents. */
   dailyBudgetCents?: number;
+  /**
+   * Explicit free-model policy: local (Ollama) model IDs that may be used
+   * with zero pricing. Anything not listed must have a trusted price.
+   */
+  freeModels?: string[];
+  /**
+   * Explicit provider fallback mappings for the orchestrator/worker client
+   * ({ fromProvider, fromModel, toProvider, toModel }[]). Empty by default:
+   * no fallback. Ignored in safe mode. Validated; invalid entries refuse.
+   */
+  providerFallbacks?: unknown;
   /** Set when the model configuration is ambiguous; the router refuses all calls. */
   modelConfigError?: string;
 }

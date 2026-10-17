@@ -147,7 +147,8 @@ describe("startup refuses invalid caps or a sandboxId in safe mode", () => {
     };
     for (const [k, v] of Object.entries(overrides)) if (v === undefined) delete (config as any)[k];
     fs.mkdirSync(path.join(home, ".automaton"), { recursive: true });
-    fs.writeFileSync(path.join(home, ".automaton", "automaton.json"), JSON.stringify(config));
+    fs.writeFileSync(path.join(home, ".automaton", "automaton.json"), JSON.stringify(config), { mode: 0o600 });
+    fs.chmodSync(path.join(home, ".automaton", "automaton.json"), 0o600);
     vi.resetModules();
     vi.doMock("../safety/instance-lock.js", () => ({ acquireInstanceLock: lockSpy, InstanceLockError: Error }));
     const { run } = await import("../index.js");

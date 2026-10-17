@@ -354,6 +354,42 @@ export class ProviderRegistry {
     return results;
   }
 
+  /**
+   * The configured model for a tier: exactly the tier's preferred provider
+   * and its model for that tier. Throws (no substitution) if either is
+   * missing or the provider is disabled.
+   */
+  resolveConfiguredModel(tier: ModelTier): ResolvedModel {
+    this.assertEmergencyPolicy();
+    const providerId = this.tierDefaults[tier]?.preferredProvider;
+    const provider = this.providers.find((candidate) => candidate.id === providerId);
+    if (!provider) {
+      throw new Error(`Configured provider '${providerId}' for tier '${tier}' is not registered`);
+    }
+    if (!this.isProviderActive(provider)) {
+      throw new Error(`Configured provider '${providerId}' for tier '${tier}' is disabled`);
+    }
+    const model = provider.models.find((candidate) => candidate.tier === tier);
+    if (!model) {
+      throw new Error(`Configured provider '${providerId}' has no model for tier '${tier}'`);
+    }
+    return this.buildResolvedModel(provider, model);
+  }
+
+  /** The configured provider/model IDs for a tier, whether or not currently active. */
+  getConfiguredModelId(tier: ModelTier): { providerId: string; modelId: string } | null {
+    const providerId = this.tierDefaults[tier]?.preferredProvider;
+    const provider = this.providers.find((candidate) => candidate.id === providerId);
+    const model = provider?.models.find((candidate) => candidate.tier === tier);
+    return provider && model ? { providerId: provider.id, modelId: model.id } : null;
+  }
+
+  /** Whether a provider/model pair is registered (regardless of current availability). */
+  hasModel(providerId: string, modelId: string): boolean {
+    const provider = this.providers.find((candidate) => candidate.id === providerId);
+    return !!provider?.models.some((candidate) => candidate.id === modelId);
+  }
+
   getModel(providerId: string, modelId: string): ResolvedModel {
     const provider = this.providers.find((candidate) => candidate.id === providerId);
     if (!provider) {
@@ -434,6 +470,8 @@ export class ProviderRegistry {
     const client = new OpenAI({
       apiKey,
       baseURL: provider.baseUrl,
+      // No hidden SDK retries: each attempt must pass the spend gate.
+      maxRetries: 0,
     });
 
     return {

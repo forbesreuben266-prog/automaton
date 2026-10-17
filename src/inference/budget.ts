@@ -24,9 +24,35 @@ export class InferenceBudgetTracker {
   private db: Database;
   readonly config: ModelStrategyConfig;
 
+  /** In-flight calls' worst-case estimates, counted until their cost is recorded. */
+  private readonly reservations = new Map<number, number>();
+  private nextReservationId = 1;
+
   constructor(db: Database, config: ModelStrategyConfig) {
     this.db = db;
     this.config = config;
+  }
+
+  /**
+   * Reserve an authorized call's estimate so concurrent calls (main loop,
+   * orchestrator, workers) can't all pass the aggregate checks before any of
+   * them records its cost. Release only after recording the actual or
+   * worst-case cost.
+   */
+  reserve(cents: number): number {
+    const id = this.nextReservationId++;
+    this.reservations.set(id, Number.isFinite(cents) && cents > 0 ? cents : 0);
+    return id;
+  }
+
+  release(id: number): void {
+    this.reservations.delete(id);
+  }
+
+  getReservedCost(): number {
+    let total = 0;
+    for (const cents of this.reservations.values()) total += cents;
+    return total;
   }
 
   /**
@@ -60,10 +86,10 @@ export class InferenceBudgetTracker {
     // Hourly budget check
     if (this.config.hourlyBudgetCents > 0) {
       const hourlyCost = this.getHourlyCost();
-      if (hourlyCost + estimatedCostCents > this.config.hourlyBudgetCents) {
+      if (hourlyCost + this.getReservedCost() + estimatedCostCents > this.config.hourlyBudgetCents) {
         return {
           allowed: false,
-          reason: `Hourly budget exhausted: ${hourlyCost}c spent + ${estimatedCostCents}c estimated > ${this.config.hourlyBudgetCents}c limit`,
+          reason: `Hourly budget exhausted: ${hourlyCost}c spent + ${this.getReservedCost()}c reserved + ${estimatedCostCents}c estimated > ${this.config.hourlyBudgetCents}c limit`,
         };
       }
     }
@@ -77,10 +103,10 @@ export class InferenceBudgetTracker {
         return { allowed: false, reason: `Invalid daily inference budget: ${String(dailyCap)}` };
       }
       const dailyCost = this.getDailyCost();
-      if (dailyCost + estimatedCostCents > dailyCap) {
+      if (dailyCost + this.getReservedCost() + estimatedCostCents > dailyCap) {
         return {
           allowed: false,
-          reason: `Daily inference budget exhausted: ${dailyCost}c spent + ${estimatedCostCents}c estimated > ${dailyCap}c limit`,
+          reason: `Daily inference budget exhausted: ${dailyCost}c spent + ${this.getReservedCost()}c reserved + ${estimatedCostCents}c estimated > ${dailyCap}c limit`,
         };
       }
     }

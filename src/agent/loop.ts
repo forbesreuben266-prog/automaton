@@ -65,6 +65,8 @@ import { HarnessRegistry } from "./harness-registry.js";
 import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
+import { BudgetSpendGate, effectiveFreeModels } from "../inference/spend-gate.js";
+import { normalizeFreeModels } from "../inference/pricing-policy.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
 import { filterToolsForMode } from "./tools.js";
 
@@ -119,6 +121,14 @@ export async function runAgentLoop(
     ...(config.modelStrategy ?? {}),
     dailyBudgetCents: (config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY).maxInferenceDailyCents,
   };
+  // Zero-priced models are only genuinely free on a local (loopback) Ollama
+  // endpoint. Otherwise drop the free-model policy, so they need real prices.
+  const allowedFreeModels = effectiveFreeModels(modelStrategyConfig.freeModels, ollamaBaseUrl);
+  if (normalizeFreeModels(modelStrategyConfig.freeModels).length > allowedFreeModels.length) {
+    logger.warn("freeModels ignored: zero-priced models require a loopback Ollama endpoint");
+  }
+  modelStrategyConfig.freeModels = allowedFreeModels;
+
   // The top-level inferenceModel and modelStrategy.inferenceModel must agree;
   // if they don't, refuse rather than guess which one was meant.
   if (config.inferenceModel && config.inferenceModel !== modelStrategyConfig.inferenceModel) {
@@ -186,7 +196,16 @@ export async function runAgentLoop(
         registry.overrideBaseUrl("openai", process.env.OPENAI_BASE_URL);
       }
 
-      const unifiedInference = new UnifiedInferenceClient(registry);
+      // Orchestrator and workers share the main loop's budget: every attempt
+      // is authorized and recorded by the spend gate.
+      const spendGate = new BudgetSpendGate(budgetTracker, modelRegistry, {
+        sessionId: db.getKV("session_id") || "default",
+        taskType: "planning",
+        tier: "normal",
+      });
+      const unifiedInference = new UnifiedInferenceClient(registry, spendGate, {
+        fallbackPolicy: config.modelStrategy?.providerFallbacks,
+      });
       const agentTracker = new SimpleAgentTracker(db);
       const funding = new SimpleFundingProtocol(conway, identity, db);
       const messaging = new ColonyMessaging(

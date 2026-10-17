@@ -5,6 +5,7 @@ import {
 } from "../../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../../inference/inference-client.js";
 import type { ChatMessage } from "../../types.js";
+import type { InferenceSpendGate } from "../../inference/spend-gate.js";
 
 const mockState = vi.hoisted(() => {
   const queue: Array<(payload: any) => unknown | Promise<unknown>> = [];
@@ -46,8 +47,18 @@ function createDefaultRegistry(): ProviderRegistry {
   return ProviderRegistry.fromConfig("/tmp/definitely-missing-provider-config.json");
 }
 
-function createClient(registry = createDefaultRegistry()): UnifiedInferenceClient {
-  return new UnifiedInferenceClient(registry);
+// These tests cover retry/failover mechanics, not budgets: use an explicit
+// allow-all test gate (production always passes a BudgetSpendGate).
+const ALLOW_ALL_TEST_GATE: InferenceSpendGate = {
+  authorize: () => ({ allowed: true, estimatedCostCents: 0, costPer1kInput: 0, costPer1kOutput: 0, reservationId: 0 }),
+  record: () => {},
+};
+
+// Explicit fallback policy for the tests that exercise provider failover.
+const OPENAI_TO_GROQ = [{ fromProvider: "openai", fromModel: "gpt-4.1", toProvider: "groq", toModel: "llama-3.3-70b-versatile" }];
+
+function createClient(registry = createDefaultRegistry(), fallbackPolicy?: unknown): UnifiedInferenceClient {
+  return new UnifiedInferenceClient(registry, ALLOW_ALL_TEST_GATE, { fallbackPolicy });
 }
 
 function queueCompletion(params?: {
@@ -127,7 +138,7 @@ describe("UnifiedInferenceClient", () => {
     expect(result.metadata.tier).toBe("reasoning");
   });
 
-  it("chat uses survival tier resolution when credits are low", async () => {
+  it("survival mode does not substitute the configured model", async () => {
     process.env.AUTOMATON_CREDITS_BALANCE = "500";
     const client = createClient();
     queueCompletion({ content: "survival" });
@@ -137,8 +148,8 @@ describe("UnifiedInferenceClient", () => {
       messages: BASE_MESSAGES,
     });
 
-    expect(result.metadata.providerId).toBe("groq");
-    expect(result.metadata.modelId).toBe("llama-3.3-70b-versatile");
+    expect(result.metadata.providerId).toBe("openai");
+    expect(result.metadata.modelId).toBe("gpt-4.1");
     expect(result.metadata.tier).toBe("reasoning");
   });
 
@@ -173,9 +184,9 @@ describe("UnifiedInferenceClient", () => {
   });
 
   it.each([429, 500, 503])(
-    "fails over to next provider on retryable %s errors",
+    "fails over to an explicitly authorized provider on retryable %s errors",
     async (status) => {
-      const client = createClient();
+      const client = createClient(undefined, OPENAI_TO_GROQ);
 
       // openai gets 4 failures (3 retries + final failure), then groq succeeds
       queueError(status);
@@ -207,7 +218,7 @@ describe("UnifiedInferenceClient", () => {
   });
 
   it("stops retrying after max retry budget", async () => {
-    const client = createClient();
+    const client = createClient(undefined, OPENAI_TO_GROQ);
 
     // openai exhausted
     queueError(429, "openai-1");
@@ -260,7 +271,7 @@ describe("UnifiedInferenceClient", () => {
     const client = createClient(registry);
 
     await expect(client.chat({ tier: "reasoning", messages: BASE_MESSAGES })).rejects.toThrow(
-      /No providers available/,
+      /Configured provider .* is not registered|is disabled/,
     );
   });
 
@@ -291,8 +302,8 @@ describe("UnifiedInferenceClient", () => {
     expect(mockState.create).toHaveBeenCalledTimes(5);
   });
 
-  it("chat skips providers with open circuit and fails over", async () => {
-    const client = createClient();
+  it("chat skips providers with open circuit and fails over (with explicit policy)", async () => {
+    const client = createClient(undefined, OPENAI_TO_GROQ);
 
     for (let i = 0; i < 5; i += 1) {
       queueError(400, `trip-${i}`);

@@ -14,6 +14,7 @@ import { activateSafeMode, getSafeModeReason, isSafeModeActive } from "./safety/
 import { assertRunBounded, CycleLimiter, parseMaxCycles, RunGuardError } from "./safety/run-guard.js";
 import { acquireInstanceLock, type InstanceLock } from "./safety/instance-lock.js";
 import { spendCapsFromConfig, validateSafeModeSpendCaps } from "./safety/spend-caps.js";
+import { checkSecretFilePermissions, secretFilePaths } from "./safety/file-permissions.js";
 import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
 import { getConfigPath, loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
@@ -210,6 +211,14 @@ export async function run(maxCycles: number | null): Promise<void> {
     } else {
       logger.error(`No configuration at ${getConfigPath()}. Run "automaton --setup" explicitly first. Refusing to start.`);
     }
+    process.exit(1);
+  }
+
+  // Secret files (API keys, wallet key) must not be readable by other users.
+  const permissionCheck = checkSecretFilePermissions(secretFilePaths(getAutomatonDir()));
+  for (const warning of permissionCheck.warnings) logger.warn(warning);
+  if (permissionCheck.problems.length > 0) {
+    logger.error(`Unsafe secret-file permissions. Refusing to start.\n- ${permissionCheck.problems.join("\n- ")}`);
     process.exit(1);
   }
 

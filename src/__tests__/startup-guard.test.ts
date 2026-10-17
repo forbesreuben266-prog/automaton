@@ -33,7 +33,9 @@ async function loadRun() {
 
 function writeConfig(content: string) {
   fs.mkdirSync(path.join(home, ".automaton"), { recursive: true });
-  fs.writeFileSync(path.join(home, ".automaton", "automaton.json"), content);
+  // 0600 so the secret-file permission check passes and each test exercises its own guard.
+  fs.writeFileSync(path.join(home, ".automaton", "automaton.json"), content, { mode: 0o600 });
+  fs.chmodSync(path.join(home, ".automaton", "automaton.json"), 0o600);
 }
 
 function validConfig(overrides: Record<string, unknown> = {}) {

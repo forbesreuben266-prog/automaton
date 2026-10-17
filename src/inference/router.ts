@@ -21,7 +21,7 @@ import type {
 import { ModelRegistry } from "./registry.js";
 import { InferenceBudgetTracker } from "./budget.js";
 import { DEFAULT_ROUTING_MATRIX, TASK_TIMEOUTS } from "./types.js";
-import { isSafeModeActive } from "../safety/safe-mode.js";
+import { resolveTrustedPricing } from "./pricing-policy.js";
 
 type Database = BetterSqlite3.Database;
 
@@ -97,12 +97,12 @@ export class InferenceRouter {
       };
     }
 
-    // 1b. Safe mode: spend limits are computed from registry prices, so a
-    // remote model with no price would never trip them. Refuse it.
-    const isUnpriced = model.costPer1kInput <= 0 && model.costPer1kOutput <= 0;
-    if (isSafeModeActive() && isUnpriced && model.provider !== "ollama") {
+    // 1b. Spend limits are computed from registry prices: refuse unknown,
+    // invalid, partial or unlisted zero pricing (see pricing-policy.ts).
+    const pricing = resolveTrustedPricing(model, { freeModels: this.budget.config.freeModels });
+    if (!pricing.ok) {
       return {
-        content: `Blocked by safe mode: model ${model.modelId} (${model.provider}) has no price, so spend limits cannot be enforced`,
+        content: `Pricing refused: ${pricing.reason}; spend limits cannot be enforced`,
         model: model.modelId,
         provider: model.provider,
         inputTokens: 0,
@@ -116,7 +116,23 @@ export class InferenceRouter {
     // 2. Estimate cost (upper bound) and check budget
     const preference = this.getPreference(tier, taskType);
     const maxTokens = request.maxTokens || preference?.maxTokens || model.maxTokens;
-    const estimatedCostCents = estimateCostCentsUpperBound(messages, tools, maxTokens, model);
+    // The same limit is sent to the provider; a missing or invalid one would
+    // make the estimate NaN, which no budget comparison would ever reject.
+    if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+      return {
+        content: `Budget refused: no valid output token limit for ${model.modelId} (got ${String(maxTokens)})`,
+        model: model.modelId, provider: model.provider, inputTokens: 0, outputTokens: 0,
+        costCents: 0, latencyMs: 0, finishReason: "budget_exceeded",
+      };
+    }
+    const estimatedCostCents = estimateCostCentsUpperBound(messages, tools, maxTokens, pricing);
+    if (!Number.isFinite(estimatedCostCents) || estimatedCostCents < 0) {
+      return {
+        content: `Budget refused: cost estimate for ${model.modelId} is invalid (${String(estimatedCostCents)})`,
+        model: model.modelId, provider: model.provider, inputTokens: 0, outputTokens: 0,
+        costCents: 0, latencyMs: 0, finishReason: "budget_exceeded",
+      };
+    }
 
     const budgetCheck = this.budget.checkBudget(estimatedCostCents, model.modelId);
     if (!budgetCheck.allowed) {
@@ -134,7 +150,7 @@ export class InferenceRouter {
 
     // 3. Check session budget
     if (request.sessionId && this.budget.config.sessionBudgetCents > 0) {
-      const sessionCost = this.budget.getSessionCost(request.sessionId);
+      const sessionCost = this.budget.getSessionCost(request.sessionId) + this.budget.getReservedCost();
       if (sessionCost + estimatedCostCents > this.budget.config.sessionBudgetCents) {
         return {
           content: `Session budget exceeded: ${sessionCost}c spent + ${estimatedCostCents}c estimated > ${this.budget.config.sessionBudgetCents}c limit`,
@@ -148,6 +164,11 @@ export class InferenceRouter {
         };
       }
     }
+
+    // Reserve the estimate until this call's cost is recorded, so concurrent
+    // calls can't all pass the aggregate checks first.
+    const reservation = this.budget.reserve(estimatedCostCents);
+    try {
 
     // 4. Transform messages for provider
     const transformedMessages = this.transformMessagesForProvider(messages, model.provider);
@@ -214,8 +235,8 @@ export class InferenceRouter {
     const inputTokens = response.usage?.promptTokens || 0;
     const outputTokens = response.usage?.completionTokens || 0;
     const actualCostCents = Math.ceil(
-      (inputTokens / 1000) * model.costPer1kInput / 100 +
-      (outputTokens / 1000) * model.costPer1kOutput / 100,
+      (inputTokens / 1000) * pricing.costPer1kInput / 100 +
+      (outputTokens / 1000) * pricing.costPer1kOutput / 100,
     );
 
     // 8. Record cost
@@ -245,6 +266,9 @@ export class InferenceRouter {
       toolCalls: response.toolCalls,
       finishReason: response.finishReason || "stop",
     };
+    } finally {
+      this.budget.release(reservation);
+    }
   }
 
   /**

@@ -376,6 +376,42 @@ one test fail.
 - **Docker image, egress proxy:** same caveats as section 7. The image was
   not rebuilt here after this change.
 
+## 9b. Spend, routing, pricing and secret-file controls (M1–M3)
+- **M1, budget gate:** the orchestrator/worker client (`UnifiedInferenceClient`)
+  requires a spend gate. Every provider attempt, retries included, is
+  checked against the same per-call, hourly, daily and session limits as the
+  main loop. Each attempt reserves its worst-case estimate when authorized,
+  so concurrent calls (main loop, orchestrator, workers) can't all pass the
+  aggregate checks first. The reservation is released only after the actual
+  cost (or worst case, if the provider may have billed a failure) is
+  recorded, and before the next attempt starts. An explicit output limit is
+  always sent; a missing or invalid limit is refused, on both the router and
+  orchestrator paths. The SDK's hidden retries are off (`maxRetries: 0`). A
+  test fails if a new runtime file calls `.chat(` outside the gated paths.
+- **M1, routing:** each tier uses exactly its configured provider and model.
+  Survival mode can't swap it. Another provider or model is tried only if
+  `modelStrategy.providerFallbacks` lists that exact mapping
+  (`{ fromProvider, fromModel, toProvider, toModel }`); an invalid policy
+  refuses at construction. Safe mode never falls back. Every authorized
+  fallback still passes the spend gate.
+- **M2, secret files:** on Linux, macOS and other POSIX systems, startup
+  refuses if `automaton.json`, `config.json` or `wallet.json` gives
+  group/other users any access, is a symlink or not a regular file, or is
+  owned by anyone other than the current user or root. It also refuses if
+  their directory is writable by group/other users, or owned by another
+  user. Fix with `chmod 600` on the files and `chmod 700` on the directory.
+- **M2, Windows limitation:** NTFS ACLs are **not** checked; POSIX mode bits
+  don't describe them. Startup on Windows therefore refuses by default.
+  Setting `AUTOMATON_ACCEPT_UNVERIFIED_SECRET_PERMISSIONS=1` acknowledges
+  that you restricted the files yourself, and startup continues with a
+  warning. Nothing in this code verifies Windows file protection.
+- **M3, pricing:** budgets only use trusted pricing. Unknown models,
+  invalid, negative or partial prices, and prices registered for a
+  different provider or served via an unofficial endpoint are refused. A
+  zero price is allowed only for a local Ollama model listed in
+  `modelStrategy.freeModels`, and only when the Ollama endpoint is
+  loopback. Free models get no routing or retry exemptions.
+
 ## 10. Trading requirements for the eventual plan
 - No cryptocurrency of any kind.
 - Markets: US- and UK-listed stocks, and forex.

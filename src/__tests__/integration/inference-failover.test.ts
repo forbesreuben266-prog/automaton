@@ -14,6 +14,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderRegistry, type ProviderConfig } from "../../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../../inference/inference-client.js";
 import type { ChatMessage } from "../../types.js";
+import type { InferenceSpendGate } from "../../inference/spend-gate.js";
 
 // ---------------------------------------------------------------------------
 // OpenAI mock — must be hoisted so the module mock runs before imports resolve
@@ -113,9 +114,19 @@ function makeRegistry(providers: ProviderConfig[], preferredForReasoning?: strin
   });
 }
 
-function makeClient(registry: ProviderRegistry): UnifiedInferenceClient {
-  return new UnifiedInferenceClient(registry);
+// These tests cover retry/failover mechanics, not budgets: use an explicit
+// allow-all test gate (production always passes a BudgetSpendGate).
+const ALLOW_ALL_TEST_GATE: InferenceSpendGate = {
+  authorize: () => ({ allowed: true, estimatedCostCents: 0, costPer1kInput: 0, costPer1kOutput: 0, reservationId: 0 }),
+  record: () => {},
+};
+
+function makeClient(registry: ProviderRegistry, fallbackPolicy?: unknown): UnifiedInferenceClient {
+  return new UnifiedInferenceClient(registry, ALLOW_ALL_TEST_GATE, { fallbackPolicy });
 }
+
+// Explicit fallback mappings for the tests that exercise failover.
+const ALPHA_TO_BETA = [{ fromProvider: "alpha", fromModel: "alpha-reasoning", toProvider: "beta", toModel: "beta-reasoning" }];
 
 /** Push a successful chat completion onto the mock queue. */
 function queueCompletion(content = "ok", promptTokens = 100, completionTokens = 20): void {
@@ -204,9 +215,9 @@ describe("integration/inference-failover", () => {
 
       queueCompletion("from-beta");
 
-      const result = await client.chat({ tier: "reasoning", messages: BASE_MESSAGES });
-
-      expect(result.metadata.providerId).toBe("beta");
+      // The tier's configured provider isn't registered: refuse, don't pick by priority.
+      await expect(client.chat({ tier: "reasoning", messages: BASE_MESSAGES })).rejects.toThrow(/Configured provider/);
+      expect(mockState.calls.length).toBe(0);
     });
 
     it("returns cost fields calculated from model pricing", async () => {
@@ -236,7 +247,7 @@ describe("integration/inference-failover", () => {
       const alpha = makeProvider("alpha", 1);
       const beta = makeProvider("beta", 2);
       const registry = makeRegistry([alpha, beta], "alpha");
-      const client = makeClient(registry);
+      const client = makeClient(registry, ALPHA_TO_BETA);
 
       // Alpha gets 4 calls: 3 retried + final failure (exhausted retry budget)
       queueError(429, "alpha-rate-limit");
@@ -261,7 +272,7 @@ describe("integration/inference-failover", () => {
       const alpha = makeProvider("alpha", 1);
       const beta = makeProvider("beta", 2);
       const registry = makeRegistry([alpha, beta], "alpha");
-      const client = makeClient(registry);
+      const client = makeClient(registry, ALPHA_TO_BETA);
 
       queueError(503);
       queueError(503);
@@ -301,7 +312,7 @@ describe("integration/inference-failover", () => {
       const alpha = makeProvider("alpha", 1);
       const beta = makeProvider("beta", 2);
       const registry = makeRegistry([alpha, beta], "alpha");
-      const client = makeClient(registry);
+      const client = makeClient(registry, ALPHA_TO_BETA);
 
       // Both exhaust their 3-retry budget (4 calls each)
       for (let i = 0; i < 4; i++) queueError(429, `alpha-${i}`);
@@ -326,7 +337,7 @@ describe("integration/inference-failover", () => {
       const alpha = makeProvider("alpha", 1);
       const beta = makeProvider("beta", 2);
       const registry = makeRegistry([alpha, beta], "alpha");
-      const client = makeClient(registry);
+      const client = makeClient(registry, ALPHA_TO_BETA);
 
       // Trip the circuit on alpha via chatDirect
       for (let i = 0; i < 5; i++) {
@@ -407,7 +418,7 @@ describe("integration/inference-failover", () => {
   // -------------------------------------------------------------------------
 
   describe("survival mode tier downgrade", () => {
-    it("downgrades reasoning to fast tier when credits are in survival range (100-999)", async () => {
+    it("keeps the configured reasoning model in survival range (no silent downgrade)", async () => {
       process.env.AUTOMATON_CREDITS_BALANCE = "500";
 
       const alpha = makeProvider("alpha", 1);
@@ -418,13 +429,13 @@ describe("integration/inference-failover", () => {
 
       const result = await client.chat({ tier: "reasoning", messages: BASE_MESSAGES });
 
-      // Survival mode maps reasoning -> fast, so the actual model served is fast
-      expect(result.metadata.modelId).toBe("alpha-fast");
+      // Survival mode may not substitute the configured model.
+      expect(result.metadata.modelId).toBe("alpha-reasoning");
       // But the requested tier is preserved in metadata
       expect(result.metadata.tier).toBe("reasoning");
     });
 
-    it("downgrades fast to cheap tier when credits are in survival range", async () => {
+    it("keeps the configured fast model in survival range (no silent downgrade)", async () => {
       process.env.AUTOMATON_CREDITS_BALANCE = "200";
 
       const alpha = makeProvider("alpha", 1);
@@ -435,7 +446,7 @@ describe("integration/inference-failover", () => {
 
       const result = await client.chat({ tier: "fast", messages: BASE_MESSAGES });
 
-      expect(result.metadata.modelId).toBe("alpha-cheap");
+      expect(result.metadata.modelId).toBe("alpha-fast");
       expect(result.metadata.tier).toBe("fast");
     });
 
@@ -467,15 +478,18 @@ describe("integration/inference-failover", () => {
       expect(result.metadata.modelId).toBe("alpha-reasoning");
     });
 
-    it("populates failedProviders in metadata when failover occurs during survival mode", async () => {
+    it("populates failedProviders in metadata when an authorized survival fallback occurs", async () => {
       process.env.AUTOMATON_CREDITS_BALANCE = "300";
 
       const alpha = makeProvider("alpha", 1);
       const beta = makeProvider("beta", 2);
       const registry = makeRegistry([alpha, beta], "alpha");
-      const client = makeClient(registry);
+      // Survival candidates are fast-tier; only this exact mapping is authorized.
+      const client = makeClient(registry, [
+        { fromProvider: "alpha", fromModel: "alpha-reasoning", toProvider: "beta", toModel: "beta-fast" },
+      ]);
 
-      // In survival mode, reasoning -> fast; alpha-fast fails, beta-fast succeeds
+      // The configured alpha-reasoning fails; the authorized beta-fast succeeds.
       queueError(429);
       queueError(429);
       queueError(429);

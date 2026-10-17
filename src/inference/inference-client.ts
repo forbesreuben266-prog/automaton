@@ -1,4 +1,7 @@
 import OpenAI from "openai";
+import { SpendRefusedError, type InferenceSpendGate, type SpendRequest } from "./spend-gate.js";
+import { isFallbackAuthorized, validateFallbackPolicy, type FallbackMapping } from "./fallback-policy.js";
+import { isSafeModeActive } from "../safety/safe-mode.js";
 import type { ChatMessage } from "../types.js";
 import {
   ProviderRegistry,
@@ -93,16 +96,57 @@ export class UnifiedInferenceClient {
   private readonly registry: ProviderRegistry;
   private readonly circuitBreaker = new Map<string, CircuitBreakerState>();
 
-  constructor(registry: ProviderRegistry) {
+  private readonly spendGate: InferenceSpendGate;
+
+  /**
+   * A spend gate is mandatory: every provider attempt is authorized against
+   * the shared budget and recorded. There is no ungated mode.
+   */
+  private readonly fallbackPolicy: readonly FallbackMapping[];
+
+  constructor(
+    registry: ProviderRegistry,
+    spendGate: InferenceSpendGate,
+    options: { fallbackPolicy?: unknown } = {},
+  ) {
+    if (!spendGate || typeof spendGate.authorize !== "function" || typeof spendGate.record !== "function") {
+      throw new Error("UnifiedInferenceClient requires a spend gate");
+    }
     this.registry = registry;
+    this.spendGate = spendGate;
+    // Throws on any malformed entry: no client is built with an invalid policy.
+    this.fallbackPolicy = validateFallbackPolicy(options.fallbackPolicy, (p, m) => registry.hasModel(p, m));
+  }
+
+  /**
+   * Attempts for a tier: the configured provider/model first, then only
+   * fallbacks the policy explicitly authorizes from it. Safe mode never
+   * falls back. Survival mode can't substitute the configured model.
+   */
+  private resolveAttempts(tier: ModelTier): ResolvedModel[] {
+    const configured = this.registry.getConfiguredModelId(tier);
+    const noFallback = isSafeModeActive() || this.fallbackPolicy.length === 0 || !configured;
+    let primary: ResolvedModel | null = null;
+    try {
+      primary = this.registry.resolveConfiguredModel(tier);
+    } catch (error) {
+      // Unavailable configured model: refuse unless fallbacks are authorized.
+      if (noFallback) throw error;
+    }
+    if (noFallback) return [primary!];
+    const fallbacks = this.registry
+      .resolveCandidates(tier, this.isSurvivalMode())
+      .filter((c) => !(c.provider.id === configured.providerId && c.model.id === configured.modelId))
+      .filter((c) => isFallbackAuthorized(this.fallbackPolicy, configured, { providerId: c.provider.id, modelId: c.model.id }));
+    const attempts = primary ? [primary, ...fallbacks] : fallbacks;
+    if (attempts.length === 0) {
+      throw new Error(`Configured model ${configured.providerId}/${configured.modelId} for tier '${tier}' is unavailable and no authorized fallback is available`);
+    }
+    return attempts;
   }
 
   async chat(params: UnifiedChatParams): Promise<UnifiedInferenceResult> {
-    const survivalMode = this.isSurvivalMode();
-    const candidates = this.registry.resolveCandidates(params.tier, survivalMode);
-    if (candidates.length === 0) {
-      throw new Error(`No providers available for tier '${params.tier}'`);
-    }
+    const candidates = this.resolveAttempts(params.tier);
 
     const failedProviders: string[] = [];
     let totalRetries = 0;
@@ -188,12 +232,15 @@ export class UnifiedInferenceClient {
         const result = await this.executeSingleRequest(
           resolved.client,
           resolved.provider.id,
+          resolved.provider.baseUrl,
           resolved.model,
           requestedTier,
           params,
         );
         return { result, retries };
       } catch (error) {
+        // A spend refusal ends the call: no retry, no provider fallback.
+        if (error instanceof SpendRefusedError) throw error;
         const retryable = this.isRetryableError(error);
         if (!retryable) {
           throw new ProviderAttemptError({
@@ -223,11 +270,50 @@ export class UnifiedInferenceClient {
   private async executeSingleRequest(
     client: OpenAI,
     providerId: string,
+    baseUrl: string | undefined,
     model: ModelConfig,
     requestedTier: ModelTier,
     params: SharedChatParams,
   ): Promise<UnifiedInferenceResult> {
+    // Always send an explicit output limit so each call's cost is bounded.
+    const maxTokens = params.maxTokens ?? model.maxOutputTokens;
+    const spendRequest: SpendRequest = {
+      providerId,
+      baseUrl,
+      modelId: model.id,
+      messages: params.messages,
+      tools: params.tools,
+      maxTokens,
+    };
+    const authorization = this.spendGate.authorize(spendRequest);
+    if (!authorization.allowed) {
+      throw new SpendRefusedError(authorization.reason);
+    }
+
     const startedAt = Date.now();
+    try {
+      const result = await this.sendRequest(client, providerId, model, requestedTier, { ...params, maxTokens }, startedAt);
+      this.spendGate.record(spendRequest, authorization, {
+        kind: "success",
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        latencyMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (error) {
+      this.spendGate.record(spendRequest, authorization, { kind: "failure", error, latencyMs: Date.now() - startedAt });
+      throw error;
+    }
+  }
+
+  private async sendRequest(
+    client: OpenAI,
+    providerId: string,
+    model: ModelConfig,
+    requestedTier: ModelTier,
+    params: SharedChatParams,
+    startedAt: number,
+  ): Promise<UnifiedInferenceResult> {
     const payload = this.buildChatCompletionRequest(model.id, params);
     if (params.stream) {
       const stream = await client.chat.completions.create({
