@@ -1,0 +1,377 @@
+/**
+ * Research sandbox specification (Phase 1, stage S1).
+ *
+ * The OS-level isolation every untrusted-input run must have. Values are
+ * frozen; a run may only TIGHTEN them (lower limits). Nothing here starts a
+ * container: buildCreateArgs returns an argv array for the engine adapter.
+ *
+ * Decisions encoded: D1 (dedicated host; software can't verify host trust),
+ * D2 (gVisor or rootless Podman required for untrusted input; a rootful
+ * runc/crun container is development-only), D3 (image pinned by digest; the
+ * digest is recorded only after a separately approved pull — until then
+ * every preflight refuses; `create` runs with --pull never, so a preflight
+ * can never download an image).
+ */
+
+import { createHash } from "node:crypto";
+
+const MiB = 1024 * 1024;
+
+export interface ImageSpec {
+  readonly repository: string;
+  readonly tag: string;
+  /** sha256 digest, pinned at an approved pull; null = not pinned yet (preflight refuses). */
+  readonly digest: string | null;
+  /**
+   * The image's ENTRYPOINT, recorded at the same approved pull (it runs before
+   * our command). null = not pinned yet (preflight refuses).
+   */
+  readonly entrypoint: readonly string[] | null;
+  /**
+   * The image's own environment ("NAME=value" entries, names from
+   * imageEnvAllowlist), recorded at the same approved pull. null = not
+   * recorded yet: the exact environment can't be checked, so preflight refuses.
+   */
+  readonly env: readonly string[] | null;
+  /**
+   * The platform manifest digest Docker reports in ImageManifestDescriptor
+   * (containerd image store), recorded at the same approved pull. null = not
+   * recorded: a container that reports a descriptor is refused.
+   */
+  readonly manifestDigest: string | null;
+}
+
+export interface SandboxSpec {
+  readonly image: ImageSpec;
+  /** Runtimes acceptable for untrusted input (gVisor). */
+  readonly isolatingRuntimes: readonly string[];
+  /** Runtimes allowed only for disposable development tests with fixtures (shared host kernel). */
+  readonly developmentRuntimes: readonly string[];
+  readonly user: string;
+  readonly network: "none";
+  readonly readOnlyRootfs: true;
+  readonly ipcMode: "none";
+  readonly memoryBytes: number;
+  /** Equal to memoryBytes: no swap. */
+  readonly memorySwapBytes: number;
+  readonly nanoCpus: number;
+  readonly pidsLimit: number;
+  readonly ulimits: Readonly<Record<"fsize" | "nofile" | "core", number>>;
+  readonly tmpfsBytes: number;
+  /** Environment variables we set; the image may add only imageEnvAllowlist names. */
+  readonly envAllowlist: readonly string[];
+  /** Variables the base image itself defines (no values are trusted from them). */
+  readonly imageEnvAllowlist: readonly string[];
+  readonly timeoutMs: number;
+  readonly maxOutputBytes: number;
+  readonly maxInputFileBytes: number;
+  readonly maxInputTotalBytes: number;
+  readonly mountPoints: Readonly<{ input: "/in"; output: "/out"; tmp: "/tmp" }>;
+  /**
+   * The only host directory under which run folders may exist. A run's
+   * folders must be exactly <runsRoot>/<runId>/in and <runsRoot>/<runId>/out.
+   */
+  readonly runsRoot: string;
+  /**
+   * The seccomp profile the Docker daemon must report in `docker info`
+   * SecurityOptions ("name=seccomp,profile=<value>"). Only Docker's built-in
+   * default profile is accepted; a custom daemon profile, "unconfined" or an
+   * unreported profile refuses.
+   */
+  readonly seccompProfile: "builtin";
+  /**
+   * Exact /proc/version text seen inside a gVisor sandbox on the target host,
+   * recorded at a separately approved host setup (gVisor reports its own
+   * emulated kernel, not the host's). null = not recorded yet: gVisor cannot
+   * be verified, so nothing is rated meets-spec.
+   */
+  readonly gvisorProcVersion: string | null;
+  /**
+   * The Docker daemon's data directory on the target host (where it keeps
+   * each container's hosts/hostname/resolv.conf), recorded at an approved
+   * host setup. null = not recorded: those host files can't be verified, so
+   * preflight refuses.
+   */
+  readonly dockerDataRoot: string | null;
+  /** Fixed container hostname set by the create argv (so Config.Hostname has a known value). */
+  readonly hostname: "sandbox";
+}
+
+export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
+  image: Object.freeze({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null }),
+  isolatingRuntimes: Object.freeze(["runsc"]),
+  developmentRuntimes: Object.freeze(["runc", "crun"]),
+  user: "10001:10001",
+  network: "none",
+  readOnlyRootfs: true,
+  ipcMode: "none",
+  memoryBytes: 512 * MiB,
+  memorySwapBytes: 512 * MiB,
+  nanoCpus: 500_000_000,
+  pidsLimit: 64,
+  ulimits: Object.freeze({ fsize: 50 * MiB, nofile: 256, core: 0 }),
+  tmpfsBytes: 64 * MiB,
+  envAllowlist: Object.freeze(["NODE_ENV", "RESEARCH_RUN_ID"]),
+  imageEnvAllowlist: Object.freeze(["PATH", "NODE_VERSION", "YARN_VERSION"]),
+  timeoutMs: 300_000,
+  maxOutputBytes: 20 * MiB,
+  maxInputFileBytes: 50 * MiB,
+  maxInputTotalBytes: 200 * MiB,
+  mountPoints: Object.freeze({ input: "/in", output: "/out", tmp: "/tmp" }),
+  runsRoot: "/srv/research-runs",
+  seccompProfile: "builtin",
+  gvisorProcVersion: null,
+  dockerDataRoot: null,
+  hostname: "sandbox",
+}) as SandboxSpec;
+
+/** The exact environment a container must have: the recorded image environment plus ours. null if the image's isn't recorded. */
+export function expectedEnv(spec: SandboxSpec, run: RunPaths): string[] | null {
+  if (spec.image.env === null) return null;
+  return [...spec.image.env, "NODE_ENV=production", `RESEARCH_RUN_ID=${run.runId}`];
+}
+
+/** Expected host paths of the files Docker bind-mounts at /etc/hosts, /etc/hostname, /etc/resolv.conf. null if the data root isn't recorded. */
+export function expectedContainerHostFiles(spec: SandboxSpec, containerId: string): Record<"HostsPath" | "HostnamePath" | "ResolvConfPath", string> | null {
+  if (spec.dockerDataRoot === null || !/^[0-9a-f]{64}$/.test(containerId)) return null;
+  const dir = `${spec.dockerDataRoot}/containers/${containerId}`;
+  return { HostsPath: `${dir}/hosts`, HostnamePath: `${dir}/hostname`, ResolvConfPath: `${dir}/resolv.conf` };
+}
+
+export const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const RUN_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+export class SandboxSpecError extends Error {
+  constructor(readonly violations: readonly string[]) {
+    super(`Sandbox specification refused:\n- ${violations.join("\n- ")}`);
+    this.name = "SandboxSpecError";
+  }
+}
+
+const NUMERIC_LIMITS = ["memoryBytes", "nanoCpus", "pidsLimit", "tmpfsBytes", "timeoutMs", "maxOutputBytes", "maxInputFileBytes", "maxInputTotalBytes"] as const;
+export type SpecOverrides = Partial<Record<(typeof NUMERIC_LIMITS)[number], number>> & {
+  readonly imageDigest?: string;
+  readonly imageEntrypoint?: readonly string[];
+  readonly gvisorProcVersion?: string;
+  readonly imageEnv?: readonly string[];
+  readonly imageManifestDigest?: string;
+  readonly dockerDataRoot?: string;
+};
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot"];
+const ENV_ENTRY = /^([A-Za-z_][A-Za-z0-9_]*)=([\x20-\x7e]*)$/;
+
+/**
+ * Returns the effective spec. Overrides may only lower numeric limits (and
+ * memory swap follows memory, so swap stays off) or set the pinned digest,
+ * entrypoint and gVisor /proc/version reference.
+ * Any other key, any increase and any non-positive value is refused.
+ */
+export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX_SPEC): SandboxSpec {
+  const violations: string[] = [];
+  if (typeof overrides !== "object" || overrides === null || Array.isArray(overrides) ||
+      Object.getPrototypeOf(overrides) !== Object.getPrototypeOf({})) {
+    throw new SandboxSpecError(["overrides must be a plain object"]);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(overrides);
+  const values: Record<string, unknown> = {};
+  for (const [key, d] of Object.entries(descriptors)) {
+    if (d.get || d.set) { violations.push(`${key}: getters/setters are not allowed`); continue; }
+    if (!PIN_KEYS.includes(key) && !(NUMERIC_LIMITS as readonly string[]).includes(key)) {
+      violations.push(`${key}: cannot be overridden (only lowering ${NUMERIC_LIMITS.join(", ")} or pinning ${PIN_KEYS.join("/")} is allowed)`);
+      continue;
+    }
+    values[key] = d.value;
+  }
+  const next: Record<string, unknown> = { ...base };
+  for (const key of NUMERIC_LIMITS) {
+    if (!(key in values)) continue;
+    const v = values[key];
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0) violations.push(`${key}: must be a positive integer`);
+    else if (v > base[key]) violations.push(`${key}: ${v} would loosen the limit of ${base[key]}`);
+    else next[key] = v;
+  }
+  if (typeof next.memoryBytes === "number") next.memorySwapBytes = next.memoryBytes;
+  if ("imageDigest" in values) {
+    const d = values.imageDigest;
+    if (typeof d !== "string" || !DIGEST_PATTERN.test(d)) violations.push("imageDigest: must be sha256:<64 lowercase hex>");
+    else if (base.image.digest !== null && base.image.digest !== d) violations.push("imageDigest: differs from the already pinned digest");
+    else next.image = Object.freeze({ ...(next.image as ImageSpec), digest: d });
+  }
+  if ("imageEntrypoint" in values) {
+    const ep = values.imageEntrypoint;
+    if (!Array.isArray(ep) || ep.length > 8 || ep.some((x) => typeof x !== "string" || x.length === 0 || x.length > 256 || x.includes("\0"))) {
+      violations.push("imageEntrypoint: must be an array of at most 8 non-empty strings");
+    } else if (base.image.entrypoint !== null && JSON.stringify(base.image.entrypoint) !== JSON.stringify(ep)) {
+      violations.push("imageEntrypoint: differs from the already pinned entrypoint");
+    } else {
+      next.image = Object.freeze({ ...(next.image as ImageSpec), entrypoint: Object.freeze([...ep]) });
+    }
+  }
+  if ("gvisorProcVersion" in values) {
+    const pv = values.gvisorProcVersion;
+    if (typeof pv !== "string" || !/^Linux version [\x20-\x7e]{1,500}$/.test(pv)) {
+      violations.push("gvisorProcVersion: must be the printable /proc/version text starting \"Linux version \"");
+    } else if (base.gvisorProcVersion !== null && base.gvisorProcVersion !== pv) {
+      violations.push("gvisorProcVersion: differs from the already recorded value");
+    } else {
+      next.gvisorProcVersion = pv;
+    }
+  }
+  if ("imageEnv" in values) {
+    const env = values.imageEnv;
+    const names = Array.isArray(env) ? env.map((e) => (typeof e === "string" ? ENV_ENTRY.exec(e)?.[1] : undefined)) : [];
+    if (!Array.isArray(env) || env.length > 32 || names.some((n) => n === undefined || !base.imageEnvAllowlist.includes(n))) {
+      violations.push(`imageEnv: must be printable NAME=value entries with names from ${base.imageEnvAllowlist.join(", ")}`);
+    } else if (new Set(names).size !== names.length) {
+      violations.push("imageEnv: duplicate names");
+    } else if (base.image.env !== null && JSON.stringify([...base.image.env].sort()) !== JSON.stringify([...env].sort())) {
+      violations.push("imageEnv: differs from the already recorded environment");
+    } else {
+      next.image = Object.freeze({ ...(next.image as ImageSpec), env: Object.freeze([...env]) });
+    }
+  }
+  if ("imageManifestDigest" in values) {
+    const d = values.imageManifestDigest;
+    if (typeof d !== "string" || !DIGEST_PATTERN.test(d)) violations.push("imageManifestDigest: must be sha256:<64 lowercase hex>");
+    else if (base.image.manifestDigest !== null && base.image.manifestDigest !== d) violations.push("imageManifestDigest: differs from the already recorded digest");
+    else next.image = Object.freeze({ ...(next.image as ImageSpec), manifestDigest: d });
+  }
+  if ("dockerDataRoot" in values) {
+    const r = values.dockerDataRoot;
+    if (typeof r !== "string" || !/^(\/[A-Za-z0-9._-]+)+$/.test(r) || r.split("/").some((c) => c === "." || c === "..") ||
+        r === base.runsRoot || r.startsWith(`${base.runsRoot}/`) || base.runsRoot.startsWith(`${r}/`)) {
+      violations.push("dockerDataRoot: must be a normalized absolute path that neither contains nor is inside the runs root");
+    } else if (base.dockerDataRoot !== null && base.dockerDataRoot !== r) {
+      violations.push("dockerDataRoot: differs from the already recorded value");
+    } else {
+      next.dockerDataRoot = r;
+    }
+  }
+  if (violations.length > 0) throw new SandboxSpecError(violations);
+  return Object.freeze(next) as unknown as SandboxSpec;
+}
+
+/** Reference to the pinned image; refuses when the digest or entrypoint isn't pinned (D3). */
+export function imageReference(spec: SandboxSpec): string {
+  const problems: string[] = [];
+  if (spec.image.digest === null || !DIGEST_PATTERN.test(spec.image.digest)) {
+    problems.push("image digest is not pinned: a separately approved image pull must record it first (D3)");
+  }
+  if (spec.image.entrypoint === null) {
+    problems.push("image entrypoint is not pinned: it must be recorded at the approved image pull (D3)");
+  }
+  if (problems.length > 0) throw new SandboxSpecError(problems);
+  return `${spec.image.repository}@${spec.image.digest}`;
+}
+
+export interface RunPaths {
+  /** Must be exactly <runsRoot>/<runId>/in; mounted read-only at /in. */
+  readonly inputDir: string;
+  /** Must be exactly <runsRoot>/<runId>/out; mounted read-write at /out; dedicated to this run. */
+  readonly outputDir: string;
+  readonly runId: string;
+}
+
+export type ContainerPurpose = "canary" | "run";
+export const CONTAINER_NAME_PATTERN = /^research-sandbox-[a-z0-9][a-z0-9-]{0,63}-(canary|run)$/;
+
+/** Deterministic container name, so a container can be found and removed even if its id was lost. */
+export function containerName(runId: string, purpose: ContainerPurpose): string {
+  const name = `research-sandbox-${runId}-${purpose}`;
+  if (!RUN_ID_PATTERN.test(runId) || !CONTAINER_NAME_PATTERN.test(name)) throw new SandboxSpecError(["invalid run id for a container name"]);
+  return name;
+}
+
+/** The exact folders a run must use. */
+export function expectedRunPaths(spec: SandboxSpec, runId: string): { inputDir: string; outputDir: string } {
+  return { inputDir: `${spec.runsRoot}/${runId}/in`, outputDir: `${spec.runsRoot}/${runId}/out` };
+}
+
+/**
+ * String-level checks: the run folders must be exactly
+ * <runsRoot>/<runId>/in and <runsRoot>/<runId>/out (so /home, /tmp, /mnt,
+ * /opt, home folders and any parent folder are impossible). Filesystem
+ * checks (symlinks, ownership, permissions, emptiness) are in host-paths.ts.
+ */
+export function validateRunPaths(run: unknown, spec: SandboxSpec = SANDBOX_SPEC): string[] {
+  const v: string[] = [];
+  if (typeof run !== "object" || run === null || Array.isArray(run)) return ["run: must be an object"];
+  const r = run as Record<string, unknown>;
+  for (const [key, d] of Object.entries(Object.getOwnPropertyDescriptors(r))) {
+    if (d.get || d.set) return [`run.${key}: getters/setters are not allowed`];
+    if (!["inputDir", "outputDir", "runId"].includes(key)) v.push(`run.${key}: is not an allowed field`);
+  }
+  if (typeof r.runId !== "string" || !RUN_ID_PATTERN.test(r.runId)) {
+    v.push("run.runId: must match [a-z0-9-], 1-64 chars, starting with a letter or digit");
+    return v;
+  }
+  const expected = expectedRunPaths(spec, r.runId);
+  if (r.inputDir !== expected.inputDir) v.push(`run.inputDir: must be exactly ${expected.inputDir}`);
+  if (r.outputDir !== expected.outputDir) v.push(`run.outputDir: must be exactly ${expected.outputDir}`);
+  return v;
+}
+
+/**
+ * Exact `create` argv for docker/podman (no shell). The container is created,
+ * inspected and verified BEFORE it is started (see preflight.ts).
+ */
+export function buildCreateArgs(spec: SandboxSpec, run: RunPaths, runtime: string, command: readonly string[], purpose: ContainerPurpose): string[] {
+  const pathProblems = validateRunPaths(run, spec);
+  if (pathProblems.length > 0) throw new SandboxSpecError(pathProblems);
+  if (![...spec.isolatingRuntimes, ...spec.developmentRuntimes].includes(runtime)) {
+    throw new SandboxSpecError([`runtime "${runtime}" is not in the specification`]);
+  }
+  if (!Array.isArray(command) || command.length === 0 || command.some((c) => typeof c !== "string" || c.length === 0 || c.includes("\0"))) {
+    throw new SandboxSpecError(["command must be a non-empty array of non-empty strings"]);
+  }
+  const m = spec.mountPoints;
+  return [
+    "create",
+    "--name", containerName(run.runId, purpose),
+    "--pull", "never",
+    "--hostname", spec.hostname,
+    "--runtime", runtime,
+    "--network", spec.network,
+    "--read-only",
+    "--user", spec.user,
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges:true",
+    "--ipc", spec.ipcMode,
+    "--cgroupns", "private",
+    "--pids-limit", String(spec.pidsLimit),
+    "--memory", String(spec.memoryBytes),
+    "--memory-swap", String(spec.memorySwapBytes),
+    "--cpus", (spec.nanoCpus / 1e9).toString(),
+    "--ulimit", `fsize=${spec.ulimits.fsize}:${spec.ulimits.fsize}`,
+    "--ulimit", `nofile=${spec.ulimits.nofile}:${spec.ulimits.nofile}`,
+    "--ulimit", `core=${spec.ulimits.core}:${spec.ulimits.core}`,
+    "--tmpfs", `${m.tmp}:rw,noexec,nosuid,nodev,size=${spec.tmpfsBytes}`,
+    "--mount", `type=bind,src=${run.inputDir},dst=${m.input},readonly,bind-propagation=rprivate`,
+    "--mount", `type=bind,src=${run.outputDir},dst=${m.output},bind-propagation=rprivate`,
+    "--env", "NODE_ENV=production",
+    "--env", `RESEARCH_RUN_ID=${run.runId}`,
+    "--log-driver", "none",
+    "--workdir", "/app",
+    "--no-healthcheck",
+    imageReference(spec),
+    ...command,
+  ];
+}
+
+/**
+ * SHA-256 of the security-relevant create arguments: everything up to and
+ * including the image reference, minus the container name (which differs
+ * between the canary and the real run). The command after the image is not
+ * included. Used to bind a preflight result to the configuration it checked.
+ */
+export function securityArgsHash(args: readonly string[], spec: SandboxSpec): string {
+  const ref = imageReference(spec);
+  const end = args.indexOf(ref);
+  if (args[0] !== "create" || end < 0) throw new SandboxSpecError(["create arguments do not contain the pinned image reference"]);
+  const security: string[] = [];
+  for (let i = 0; i <= end; i++) {
+    if (args[i] === "--name") { i += 1; continue; }
+    security.push(args[i]);
+  }
+  return createHash("sha256").update(JSON.stringify(security), "utf8").digest("hex");
+}
