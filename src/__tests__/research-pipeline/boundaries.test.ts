@@ -67,7 +67,7 @@ function specifiers(file: string): string[] {
 
 describe("research pipeline boundaries (step 1: adapter only)", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["division.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
+    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["assemble.ts", "division.ts", "ledger.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
   });
 
   it("the adapter imports nothing but the division's public index; no dynamic import, require or import.meta", () => {
@@ -132,6 +132,9 @@ const PARSER_IMPORTS: Record<string, readonly string[]> = {
   "workbook.ts": ["./division.js", "./manifest.js"],
   // Step 3: the only module with filesystem access (read-only calls; see the fs allowlist below).
   "local-files.ts": ["node:crypto", "node:fs", "./division.js", "./manifest.js", "./workbook.js"],
+  // Step 4: in-memory assembly and ledger (no node: modules; Phase 0 only through the adapter).
+  "ledger.ts": ["./division.js"],
+  "assemble.ts": ["./division.js", "./ledger.js", "./manifest.js", "./workbook.js"],
 };
 /** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -236,8 +239,48 @@ describe("research pipeline boundaries (step 3: local files)", () => {
   });
 
   it("the parsers and the adapter still import no filesystem, network or process module", () => {
-    for (const file of ["division.ts", "manifest.ts", "workbook.ts"]) {
+    for (const file of ["assemble.ts", "division.ts", "ledger.ts", "manifest.ts", "workbook.ts"]) {
       for (const spec of specifiers(path.join(PIPELINE, file))) expect(spec.startsWith("node:"), `${file} imports ${spec}`).toBe(false);
     }
+  });
+});
+
+/** Step 4: assembly and ledger stay in memory, render only final reports and never touch the proposal queue. */
+describe("research pipeline boundaries (step 4: assembly and ledger)", () => {
+  const STEP4 = ["assemble.ts", "ledger.ts"];
+  const identifiers = (file: string) => {
+    const names = new Set<string>();
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n)) names.add(n.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(parse(path.join(PIPELINE, file)));
+    return names;
+  };
+  const strings = (file: string) => {
+    const found: string[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) found.push(n.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(parse(path.join(PIPELINE, file)));
+    return found;
+  };
+
+  for (const file of STEP4) {
+    it(`${file} uses no proposal queue, budget, model or filesystem name`, () => {
+      const names = identifiers(file);
+      for (const name of ["ProposalQueue", "fs", "RunBudgetController", "DISABLED_MODEL_PORT", "loadRun"]) expect(names.has(name), `${file} uses ${name}`).toBe(false);
+    });
+  }
+
+  it("assemble.ts renders only final reports (no draft mode) and only through Phase 0's renderer", () => {
+    expect(strings("assemble.ts")).not.toContain("draft");
+    expect(identifiers("assemble.ts").has("renderReport")).toBe(true);
+    expect(identifiers("assemble.ts").has("validateReport")).toBe(true);
+  });
+
+  it("ledger.ts validates with Phase 0 before building anything", () => {
+    expect(identifiers("ledger.ts").has("validateReport")).toBe(true);
   });
 });

@@ -50,3 +50,28 @@ export function errorText(fn: () => unknown): string {
   }
   throw new Error("expected a refusal, but parsing succeeded");
 }
+
+/** The fictional source texts in the shape the step 3 loader returns (manifest order). */
+export function validSources(): any[] {
+  return validReport().snapshots.map((s: any) => ({
+    id: s.id, file: `${s.id}.txt`, sha256: sha256(s.content), bytes: Buffer.byteLength(s.content, "utf8"), content: s.content,
+  }));
+}
+
+/** A complete fictional run in the shape the step 3 loader returns (fresh copy each call). */
+export function validRun(): any {
+  return { opportunity: validOpportunity(), manifest: validManifest(), workbook: validWorkbook(), sources: validSources() };
+}
+
+/** Adds one fictional source to a run (manifest entry and text); returns the run. */
+export function addSource(run: any, source: { id: string; content: string; [key: string]: unknown }): any {
+  const { content, ...overrides } = source;
+  run.manifest.sources.push({
+    id: source.id, file: `${source.id}.txt`, sha256: sha256(content), url: `https://example.org/fictional/${source.id}`,
+    publisher: "Example Publisher (fictional)", title: `Fictional source ${source.id}`, publishedAt: "2026-07-01",
+    retrievedAt: "2026-10-06T09:00:00Z", originId: `origin-${source.id}`, derivedFromSnapshotIds: [], independenceVerified: true,
+    independenceNote: "Operator checked (fictional)", ...overrides,
+  });
+  run.sources.push({ id: source.id, file: `${source.id}.txt`, sha256: sha256(content), bytes: Buffer.byteLength(content, "utf8"), content });
+  return run;
+}
