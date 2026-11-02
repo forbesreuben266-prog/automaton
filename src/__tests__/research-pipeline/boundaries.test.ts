@@ -67,7 +67,7 @@ function specifiers(file: string): string[] {
 
 describe("research pipeline boundaries (step 1: adapter only)", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["division.ts", "manifest.ts", "workbook.ts"]);
+    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["division.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
   });
 
   it("the adapter imports nothing but the division's public index; no dynamic import, require or import.meta", () => {
@@ -130,6 +130,8 @@ describe("research pipeline boundaries (step 1: adapter only)", () => {
 const PARSER_IMPORTS: Record<string, readonly string[]> = {
   "manifest.ts": ["./division.js"],
   "workbook.ts": ["./division.js", "./manifest.js"],
+  // Step 3: the only module with filesystem access (read-only calls; see the fs allowlist below).
+  "local-files.ts": ["node:crypto", "node:fs", "./division.js", "./manifest.js", "./workbook.js"],
 };
 /** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -154,7 +156,9 @@ describe("research pipeline boundaries (step 2: parsers)", () => {
           if (!isMemberName) found.push(n.text);
         }
         if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "Math" && n.name.text === "random") found.push("Math.random");
-        if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && /^(node:)?(fs|net|http|https|child_process|dgram|dns|tls|worker_threads|os|process|vm|module|inspector)$/.test(n.text)) found.push(n.text);
+        // Import specifiers are governed by the per-file import allowlist above; every other string is checked here.
+        const isImportSpecifier = n.parent !== undefined && (ts.isImportDeclaration(n.parent) || ts.isExportDeclaration(n.parent)) && n.parent.moduleSpecifier === n;
+        if (!isImportSpecifier && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && /^(node:)?(fs|net|http|https|child_process|dgram|dns|tls|worker_threads|os|process|vm|module|inspector)$/.test(n.text)) found.push(n.text);
         // Constant strings naming a capability (catches bracket access such as globalThis["process"] or obj["eval"]).
         if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && (FORBIDDEN_IDENTIFIERS.has(n.text) || n.text === "constructor" || n.text === "__proto__")) found.push(`"${n.text}"`);
         // Reaching constructors or prototypes through objects (e.g. ({}).constructor.constructor("code")).
@@ -193,5 +197,47 @@ describe("research pipeline boundaries (step 2: parsers)", () => {
     }
     expect(calls).toEqual([]);
     expect(process.env).toEqual(envBefore);
+  });
+});
+
+/** Step 3: local-files.ts may use only these read-only filesystem calls. */
+const READ_ONLY_FS = new Set(["lstatSync", "fstatSync", "openSync", "readSync", "closeSync", "readdirSync", "constants"]);
+const OPEN_FLAGS = new Set(["O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK"]);
+
+describe("research pipeline boundaries (step 3: local files)", () => {
+  const source = parse(path.join(PIPELINE, "local-files.ts"));
+
+  it("uses only read-only filesystem calls (no write, rename, delete, link, permission or directory creation)", () => {
+    const used = new Set<string>();
+    const visit = (n: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "fs") used.add(n.name.text);
+      if (ts.isElementAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "fs") used.add("<computed>");
+      ts.forEachChild(n, visit);
+    };
+    visit(source);
+    expect([...used].filter((name) => !READ_ONLY_FS.has(name))).toEqual([]);
+    expect(used.has("openSync")).toBe(true);
+  });
+
+  it("opens files read-only with no-follow and non-blocking flags only", () => {
+    const flags = new Set<string>();
+    const visit = (n: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "constants") flags.add(n.name.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(source);
+    expect([...flags].sort()).toEqual([...OPEN_FLAGS].sort());
+  });
+
+  it("is imported by nothing in the pipeline (no other module gains filesystem access through it)", () => {
+    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "local-files.ts")) {
+      expect(specifiers(path.join(PIPELINE, file)), file).not.toContain("./local-files.js");
+    }
+  });
+
+  it("the parsers and the adapter still import no filesystem, network or process module", () => {
+    for (const file of ["division.ts", "manifest.ts", "workbook.ts"]) {
+      for (const spec of specifiers(path.join(PIPELINE, file))) expect(spec.startsWith("node:"), `${file} imports ${spec}`).toBe(false);
+    }
   });
 });
