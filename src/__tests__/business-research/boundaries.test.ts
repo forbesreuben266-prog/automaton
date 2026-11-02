@@ -31,6 +31,25 @@ import { EXPERIMENTS, validReport } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
 const DIVISION = path.join(SRC, "divisions", "business-research");
+/** Approved Phase 1A exception (decision B): the one adapter outside the division that may import it, and the one specifier it may use. */
+const ADAPTER = path.join(SRC, "research-pipeline", "division.ts");
+const ADAPTER_SPECIFIER = "../divisions/business-research/index.js";
+/** The adapter's reviewed re-exports, held here independently of the pipeline's own tests. */
+const ADAPTER_VALUE_EXPORTS = [
+  "CLAIM_TYPES", "CRITERIA", "CURRENCIES", "EVIDENCE_GRADES", "HARD_GATES", "HIGH_SCORE_MIN_SOURCES", "Issues", "MAX_CITATIONS_PER_CLAIM",
+  "MAX_CLAIMS", "MAX_SNAPSHOTS", "MAX_SNAPSHOT_CHARS", "MAX_TOTAL_SNAPSHOT_CHARS", "MIN_FAILURE_REASONS", "MIN_QUOTE_CHARS", "ProposalQueue",
+  "QUOTE_VERIFICATION_LEGEND", "ReportValidationError", "SCENARIO_NAMES", "SchemaError", "UNITS", "VERDICT_THRESHOLDS", "arr", "bool",
+  "calculateScenarios", "checkKeys", "createSnapshot", "escapeInline", "formatMoney", "gradeEvidence", "gradeEvidenceSets", "id", "isPlainObject",
+  "isoDate", "isoDateTime", "oneOf", "originGroups", "parseAssumptions", "parseExperimentProposal", "parseScenarioDefinitions", "parseScoring",
+  "parseSourcesAndClaims", "renderReport", "renderUrl", "safeInt", "scoreOpportunity", "sha256Hex", "sourceIdentityConflicts", "str",
+  "uniqueIds", "validateReport", "verifyClaims",
+].sort();
+const ADAPTER_TYPE_EXPORTS = [
+  "Assumption", "Citation", "Claim", "ClaimType", "ClaimVerification", "Competitor", "Confidence", "CriterionResult", "Currency",
+  "EvidenceAssessment", "EvidenceGrade", "ExperimentProposal", "GateStatus", "HardGateResult", "ProposalStatus", "ReportSections",
+  "ReportValidation", "ResearchReport", "ScenarioDefinition", "ScenarioName", "ScenarioResult", "ScoreResult", "SourceSnapshot",
+  "StoredProposal", "Verdict",
+].sort();
 
 function walk(dir: string): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -401,17 +420,69 @@ describe("division boundaries (static, syntax tree)", () => {
     }
   });
 
-  it("nothing outside the division imports it, by any specifier or by name", () => {
+  it("nothing outside the division imports it, by any specifier or by name (one approved adapter excepted)", () => {
+    // Approved Phase 1A exception (decision B): exactly one file, the pipeline adapter, may name the
+    // division, and the only specifier of it that may resolve into the division is the public index.
+    // Its shape (logic-free named re-exports) is verified by the next test.
     const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(DIVISION + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`));
     expect(outside.length).toBeGreaterThan(50);
     for (const file of outside) {
       const rel = path.relative(SRC, file);
+      if (file === ADAPTER) {
+        const intoDivision = allSpecifiers(file).filter((spec) => spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(DIVISION));
+        expect(intoDivision.length, `${rel} must import the division`).toBeGreaterThan(0);
+        for (const spec of intoDivision) expect(spec, `${rel} may import only the division's public index`).toBe(ADAPTER_SPECIFIER);
+        continue;
+      }
       expect(fs.readFileSync(file, "utf8").includes("business-research"), `${rel} mentions the division`).toBe(false);
       for (const spec of allSpecifiers(file)) {
         if (!spec.startsWith(".")) continue;
         const resolved = path.resolve(path.dirname(file), spec);
         expect(resolved.startsWith(DIVISION), `${rel} imports ${spec}`).toBe(false);
       }
+    }
+  });
+
+  it("the one approved adapter is a logic-free, named re-export of the public index with exactly the reviewed names", () => {
+    expect(fs.existsSync(ADAPTER), "the approved adapter path").toBe(true);
+    const source = parse(ADAPTER);
+    // Every top-level statement is `export { … } from "<public index>"` or `export type { … } from "<public index>"`.
+    expect(source.statements.length, "exactly one value and one type re-export statement").toBe(2);
+    const declarations: ts.ExportDeclaration[] = [];
+    for (const stmt of source.statements) {
+      expect(ts.isExportDeclaration(stmt), `adapter statement ${ts.SyntaxKind[stmt.kind]} is not a re-export (no executable logic allowed)`).toBe(true);
+      const decl = stmt as ts.ExportDeclaration;
+      expect(decl.moduleSpecifier !== undefined && ts.isStringLiteral(decl.moduleSpecifier) ? decl.moduleSpecifier.text : null,
+        "adapter may re-export only from the division's public index").toBe(ADAPTER_SPECIFIER);
+      expect(decl.exportClause !== undefined && ts.isNamedExports(decl.exportClause), "no wildcard (export * / export * as) re-exports").toBe(true);
+      expect(decl.attributes, "no import attributes").toBeUndefined();
+      declarations.push(decl);
+    }
+    // No dynamic import, require, import.meta or import-equals anywhere in the file (including nested positions).
+    const forbidden: string[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require"))) forbidden.push("dynamic import/require");
+      if (ts.isMetaProperty(n)) forbidden.push("import.meta");
+      if (ts.isImportEqualsDeclaration(n) || ts.isImportDeclaration(n)) forbidden.push("import");
+      ts.forEachChild(n, visit);
+    };
+    visit(source);
+    expect(forbidden).toEqual([]);
+    // Exactly the reviewed names, none renamed, values and types in separate statements.
+    const [values, types] = declarations;
+    const elements = (d: ts.ExportDeclaration) => (d.exportClause as ts.NamedExports).elements;
+    expect(values.isTypeOnly, "first statement re-exports values").toBe(false);
+    expect(types.isTypeOnly, "second statement re-exports types only").toBe(true);
+    for (const el of [...elements(values), ...elements(types)]) {
+      expect(el.propertyName, `${el.name.text} must not be renamed`).toBeUndefined();
+      expect(el.isTypeOnly, `${el.name.text}: no inline type modifiers`).toBe(false);
+    }
+    expect(elements(values).map((e) => e.name.text).sort()).toEqual(ADAPTER_VALUE_EXPORTS);
+    expect(elements(types).map((e) => e.name.text).sort()).toEqual(ADAPTER_TYPE_EXPORTS);
+    // Every re-exported value is part of the division's reviewed public API; the model port and run budget are never among them.
+    for (const name of ADAPTER_VALUE_EXPORTS) expect(name in division, `${name} is not a public division export`).toBe(true);
+    for (const name of ["RunBudgetController", "DISABLED_MODEL_PORT", "InferenceDisabledError", "MAX_RUN_BUDGET_CENTS", "ResearchModelPort"]) {
+      expect([...ADAPTER_VALUE_EXPORTS, ...ADAPTER_TYPE_EXPORTS], name).not.toContain(name);
     }
   });
 
