@@ -18,7 +18,7 @@ const parse = (file: string) => ts.createSourceFile(file, fs.readFileSync(path.j
 const ALLOWED_EXTERNAL: Record<string, readonly string[]> = {
   "engine.ts": ["node:child_process"],
   "canary-probe.ts": ["node:fs", "node:net"],
-  "host-paths.ts": ["node:fs"],
+  "host-paths.ts": ["node:crypto", "node:fs"],
   "spec.ts": ["node:crypto"],
 };
 

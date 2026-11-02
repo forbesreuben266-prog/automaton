@@ -1,7 +1,7 @@
 /**
  * Offline fixtures for the research sandbox tests. The digest, entrypoint,
- * image environment, manifest digest, Docker data root and both
- * /proc/version strings are FAKE test values (not a real image, host or
+ * image environment, manifest digest, Docker data root, runsc path/hash and
+ * both /proc/version strings are FAKE test values (not a real image, host or
  * recorded reference); nothing is pulled or started.
  */
 
@@ -14,13 +14,19 @@ export const HOST_PROC_VERSION = "Linux version 6.8.0-fake-host (test fixture) #
 export const FAKE_IMAGE_ENV = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.22.0", "YARN_VERSION=1.22.22"];
 export const FAKE_MANIFEST_DIGEST = `sha256:${"ef".repeat(32)}`;
 export const FAKE_DATA_ROOT = "/var/lib/docker";
+export const FAKE_RUNSC_PATH = "/usr/local/bin/runsc";
+export const FAKE_RUNSC_SHA256 = "5e".repeat(32);
+export const FAKE_RUNSC = Object.freeze({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, args: Object.freeze([] as string[]) });
 /** Fully pinned spec (fake values); SANDBOX_SPEC itself has nothing pinned. */
 export const SPEC = resolveSpec({
   imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: FAKE_GVISOR_PROC_VERSION,
-  imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT,
+  imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
 });
 /** `docker info` as parsed by the engine adapter: Docker with runc and runsc, built-in seccomp profile. */
-export const DOCKER_INFO = Object.freeze({ engine: "docker" as const, rootless: false, runtimes: Object.freeze(["runc", "runsc"]), seccompProfile: "builtin" });
+export const DOCKER_INFO = Object.freeze({
+  engine: "docker" as const, rootless: false, runtimes: Object.freeze(["runc", "runsc"]), seccompProfile: "builtin",
+  runtimeConfigs: Object.freeze({ runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH } }),
+});
 export const RUN: RunPaths = { inputDir: "/srv/research-runs/r1/in", outputDir: "/srv/research-runs/r1/out", runId: "r1" };
 export const HOST_CANARY = "/srv/research-canary/host-canary.txt";
 export const IMAGE_REF = `${SANDBOX_SPEC.image.repository}@${FAKE_DIGEST}`;
@@ -182,7 +188,7 @@ export function compliantReport(): any {
   };
 }
 
-export interface FakeEntry { kind: "dir" | "symlink" | "file" | "socket"; uid: number; mode: number; ino: number; entries?: string[]; realpath?: string; error?: string }
+export interface FakeEntry { sha256?: string; size?: number; mtimeMs?: number; ctimeMs?: number; kind: "dir" | "symlink" | "file" | "socket"; uid: number; mode: number; ino: number; entries?: string[]; realpath?: string; error?: string }
 
 /** A compliant host layout for RUN, as a mutable map the tests can weaken. */
 export function compliantHostLayout(): Record<string, FakeEntry> {
@@ -209,6 +215,11 @@ export function compliantHostLayout(): Record<string, FakeEntry> {
     [`${FAKE_DATA_ROOT}/containers/${CONTAINER_ID}/hosts`]: { kind: "file", uid: 0, mode: 0o100644, ino: 44 },
     [`${FAKE_DATA_ROOT}/containers/${CONTAINER_ID}/hostname`]: { kind: "file", uid: 0, mode: 0o100644, ino: 45 },
     [`${FAKE_DATA_ROOT}/containers/${CONTAINER_ID}/resolv.conf`]: { kind: "file", uid: 0, mode: 0o100644, ino: 46 },
+    // Approved runtime binary (fake contents: sha256File returns the recorded fake digest).
+    "/usr": { kind: "dir", uid: 0, mode: 0o40755, ino: 50 },
+    "/usr/local": { kind: "dir", uid: 0, mode: 0o40755, ino: 51 },
+    "/usr/local/bin": { kind: "dir", uid: 0, mode: 0o40755, ino: 52 },
+    [FAKE_RUNSC_PATH]: { kind: "file", uid: 0, mode: 0o100755, ino: 53, size: 52_000_000, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000, sha256: FAKE_RUNSC_SHA256 },
   };
 }
 
@@ -226,9 +237,17 @@ export function fakeHostFs(layout: Record<string, FakeEntry>): HostFs & { calls:
     lstat(p: string): HostStat {
       calls[p] = (calls[p] ?? 0) + 1;
       const e = get(p);
-      return { isSymbolicLink: () => e.kind === "symlink", isDirectory: () => e.kind === "dir", isSocket: () => e.kind === "socket", isFile: () => e.kind === "file", uid: e.uid, mode: e.mode, dev: 64769, ino: e.ino };
+      return { isSymbolicLink: () => e.kind === "symlink", isDirectory: () => e.kind === "dir", isSocket: () => e.kind === "socket", isFile: () => e.kind === "file", uid: e.uid, mode: e.mode, dev: 64769, ino: e.ino,
+        size: e.size ?? 4096, mtimeMs: e.mtimeMs ?? 1_600_000_000_000, ctimeMs: e.ctimeMs ?? 1_600_000_000_000 };
     },
     realpath(p: string): string { return get(p).realpath ?? p; },
     readdir(p: string): string[] { return [...(get(p).entries ?? [])]; },
+    sha256File(p: string, maxBytes: number) {
+      const e = get(p);
+      if (e.kind === "symlink") throw Object.assign(new Error(`ELOOP ${p}`), { code: "ELOOP" }); // O_NOFOLLOW
+      if (e.kind !== "file") throw Object.assign(new Error(`EINVAL ${p}`), { code: "EINVAL" });
+      if ((e.size ?? 4096) > maxBytes) throw Object.assign(new Error(`EFBIG ${p}`), { code: "EFBIG" });
+      return { sha256: e.sha256 ?? "0".repeat(64), dev: "64769", ino: String(e.ino), size: e.size ?? 4096 };
+    },
   };
 }

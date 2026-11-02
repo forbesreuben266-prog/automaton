@@ -5,7 +5,7 @@ import {
   SANDBOX_SPEC, SandboxSpecError, buildCreateArgs, containerName, expectedRunPaths, imageReference, resolveSpec,
   expectedContainerHostFiles, expectedEnv, securityArgsHash, validateRunPaths,
 } from "../../research-sandbox/index.js";
-import { FAKE_DIGEST, FAKE_ENTRYPOINT, IMAGE_REF, PROBE_COMMAND, RUN, SPEC } from "./fixtures.js";
+import { FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_RUNSC, IMAGE_REF, PROBE_COMMAND, RUN, SPEC } from "./fixtures.js";
 
 const MiB = 1024 * 1024;
 
@@ -202,5 +202,69 @@ describe("v5 review: recorded image environment, manifest digest and Docker data
     expect(() => resolveSpec({ imageManifestDigest: `sha256:${"00".repeat(32)}` }, SPEC)).toThrow("differs from the already recorded digest");
     expect(() => resolveSpec({ dockerDataRoot: "/data/docker" }, SPEC)).toThrow("differs from the already recorded value");
     expect(resolveSpec({ imageEnv: [...SPEC.image.env!].reverse() }, SPEC).image.env).toEqual([...SPEC.image.env!].reverse());
+  });
+});
+
+describe("M1: recording the approved runtime binary", () => {
+  const rb = (patch: Record<string, unknown>) => ({ runscBinary: { ...FAKE_RUNSC, args: [], ...patch } });
+
+  it("nothing is recorded by default; a valid record (empty args) is frozen", () => {
+    expect(SANDBOX_SPEC.runscBinary).toBeNull();
+    const s1 = resolveSpec(rb({}));
+    expect(s1.runscBinary).toEqual({ path: "/usr/local/bin/runsc", sha256: FAKE_RUNSC.sha256, args: [] });
+    expect(Object.isFrozen(s1.runscBinary)).toBe(true);
+    expect(Object.isFrozen(s1.runscBinary!.args)).toBe(true);
+  });
+
+  it.each([
+    ["a path outside the system binary directories", rb({ path: "/tmp/runsc" }), "runscBinary.path: must be a file directly inside"],
+    ["a path in a home directory", rb({ path: "/home/user/bin/runsc" }), "runscBinary.path"],
+    ["a nested or traversing path", rb({ path: "/usr/local/bin/../../tmp/runsc" }), "runscBinary.path"],
+    ["a relative path", rb({ path: "runsc" }), "runscBinary.path"],
+    ["a malformed hash", rb({ sha256: "ABC" }), "runscBinary.sha256"],
+    ["--network=host", rb({ args: ["--network=host"] }), "runscBinary.args: must be an empty array"],
+    ["--net-raw", rb({ args: ["--net-raw"] }), "runscBinary.args: must be an empty array"],
+    ["--allow-flag-override", rb({ args: ["--allow-flag-override=true"] }), "runscBinary.args: must be an empty array"],
+    ["--ignore-cgroups", rb({ args: ["--ignore-cgroups"] }), "runscBinary.args: must be an empty array"],
+    ["a test-only flag", rb({ args: ["--TESTONLY-unsafe-nonroot"] }), "runscBinary.args"],
+    ["duplicate flags", rb({ args: ["--debug", "--debug"] }), "runscBinary.args: must be an empty array"],
+    ["a malformed flag", rb({ args: ["network=host"] }), "runscBinary.args: must be an empty array"],
+    ["args not an array", rb({ args: "--debug" }), "runscBinary.args"],
+    ["an extra key", rb({ shim: "/usr/bin/containerd-shim" }), "runscBinary: must be { path, sha256, args }"],
+    ["null", { runscBinary: null }, "runscBinary: must be { path, sha256, args }"],
+  ])("refuses %s", (_label, overrides, message) => {
+    expect(() => resolveSpec(overrides)).toThrow(message);
+  });
+
+  it("refuses a getter and a re-pin to a different binary", () => {
+    let reads = 0;
+    const getter = { path: "/usr/local/bin/runsc", args: [] } as any;
+    Object.defineProperty(getter, "sha256", { enumerable: true, get: () => { reads += 1; return FAKE_RUNSC.sha256; } });
+    expect(() => resolveSpec({ runscBinary: getter })).toThrow("plain values");
+    expect(reads).toBe(0);
+    expect(() => resolveSpec(rb({ sha256: "00".repeat(32) }), SPEC)).toThrow("differs from the already recorded binary");
+    expect(resolveSpec(rb({}), SPEC).runscBinary).toEqual(SPEC.runscBinary);
+  });
+});
+
+describe("C1 and C4: recording requires empty runtime args and a plain binary name", () => {
+  const rec = (patch: Record<string, unknown>) => () => resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], ...patch } });
+
+  it.each([
+    [["--platform=systrap"]], [["--debug-log=/etc/cron.d/x"]], [["--log=/root/.bashrc"]], [["--fsgofer-host-uds"]], [["--rootless"]],
+    [["--network=HOST"]], [["--watchdog-action=log"]], [[""]], [[42]], ["--debug"], [null], [{}],
+  ])("C1: args %j refused", (args) => {
+    expect(rec({ args })).toThrow("runscBinary.args: must be an empty array (no runsc runtime flags are approved)");
+  });
+
+  it.each([["/usr/local/bin/.."], ["/usr/bin/."], ["/usr/local/bin/..."], ["/usr/local/bin/.runsc"], ["/usr/sbin/."]])("C4: %s refused", (p) => {
+    expect(rec({ path: p })).toThrow("runscBinary.path: must be a file directly inside");
+  });
+
+  it("C4: ordinary names are still accepted, and the directory restriction still applies", () => {
+    expect(resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], path: "/usr/bin/runsc-2026.1" } }).runscBinary!.path).toBe("/usr/bin/runsc-2026.1");
+    expect(resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], path: "/usr/local/sbin/runsc_x" } }).runscBinary!.path).toBe("/usr/local/sbin/runsc_x");
+    expect(rec({ path: "/opt/runsc" })).toThrow("runscBinary.path");
+    expect(rec({ path: "/usr/local/bin/sub/runsc" })).toThrow("runscBinary.path");
   });
 });

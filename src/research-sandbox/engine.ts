@@ -50,6 +50,12 @@ export interface EngineInfo {
   readonly runtimes: readonly string[];
   /** Daemon seccomp profile from `docker info` SecurityOptions; null if not reported unambiguously (or Podman). */
   readonly seccompProfile: string | null;
+  /**
+   * Each runtime's configuration exactly as `docker info` reports it
+   * (e.g. { path, runtimeArgs }); checked by verifyRuntimeBinary. Daemon
+   * self-report: it says what the daemon claims to execute, not what it does.
+   */
+  readonly runtimeConfigs: Readonly<Record<string, unknown>>;
 }
 
 export interface ContainerEngine {
@@ -188,12 +194,14 @@ export function createCliEngine(binary: string, configDir: string, runner: Proce
       const j = parseJson(r.stdout, "info") as Record<string, any>;
       if (kind === "docker") {
         const opts: unknown[] = Array.isArray(j?.SecurityOptions) ? j.SecurityOptions : [];
-        const runtimes = j?.Runtimes && typeof j.Runtimes === "object" ? Object.keys(j.Runtimes) : [];
-        return { engine: "docker", rootless: opts.some((o) => o === "name=rootless"), runtimes, seccompProfile: seccompProfileOf(opts) };
+        const runtimesObj = j?.Runtimes && typeof j.Runtimes === "object" && !Array.isArray(j.Runtimes) ? j.Runtimes as Record<string, unknown> : {};
+        const runtimes = Object.keys(runtimesObj);
+        const runtimeConfigs = Object.freeze(Object.fromEntries(runtimes.map((n) => [n, structuredClone(runtimesObj[n])])));
+        return { engine: "docker", rootless: opts.some((o) => o === "name=rootless"), runtimes, seccompProfile: seccompProfileOf(opts), runtimeConfigs };
       }
       const rootless = j?.host?.security?.rootless === true;
       const name = j?.host?.ociRuntime?.name;
-      return { engine: "podman", rootless, runtimes: typeof name === "string" ? [name] : [], seccompProfile: null };
+      return { engine: "podman", rootless, runtimes: typeof name === "string" ? [name] : [], seccompProfile: null, runtimeConfigs: Object.freeze({}) };
     },
     async create(args, imageRef) {
       const problem = createArgvProblem(args, imageRef);

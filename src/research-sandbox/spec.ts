@@ -95,6 +95,22 @@ export interface SandboxSpec {
   readonly dockerDataRoot: string | null;
   /** Fixed container hostname set by the create argv (so Config.Hostname has a known value). */
   readonly hostname: "sandbox";
+  /**
+   * The approved gVisor runtime binary on the target host, recorded at a
+   * separately approved host setup: absolute path, SHA-256 of its contents
+   * and its runtime arguments, which must be EMPTY: no runsc flag has been
+   * reviewed and approved, so any configured flag refuses. null =
+   * not recorded: an isolating runtime can't be verified on the host, so
+   * preflight refuses. A matching hash identifies the file; it does not by
+   * itself prove isolation (see host-paths.ts verifyRuntimeBinary).
+   */
+  readonly runscBinary: RuntimeBinary | null;
+}
+
+export interface RuntimeBinary {
+  readonly path: string;
+  readonly sha256: string;
+  readonly args: readonly string[];
 }
 
 export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
@@ -123,6 +139,7 @@ export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
   gvisorProcVersion: null,
   dockerDataRoot: null,
   hostname: "sandbox",
+  runscBinary: null,
 }) as SandboxSpec;
 
 /** The exact environment a container must have: the recorded image environment plus ours. null if the image's isn't recorded. */
@@ -156,8 +173,13 @@ export type SpecOverrides = Partial<Record<(typeof NUMERIC_LIMITS)[number], numb
   readonly imageEnv?: readonly string[];
   readonly imageManifestDigest?: string;
   readonly dockerDataRoot?: string;
+  readonly runscBinary?: RuntimeBinary;
 };
-const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot"];
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary"];
+/** Root-owned system directories the approved runtime binary may live in. */
+export const RUNTIME_BINARY_DIRS = Object.freeze(["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin"]);
+/** A binary file name: no dot-only or hidden names (".", "..", "...", ".x"). */
+const RUNTIME_BINARY_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 const ENV_ENTRY = /^([A-Za-z_][A-Za-z0-9_]*)=([\x20-\x7e]*)$/;
 
 /**
@@ -245,6 +267,27 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
       violations.push("dockerDataRoot: differs from the already recorded value");
     } else {
       next.dockerDataRoot = r;
+    }
+  }
+  if ("runscBinary" in values) {
+    const b = values.runscBinary as Record<string, unknown> | null;
+    const okShape = typeof b === "object" && b !== null && !Array.isArray(b) &&
+      Object.keys(b).every((k) => ["path", "sha256", "args"].includes(k)) &&
+      Object.values(Object.getOwnPropertyDescriptors(b)).every((d) => !d.get && !d.set);
+    const path = okShape ? b!.path : undefined;
+    const args = okShape ? b!.args : undefined;
+    if (!okShape) {
+      violations.push("runscBinary: must be { path, sha256, args } with plain values");
+    } else if (typeof path !== "string" || !RUNTIME_BINARY_DIRS.some((d) => path.startsWith(`${d}/`) && RUNTIME_BINARY_NAME.test(path.slice(d.length + 1)))) {
+      violations.push(`runscBinary.path: must be a file directly inside ${RUNTIME_BINARY_DIRS.join(", ")} (no dot-only or hidden names)`);
+    } else if (typeof b!.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b!.sha256)) {
+      violations.push("runscBinary.sha256: must be 64 lowercase hex characters");
+    } else if (!Array.isArray(args) || args.length !== 0) {
+      violations.push("runscBinary.args: must be an empty array (no runsc runtime flags are approved)");
+    } else if (base.runscBinary !== null && JSON.stringify(base.runscBinary) !== JSON.stringify({ path, sha256: b!.sha256, args })) {
+      violations.push("runscBinary: differs from the already recorded binary");
+    } else {
+      next.runscBinary = Object.freeze({ path, sha256: b!.sha256 as string, args: Object.freeze([...(args as string[])]) });
     }
   }
   if (violations.length > 0) throw new SandboxSpecError(violations);

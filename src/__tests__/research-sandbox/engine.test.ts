@@ -39,13 +39,13 @@ describe("engine adapter (fake runner)", () => {
   it("docker info: parses rootless, runtimes and the seccomp profile only (no other fields leak)", async () => {
     const f = fakeRunner([okResult(JSON.stringify({ SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], Runtimes: { runc: {}, runsc: {} }, HttpsProxy: "http://user:pw@proxy" }))]);
     const info = await docker(f.runner).info();
-    expect(info).toEqual({ engine: "docker", rootless: true, runtimes: ["runc", "runsc"], seccompProfile: "builtin" });
+    expect(info).toEqual({ engine: "docker", rootless: true, runtimes: ["runc", "runsc"], seccompProfile: "builtin", runtimeConfigs: { runc: {}, runsc: {} } });
     expect(f.calls[0]).toMatchObject({ file: "/usr/bin/docker", args: [...G, "info", "--format", "{{json .}}"] });
   });
 
   it("podman info is parsed (the preflight then refuses Podman)", async () => {
     const f = fakeRunner([okResult(JSON.stringify({ host: { security: { rootless: true }, ociRuntime: { name: "crun" } } }))]);
-    expect(await createCliEngine("/usr/bin/podman", DOCKER_CONFIG_DIR, f.runner).info()).toEqual({ engine: "podman", rootless: true, runtimes: ["crun"], seccompProfile: null });
+    expect(await createCliEngine("/usr/bin/podman", DOCKER_CONFIG_DIR, f.runner).info()).toEqual({ engine: "podman", rootless: true, runtimes: ["crun"], seccompProfile: null, runtimeConfigs: {} });
   });
 
   it("seccomp profile identity: exactly one well-formed seccomp entry, otherwise null (refused by the preflight)", () => {

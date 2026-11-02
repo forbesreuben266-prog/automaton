@@ -10,7 +10,9 @@ processed until a preflight on the target host returns `meets-spec`.
 > pass, until (M1) host-side verification that `runsc` is the approved gVisor
 > binary is implemented and reviewed, and (M3) the trust assumptions about the
 > pinned Docker version and its daemon-reported seccomp profile are explicitly
-> resolved. `assertUntrustedInputAllowed` refuses for the same reasons, and a
+> resolved. M1 host-side binary verification now exists (fakes only, see
+> below) but has not been reviewed or run on a real host, so the M1 blocker
+> stays. `assertUntrustedInputAllowed` refuses for the same reasons, and a
 > direct call to `rate()` returns `refused` for the approved configuration.
 > Removing a blocker is a reviewed code change.
 
@@ -107,6 +109,54 @@ running in the same process.
 | cgroup memory.max, pids.max | `/sys/fs/cgroup` | ≤ spec |
 | Kernel identity | `/proc/version` | present and well-formed (used for gVisor evidence) |
 
+### M1: runtime binary verification (required for `meets-spec`; fakes only so far)
+`runscBinary` (path, SHA-256, and runtime args that must be an **empty
+array**) is recorded at an approved host setup; `null` refuses. No runsc
+flag has been reviewed, so any configured or recorded flag refuses; adding
+one later needs a separate review. For an isolating runtime the preflight
+requires, before anything is created:
+- `docker info` configures the runtime in the classic form: `path` exactly
+  the recorded path, `runtimeArgs` absent or `[]` (`null`, strings or any
+  flag refuse), `status` absent or an object of string values; the
+  `runtimeType`/shim form, `options` or any other key refuses, because it
+  would run something other than the checked binary;
+- the path is a plain file name (no dot-only or hidden names) directly
+  inside `/usr/bin`, `/usr/sbin`, `/usr/local/bin` or `/usr/local/sbin`; `/`
+  and every directory down to it are real root-owned directories (no
+  symlinks) that group and others can't write, so only root can replace the
+  file;
+- the binary is a regular root-owned executable (no symlink, not
+  group/world-writable, no setuid/setgid), hashed through an
+  `O_NOFOLLOW|O_NONBLOCK` descriptor (a FIFO swapped in is refused instead of
+  blocking) whose inode must be the one checked, and unchanged (inode, size,
+  mtime, ctime) after hashing.
+
+Afterwards: `docker info` is **re-read after create** (before the container
+is inspected or started) **and after the canary**; the runtime must still be
+offered, its configuration must still pass the rules above and must equal
+the verified one (canonical comparison); missing, malformed, unreadable or
+changed data refuses. After the canary the binary is verified again and must
+be the identical file.
+
+Limits (why the M1 blocker remains):
+- Re-reads and re-checks only show the state at those moments. The daemon
+  starts the runtime by path, between our reads; a reconfiguration or a
+  binary swap that is undone before the next check can't be detected
+  (time-of-check/time-of-use). Only root can swap the binary under the
+  directory rules.
+- `docker info` is the daemon's own report: a dishonest daemon can report
+  the approved configuration and run something else. Unchanged reports are
+  not proof of what ran.
+- Unverified offline: the real `docker info` shape for a configured runtime
+  (the field names `path`, `runtimeArgs`, `runtimeType`, `options` and
+  `status` do appear in the local Docker binaries); whether Docker runs a
+  `path` runtime through containerd and its runc shim (those binaries are
+  not verified); and any flags Docker itself adds when invoking runsc.
+- A matching hash identifies the file; it does not prove isolation (runsc's
+  platform, host kernel and the daemon's seccomp handling still matter).
+- JSON duplicate keys in `docker info` output collapse when parsed and can't
+  be detected after parsing.
+
 ### gVisor evidence (required for `meets-spec`)
 Docker maps runtime names to arbitrary binaries, so a runtime named `runsc`
 proves nothing. gVisor runs its own emulated kernel, so the container's
@@ -153,3 +203,4 @@ on a fully configured host.
 - cgroup v2; engine CLI at an allowlisted absolute path.
 - Approved one-time pull of the pinned base image; digest, entrypoint, image environment and platform manifest digest recorded in the spec.
 - Approved host setup step: record the Docker data root (`docker info` DockerRootDir, confirmed on the host) as `dockerDataRoot`.
+- Approved host setup step: record the runsc binary (path and SHA-256 computed on the host; runtime args must be empty and the daemon must configure none) as `runscBinary`.

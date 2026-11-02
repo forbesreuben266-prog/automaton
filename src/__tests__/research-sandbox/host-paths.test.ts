@@ -8,8 +8,16 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { nodeHostFs, resolveSpec, sameIdentities, validatePolicy, verifyContainerHostFiles, verifyEngineTarget, verifyRunDirectories } from "../../research-sandbox/index.js";
-import { CONTAINER_ID, DOCKER_CONFIG_DIR, ENGINE_TARGET, FAKE_DATA_ROOT, OPERATOR_UID, POLICY, RUN, SPEC, compliantHostLayout, fakeHostFs } from "./fixtures.js";
+import { execFileSync, spawnSync } from "child_process";
+import { createHash } from "crypto";
+import {
+  RUNTIME_BINARY_MAX_BYTES, nodeHostFs, resolveSpec, sameIdentities, sameRuntimeBinary, validatePolicy, verifyContainerHostFiles, verifyEngineTarget,
+  verifyRunDirectories, verifyRuntimeBinary,
+} from "../../research-sandbox/index.js";
+import {
+  CONTAINER_ID, DOCKER_CONFIG_DIR, DOCKER_INFO, ENGINE_TARGET, FAKE_DATA_ROOT, FAKE_RUNSC_PATH, FAKE_RUNSC_SHA256, OPERATOR_UID, POLICY, RUN, SPEC,
+  compliantHostLayout, fakeHostFs,
+} from "./fixtures.js";
 
 const check = (mutate: (l: ReturnType<typeof compliantHostLayout>) => void, policy: any = POLICY) => {
   const layout = compliantHostLayout();
@@ -187,4 +195,153 @@ describe("v5 review finding 1: host files behind /etc/hosts, /etc/hostname, /etc
   ])("refuses: %s", (_label, mutate, message) => {
     expect(files(mutate)).toContain(message);
   });
+});
+
+describe("M1: host-side verification of the approved runtime binary (fakes only)", () => {
+  const verify = (mutate: (l: any) => void = () => {}, info: any = DOCKER_INFO, spec = SPEC, wrap?: (fs: any) => any) => {
+    const layout = compliantHostLayout();
+    mutate(layout);
+    const hostFs = fakeHostFs(layout);
+    return verifyRuntimeBinary(info, "runsc", spec, wrap ? wrap(hostFs) : hostFs);
+  };
+  const msg = (r: ReturnType<typeof verify>) => r.violations.join("\n");
+
+  it("the recorded binary, configured by docker info, root-owned under root-owned directories, with the recorded hash: verified", () => {
+    const r = verify();
+    expect(r.violations).toEqual([]);
+    expect(r.identity).toEqual({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, dev: "64769", ino: "53", size: 52_000_000, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000 });
+  });
+
+  it("no approved binary recorded: refused without touching the host", () => {
+    let calls = 0;
+    const r = verify(() => {}, DOCKER_INFO, resolveSpec({}), (f) => ({ ...f, lstat: (p: string) => { calls += 1; return f.lstat(p); } }));
+    expect(msg(r)).toContain("no approved runsc binary");
+    expect(r.identity).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  it.each([
+    ["no configuration for runsc", { ...DOCKER_INFO, runtimeConfigs: { runc: { path: "runc" } } }, 'reports no configuration for runtime "runsc"'],
+    ["a different path", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: "/opt/runsc" } } }, `must configure runsc with path ${FAKE_RUNSC_PATH}`],
+    ["a bare name resolved through the daemon's PATH", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: "runsc" } } }, "must configure runsc with path"],
+    ["the runtimeType (shim) form, which runs a different binary", { ...DOCKER_INFO, runtimeConfigs: { runsc: { runtimeType: "io.containerd.runsc.v1" } } }, "unsupported runtime configuration key(s) runtimeType"],
+    ["shim options alongside the path", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, options: { BinaryName: "/tmp/x" } } } }, "unsupported runtime configuration key(s) options"],
+    ["extra runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: ["--network=host"] } } }, "runtimeArgs must be absent or empty"],
+    ["malformed runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: "--debug" } } }, "runtimeArgs must be absent or empty"],
+    ["config not an object", { ...DOCKER_INFO, runtimeConfigs: { runsc: "/usr/local/bin/runsc" } }, 'reports no configuration for runtime "runsc"'],
+  ])("docker info with %s: refused", (_label, info, message) => {
+    const r = verify(() => {}, info);
+    expect(msg(r)).toContain(message);
+    expect(r.identity).toBeNull();
+  });
+
+  it.each([
+    ["the binary is a symlink", (l: any) => { l[FAKE_RUNSC_PATH].kind = "symlink"; }, `${FAKE_RUNSC_PATH}: is a symbolic link`],
+    ["the binary is a directory", (l: any) => { l[FAKE_RUNSC_PATH].kind = "dir"; }, "is not a regular file"],
+    ["the binary is missing", (l: any) => { delete l[FAKE_RUNSC_PATH]; }, "cannot be checked (ENOENT)"],
+    ["the binary owned by a non-root user", (l: any) => { l[FAKE_RUNSC_PATH].uid = OPERATOR_UID; }, "not root"],
+    ["the binary group-writable (replaceable in place)", (l: any) => { l[FAKE_RUNSC_PATH].mode = 0o100775; }, "writable by group or others"],
+    ["the binary not executable", (l: any) => { l[FAKE_RUNSC_PATH].mode = 0o100644; }, "is not executable"],
+    ["the binary setuid", (l: any) => { l[FAKE_RUNSC_PATH].mode = 0o104755; }, "setuid or setgid"],
+    ["the binary resolving elsewhere", (l: any) => { l[FAKE_RUNSC_PATH].realpath = "/opt/other/runsc"; }, "resolves to /opt/other/runsc"],
+    ["a parent directory is a symlink", (l: any) => { l["/usr/local/bin"].kind = "symlink"; }, "/usr/local/bin: is a symbolic link"],
+    ["a parent directory writable by others (binary replaceable by rename)", (l: any) => { l["/usr/local"].mode = 0o40777; }, "/usr/local: writable by group or others"],
+    ["a parent directory owned by a non-root user", (l: any) => { l["/usr"].uid = OPERATOR_UID; }, "/usr: owned by uid"],
+    ["the contents differ from the recorded hash", (l: any) => { l[FAKE_RUNSC_PATH].sha256 = "00".repeat(32); }, "SHA-256 does not match the recorded approved binary"],
+    ["the binary larger than the hashing limit", (l: any) => { l[FAKE_RUNSC_PATH].size = RUNTIME_BINARY_MAX_BYTES + 1; }, "cannot be hashed (EFBIG)"],
+  ])("%s: refused", (_label, mutate, message) => {
+    const r = verify(mutate);
+    expect(msg(r)).toContain(message);
+    expect(r.identity).toBeNull();
+  });
+
+  it("time-of-check/time-of-use: the file hashed must be the inode lstat saw", () => {
+    const r = verify(() => {}, DOCKER_INFO, SPEC, (f) => ({ ...f, sha256File: (p: string, m: number) => ({ ...f.sha256File(p, m), ino: "999" }) }));
+    expect(msg(r)).toContain("the file hashed is not the file checked");
+  });
+
+  it("time-of-check/time-of-use: a file swapped or modified while being hashed is refused", () => {
+    for (const change of [{ ino: 999 }, { mtimeMs: 1_800_000_000_000 }, { ctimeMs: 1_800_000_000_000 }, { size: 1 }]) {
+      const r = verify(() => {}, DOCKER_INFO, SPEC, (f) => {
+        let seen = 0;
+        return { ...f, lstat: (p: string) => { const st = f.lstat(p); if (p !== FAKE_RUNSC_PATH) return st; seen += 1; return seen > 1 ? { ...st, ...change } : st; } };
+      });
+      expect(msg(r), JSON.stringify(change)).toMatch(/changed while it was being verified|the file hashed is not the file checked/);
+    }
+  });
+
+  it("sameRuntimeBinary detects any difference in path, hash, inode, size or times", () => {
+    const id = verify().identity!;
+    expect(sameRuntimeBinary(id, { ...id })).toBe(true);
+    for (const change of [{ path: "/usr/bin/runsc" }, { sha256: "00".repeat(32) }, { dev: "1" }, { ino: "1" }, { size: 1 }, { mtimeMs: 1 }, { ctimeMs: 1 }]) {
+      expect(sameRuntimeBinary(id, { ...id, ...change }), JSON.stringify(change)).toBe(false);
+    }
+  });
+
+  it("the real HostFs hashes through O_NOFOLLOW: symlinks, directories and oversized files fail (temporary folder only)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rs-hash-"));
+    try {
+      const file = path.join(dir, "bin");
+      const content = Buffer.from("fake runtime binary contents\n".repeat(1000));
+      fs.writeFileSync(file, content);
+      const d = nodeHostFs.sha256File(file, 1 << 20);
+      expect(d.sha256).toBe(createHash("sha256").update(content).digest("hex"));
+      expect(d.size).toBe(content.length);
+      expect(d.ino).toBe(String(fs.statSync(file).ino));
+      fs.symlinkSync(file, path.join(dir, "link"));
+      expect(() => nodeHostFs.sha256File(path.join(dir, "link"), 1 << 20)).toThrow(expect.objectContaining({ code: "ELOOP" }));
+      expect(() => nodeHostFs.sha256File(dir, 1 << 20)).toThrow();
+      expect(() => nodeHostFs.sha256File(file, 10)).toThrow(expect.objectContaining({ code: "EFBIG" }));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("C1, C3, C5: runtime arguments, FIFO hashing and status shape", () => {
+  const cfg = (runsc: unknown) => verifyRuntimeBinary({ ...DOCKER_INFO, runtimeConfigs: { runsc } } as any, "runsc", SPEC, fakeHostFs(compliantHostLayout())).violations.join("\n");
+
+  it.each([
+    ["absent runtimeArgs", { path: FAKE_RUNSC_PATH }],
+    ["empty runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: [] }],
+    ["an empty status object", { path: FAKE_RUNSC_PATH, status: {} }],
+    ["a status object of strings", { path: FAKE_RUNSC_PATH, status: { "org.opencontainers.runtime-spec.features": "{\"ociVersionMin\":\"1.0.0\"}" } }],
+  ])("C1/C5 accepted: %s", (_label, runsc) => {
+    expect(cfg(runsc)).toBe("");
+  });
+
+  it.each([
+    ["C1: one flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--platform=systrap"] }, "runtimeArgs must be absent or empty"],
+    ["C1: a host-path logging flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--debug-log=/etc/cron.d/x"] }, "runtimeArgs must be absent or empty"],
+    ["C1: null runtimeArgs (unexpected format)", { path: FAKE_RUNSC_PATH, runtimeArgs: null }, "runtimeArgs must be absent or empty"],
+    ["C1: string runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: "--rootless" }, "runtimeArgs must be absent or empty"],
+    ["C1: an empty-string arg", { path: FAKE_RUNSC_PATH, runtimeArgs: [""] }, "runtimeArgs must be absent or empty"],
+    ["C5: numeric status", { path: FAKE_RUNSC_PATH, status: 42 }, "status, when reported, must be an object of string values"],
+    ["C5: array status", { path: FAKE_RUNSC_PATH, status: ["a"] }, "status, when reported, must be an object of string values"],
+    ["C5: null status", { path: FAKE_RUNSC_PATH, status: null }, "status, when reported, must be an object of string values"],
+    ["C5: string status", { path: FAKE_RUNSC_PATH, status: "ok" }, "status, when reported, must be an object of string values"],
+    ["C5: non-string value", { path: FAKE_RUNSC_PATH, status: { a: 1 } }, "status, when reported, must be an object of string values"],
+    ["C5: nested object value", { path: FAKE_RUNSC_PATH, status: { a: { b: "c" } } }, "status, when reported, must be an object of string values"],
+  ])("refused: %s", (_label, runsc, message) => {
+    expect(cfg(runsc)).toContain(message);
+  });
+
+  it("C3: hashing a FIFO is refused promptly instead of blocking (real filesystem, child process with a timeout)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rs-fifo-"));
+    try {
+      const fifo = path.join(dir, "runsc");
+      execFileSync("/usr/bin/mkfifo", [fifo]);
+      const script = path.join(dir, "probe.mts");
+      const hostPaths = path.resolve(__dirname, "../../research-sandbox/host-paths.ts");
+      fs.writeFileSync(script, `import { nodeHostFs } from ${JSON.stringify(hostPaths)};
+try { nodeHostFs.sha256File(process.argv[2], 1 << 20); console.log("RETURNED"); } catch (e) { console.log("THREW " + e.code); }\n`);
+      const tsx = path.resolve(__dirname, "../../../node_modules/.bin/tsx");
+      const r = spawnSync(tsx, [script, fifo], { encoding: "utf8", timeout: 20_000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir } });
+      expect(r.error, "the hash call blocked until the timeout").toBeUndefined();
+      expect(r.signal).toBeNull();
+      expect(r.stdout.trim()).toBe("THREW EINVAL"); // opened without blocking, then refused as not a regular file
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

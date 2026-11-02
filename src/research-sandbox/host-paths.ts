@@ -30,8 +30,10 @@
  * empty, outside the runs root). Nothing is created or changed.
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { expectedContainerHostFiles, validateRunPaths, type RunPaths, type SandboxSpec } from "./spec.js";
+import type { EngineInfo } from "./engine.js";
 
 export interface HostStat {
   isSymbolicLink(): boolean;
@@ -42,12 +44,25 @@ export interface HostStat {
   readonly mode: number;
   readonly dev: number | bigint;
   readonly ino: number | bigint;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+/** Result of hashing a file through a no-follow descriptor (identity of the inode actually read). */
+export interface FileDigest {
+  readonly sha256: string;
+  readonly dev: string;
+  readonly ino: string;
+  readonly size: number;
 }
 
 export interface HostFs {
   lstat(path: string): HostStat;
   realpath(path: string): string;
   readdir(path: string): string[];
+  /** SHA-256 of a regular file opened with O_NOFOLLOW|O_NONBLOCK (a symlink fails; a FIFO can't block); refuses non-regular files and files larger than maxBytes. */
+  sha256File(path: string, maxBytes: number): FileDigest;
 }
 
 /** Real filesystem access (target host only; not used by the S1 tests). */
@@ -55,6 +70,29 @@ export const nodeHostFs: HostFs = Object.freeze({
   lstat: (p: string) => fs.lstatSync(p),
   realpath: (p: string) => fs.realpathSync.native(p),
   readdir: (p: string) => fs.readdirSync(p),
+  sha256File: (p: string, maxBytes: number): FileDigest => {
+    // O_NOFOLLOW: a symlink at the final component fails (ELOOP) instead of being followed.
+    // O_NONBLOCK: a FIFO opens immediately (and is then refused as not a regular file) instead of blocking forever.
+    const fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) throw Object.assign(new Error(`${p}: not a regular file`), { code: "EINVAL" });
+      if (st.size > maxBytes) throw Object.assign(new Error(`${p}: larger than ${maxBytes} bytes`), { code: "EFBIG" });
+      const hash = createHash("sha256");
+      const buf = Buffer.alloc(1024 * 1024);
+      let total = 0;
+      for (;;) {
+        const n = fs.readSync(fd, buf, 0, buf.length, null);
+        if (n === 0) break;
+        total += n;
+        if (total > maxBytes) throw Object.assign(new Error(`${p}: grew beyond ${maxBytes} bytes while reading`), { code: "EFBIG" });
+        hash.update(buf.subarray(0, n));
+      }
+      return { sha256: hash.digest("hex"), dev: String(st.dev), ino: String(st.ino), size: total };
+    } finally {
+      fs.closeSync(fd);
+    }
+  },
 });
 
 /**
@@ -295,4 +333,156 @@ export function verifyContainerHostFiles(spec: SandboxSpec, containerId: string,
   for (let i = 1; i <= parts.length; i++) check(`/${parts.slice(0, i).join("/")}`, "dir");
   for (const file of Object.values(expected)) check(file, "file");
   return v;
+}
+
+/** Upper bound for hashing the runtime binary (runsc is tens of MiB). */
+export const RUNTIME_BINARY_MAX_BYTES = 256 * 1024 * 1024;
+const RUNTIME_CONFIG_KEYS = new Set(["path", "runtimeArgs", "status"]);
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * The daemon-reported configuration of an isolating runtime must be exactly
+ * the classic form for the recorded binary: { path: <recorded path> }, with
+ * runtimeArgs absent or an empty array, and status (if reported) an object
+ * of string values. Anything missing, malformed or extra refuses: a
+ * runtimeType/shim form or options would run something other than the
+ * checked binary, and no runsc flag is approved. Returns violations.
+ */
+export function runtimeConfigProblems(info: EngineInfo, runtime: string, spec: SandboxSpec): string[] {
+  const approved = spec.runscBinary;
+  if (approved === null) return ["runtime binary: no approved runsc binary (path, SHA-256) has been recorded (approved host setup step)"];
+  const config = info?.runtimeConfigs?.[runtime];
+  if (!isPlainObject(config)) return [`runtime binary: docker info reports no configuration for runtime "${runtime}"`];
+  const v: string[] = [];
+  const unknown = Object.keys(config).filter((k) => !RUNTIME_CONFIG_KEYS.has(k));
+  if (unknown.length > 0) v.push(`runtime binary: unsupported runtime configuration key(s) ${unknown.slice(0, 3).join(", ")} (only path, an empty runtimeArgs and status are verifiable)`);
+  if (config.path !== approved.path) v.push(`runtime binary: docker info must configure ${runtime} with path ${approved.path} (got ${JSON.stringify(config.path)?.slice(0, 80)})`);
+  if (config.runtimeArgs !== undefined && !(Array.isArray(config.runtimeArgs) && config.runtimeArgs.length === 0)) {
+    v.push("runtime binary: runtimeArgs must be absent or empty (no runsc runtime flags are approved)");
+  }
+  if (config.status !== undefined && !(isPlainObject(config.status) && Object.values(config.status).every((x) => typeof x === "string"))) {
+    v.push("runtime binary: status, when reported, must be an object of string values");
+  }
+  return v;
+}
+
+/** Canonical text of a runtime's reported configuration (sorted keys), for change detection; null if missing or not an object. */
+export function canonicalRuntimeConfig(info: EngineInfo, runtime: string): string | null {
+  const config = info?.runtimeConfigs?.[runtime];
+  if (!isPlainObject(config)) return null;
+  const canon = (x: unknown): unknown => (Array.isArray(x) ? x.map(canon) : isPlainObject(x)
+    ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, canon(x[k])])) : x);
+  return JSON.stringify(canon(config));
+}
+
+/** What was verified: enough to detect replacement or modification later. */
+export interface RuntimeBinaryIdentity {
+  readonly path: string;
+  readonly sha256: string;
+  readonly dev: string;
+  readonly ino: string;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+export interface RuntimeBinaryCheck {
+  readonly violations: readonly string[];
+  readonly identity: RuntimeBinaryIdentity | null;
+}
+
+/**
+ * M1 host-side check of an isolating runtime (fakes-only in S1; not yet run
+ * on a real host). Fails closed on anything missing or different:
+ * 1. the approved binary (path, SHA-256; runtime args must be empty) must be
+ *    recorded;
+ * 2. `docker info` must configure the runtime exactly as runtimeConfigProblems
+ *    requires (classic { path } form for that path, no runtime flags);
+ * 3. "/" and every directory down to the binary: real directories (never
+ *    symlinks), resolving to themselves, root-owned, not group/world-writable,
+ *    so only root can replace the file;
+ * 4. the binary: a regular root-owned file (never a symlink), executable, not
+ *    group/world-writable, no setuid/setgid bit, resolving to itself;
+ * 5. its SHA-256, read through an O_NOFOLLOW|O_NONBLOCK descriptor (a FIFO
+ *    swapped in can't block the open), equals the recorded
+ *    value, and the descriptor's inode is the one lstat saw;
+ * 6. lstat after hashing shows the same inode, size, mtime and ctime (no
+ *    replacement or in-place change while it was read).
+ * Limits: the daemon starts the runtime by path later (time-of-check/time-of-
+ * use; only root can swap it under rule 3, and the preflight re-checks it
+ * after the canary); `docker info` is the daemon's own report, so a dishonest
+ * daemon can still run something else; and a matching hash identifies the
+ * file, it does not prove the runtime isolates (gVisor flags, platform and
+ * kernel still matter). These are why meets-spec stays blocked (M1, M3).
+ */
+export function verifyRuntimeBinary(info: EngineInfo, runtime: string, spec: SandboxSpec, hostFs: HostFs): RuntimeBinaryCheck {
+  const configProblems = runtimeConfigProblems(info, runtime, spec);
+  if (configProblems.length > 0) return { violations: configProblems, identity: null };
+  const approved = spec.runscBinary!;
+  const v: string[] = [];
+
+  const stat = (path: string): HostStat | null => {
+    try { return hostFs.lstat(path); } catch (err) {
+      v.push(`${path}: cannot be checked (${(err as NodeJS.ErrnoException).code ?? "error"})`);
+      return null;
+    }
+  };
+  const resolvesToItself = (path: string) => {
+    try {
+      const real = hostFs.realpath(path);
+      if (real !== path) v.push(`${path}: resolves to ${real}`);
+    } catch (err) {
+      v.push(`${path}: cannot be resolved (${(err as NodeJS.ErrnoException).code ?? "error"})`);
+    }
+  };
+  const parts = approved.path.split("/").filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const dir = i === 0 ? "/" : `/${parts.slice(0, i).join("/")}`;
+    const st = stat(dir);
+    if (!st) continue;
+    if (st.isSymbolicLink()) { v.push(`${dir}: is a symbolic link`); continue; }
+    if (!st.isDirectory()) { v.push(`${dir}: is not a directory`); continue; }
+    resolvesToItself(dir);
+    if (st.uid !== 0) v.push(`${dir}: owned by uid ${st.uid}, not root`);
+    if ((st.mode & 0o022) !== 0) v.push(`${dir}: writable by group or others (mode ${(st.mode & 0o777).toString(8)})`);
+  }
+  const before = stat(approved.path);
+  if (!before) return { violations: v, identity: null };
+  if (before.isSymbolicLink()) v.push(`${approved.path}: is a symbolic link`);
+  else if (!before.isFile()) v.push(`${approved.path}: is not a regular file`);
+  else {
+    resolvesToItself(approved.path);
+    if (before.uid !== 0) v.push(`${approved.path}: owned by uid ${before.uid}, not root`);
+    if ((before.mode & 0o022) !== 0) v.push(`${approved.path}: writable by group or others (mode ${(before.mode & 0o777).toString(8)})`);
+    if ((before.mode & 0o111) === 0) v.push(`${approved.path}: is not executable`);
+    if ((before.mode & 0o6000) !== 0) v.push(`${approved.path}: has a setuid or setgid bit`);
+  }
+  if (v.length > 0) return { violations: v, identity: null };
+
+  let digest: FileDigest;
+  try {
+    digest = hostFs.sha256File(approved.path, RUNTIME_BINARY_MAX_BYTES);
+  } catch (err) {
+    return { violations: [`${approved.path}: cannot be hashed (${(err as NodeJS.ErrnoException).code ?? "error"})`], identity: null };
+  }
+  if (digest.dev !== String(before.dev) || digest.ino !== String(before.ino) || digest.size !== before.size) {
+    v.push(`${approved.path}: the file hashed is not the file checked (replaced during verification)`);
+  }
+  if (digest.sha256 !== approved.sha256) v.push(`${approved.path}: SHA-256 does not match the recorded approved binary`);
+  const after = stat(approved.path);
+  if (after && (String(after.dev) !== String(before.dev) || String(after.ino) !== String(before.ino) || after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.isSymbolicLink())) {
+    v.push(`${approved.path}: changed while it was being verified`);
+  }
+  if (v.length > 0) return { violations: v, identity: null };
+  return {
+    violations: [],
+    identity: Object.freeze({ path: approved.path, sha256: digest.sha256, dev: digest.dev, ino: digest.ino, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs }),
+  };
+}
+
+/** True if a later verification found exactly the same file (path, hash, inode, size, times). */
+export function sameRuntimeBinary(a: RuntimeBinaryIdentity, b: RuntimeBinaryIdentity): boolean {
+  return a.path === b.path && a.sha256 === b.sha256 && a.dev === b.dev && a.ino === b.ino && a.size === b.size &&
+    a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }

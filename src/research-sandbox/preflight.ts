@@ -9,8 +9,14 @@
  *     engine call; engine info; Podman is refused (its inspect/canary formats are not
  *     verified); the daemon must report Docker's built-in seccomp profile
  *     (custom, unconfined or unreported refuses); a runtime from the
- *     specification must be available; a leftover container with this run's
- *     canary name refuses;
+ *     specification must be available; (M1) for an isolating runtime, its
+ *     binary is verified on the host (recorded path and SHA-256, no runtime
+ *     flags; see host-paths.ts verifyRuntimeBinary) and re-verified after the
+ *     canary, and `docker info` is re-read after create and after the canary
+ *     with the runtime's configuration required to be unchanged (these
+ *     re-reads narrow, but cannot close, the window in which the daemon could
+ *     be reconfigured; they are no defence against a dishonest daemon);
+ *     a leftover container with this run's canary name refuses;
  *  4. CREATE the canary with the exact production flags (--pull never);
  *  5. INSPECT it: every property, the container id and name, and the host
  *     folders re-verified with unchanged identities; the host files behind
@@ -53,7 +59,8 @@
 import { evaluateCanary, verifyGvisorEvidence } from "./canary.js";
 import type { ContainerEngine, EngineInfo } from "./engine.js";
 import {
-  readHostProcVersion, sameIdentities, verifyContainerHostFiles, verifyEngineTarget, verifyRunDirectories, type HostFs, type HostPathPolicy,
+  canonicalRuntimeConfig, readHostProcVersion, runtimeConfigProblems, sameIdentities, sameRuntimeBinary, verifyContainerHostFiles, verifyRuntimeBinary,
+  type RuntimeBinaryIdentity, verifyEngineTarget, verifyRunDirectories, type HostFs, type HostPathPolicy,
 } from "./host-paths.js";
 import { validateInspect } from "./inspect.js";
 import {
@@ -72,6 +79,8 @@ export interface RunBinding {
   readonly securityArgsSha256: string;
   /** The recorded gVisor /proc/version reference this result was verified against. */
   readonly gvisorProcVersion: string;
+  /** SHA-256 of the runtime binary verified on the host before create and re-verified after the canary ("" for development runtimes). */
+  readonly runtimeBinarySha256: string;
 }
 
 export interface CleanupOutcome {
@@ -113,7 +122,7 @@ export interface PreflightOptions {
  * changing it is a reviewed code change, never a runtime option.
  */
 export const MEETS_SPEC_BLOCKERS: readonly string[] = Object.freeze([
-  "M1: host-side runtime verification (that runsc is the approved gVisor binary) is not implemented; the in-container /proc/version fingerprint alone is not sufficient",
+  "M1: host-side runtime binary and configuration verification is implemented against fakes only and has not been reviewed or exercised on a real host; a matching binary hash, unchanged daemon-reported configuration and the in-container /proc/version fingerprint do not by themselves prove isolation",
   "M3: trust in the daemon-reported seccomp profile and the pinned Docker version has not been explicitly resolved",
 ]);
 
@@ -197,6 +206,18 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   }
   const runtime = chooseRuntime(info, spec);
   if (runtime === null) return result({ violations: ["no runtime from the specification is available"], steps, engine: info });
+  // M1: an isolating runtime's binary must be verified on the host before anything is created; failure refuses outright.
+  let binary: RuntimeBinaryIdentity | null = null;
+  let runtimeConfig: string | null = null;
+  if (spec.isolatingRuntimes.includes(runtime)) {
+    const check = verifyRuntimeBinary(info, runtime, spec, options.hostFs);
+    runtimeConfig = canonicalRuntimeConfig(info, runtime);
+    if (check.violations.length > 0 || check.identity === null || runtimeConfig === null) {
+      return result({ violations: check.violations.length > 0 ? [...check.violations] : ["runtime binary: configuration could not be recorded"], steps: [...steps, "runtime-binary-unverified"], engine: info, runtime });
+    }
+    binary = check.identity;
+    steps.push("runtime-binary-verified");
+  }
   const name = containerName(run.runId, "canary");
   try {
     if (await engine.exists(name)) {
@@ -220,7 +241,14 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   try {
     id = await engine.create(args, imageRef);
     steps.push("create");
-    ({ violations, report } = await inspectAndProbe(options, id, runtime, command, before.identities, steps));
+    // C2: the daemon's runtime configuration must be unchanged now that the container exists; otherwise never inspect or start it.
+    const fresh = runtimeConfig === null ? [] : await recheckRuntimeConfig(engine, runtime, spec, runtimeConfig, "after create");
+    if (fresh.length > 0) {
+      violations = fresh;
+    } else {
+      if (runtimeConfig !== null) steps.push("runtime-config-rechecked-after-create");
+      ({ violations, report } = await inspectAndProbe(options, id, runtime, command, before.identities, steps));
+    }
   } catch (err) {
     violations = [`preflight error: ${(err as Error).message}`];
   }
@@ -230,6 +258,19 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   steps.push(cleanup.verifiedRemoved ? "removed-verified" : "remove-unverified");
   if (!cleanup.verifiedRemoved) violations = [...violations, `cleanup: ${cleanup.detail} (container ${cleanup.containerId ?? cleanup.containerName}; manual cleanup required)`];
   if (violations.length > 0) return result({ violations, steps, engine: info, runtime, cleanup });
+
+  // M1: the same runtime configuration and the same binary must still be in place after the canary ran.
+  if (binary !== null && runtimeConfig !== null) {
+    const fresh = await recheckRuntimeConfig(engine, runtime, spec, runtimeConfig, "after the canary");
+    if (fresh.length > 0) return result({ violations: fresh, steps: [...steps, "runtime-config-changed"], engine: info, runtime, cleanup });
+    steps.push("runtime-config-rechecked-after-canary");
+    const again = verifyRuntimeBinary(info, runtime, spec, options.hostFs);
+    if (again.violations.length > 0 || again.identity === null || !sameRuntimeBinary(binary, again.identity)) {
+      return result({ violations: again.violations.length > 0 ? [...again.violations] : ["runtime binary: changed between the check before create and the re-check after the canary"],
+        steps: [...steps, "runtime-binary-changed"], engine: info, runtime, cleanup });
+    }
+    steps.push("runtime-binary-rechecked");
+  }
 
   // A runtime NAMED as isolating must be positively identified as gVisor; failure refuses outright.
   let gvisorVerified = false;
@@ -249,6 +290,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
       runId: run.runId, inputDir: run.inputDir, outputDir: run.outputDir, imageRef, runtime,
       securityArgsSha256: securityArgsHash(args, spec),
       gvisorProcVersion: spec.gvisorProcVersion ?? "",
+      runtimeBinarySha256: binary?.sha256 ?? "",
     }),
   });
 }
@@ -281,6 +323,30 @@ async function inspectAndProbe(
   let report: unknown;
   try { report = JSON.parse(r.stdout); } catch { return fail(["canary: output is not JSON"]); }
   return { violations: evaluateCanary(report, spec), report };
+}
+
+/**
+ * C2: re-reads `docker info` and requires the isolating runtime to still be
+ * offered, its configuration to still pass runtimeConfigProblems, and its
+ * canonical configuration to equal the one verified before create. Any
+ * failure to read, or missing, malformed or changed data, refuses. This
+ * detects a reconfiguration visible at these moments; it does not prove what
+ * the daemon executed (dishonest daemon) or close the race between re-reads.
+ */
+async function recheckRuntimeConfig(engine: ContainerEngine, runtime: string, spec: SandboxSpec, verified: string, when: string): Promise<string[]> {
+  let fresh: EngineInfo;
+  try {
+    fresh = await engine.info();
+  } catch (err) {
+    return [`runtime configuration (${when}): docker info failed: ${(err as Error).message}`];
+  }
+  if (typeof fresh !== "object" || fresh === null || fresh.engine !== "docker" || !Array.isArray(fresh.runtimes) || !fresh.runtimes.includes(runtime)) {
+    return [`runtime configuration (${when}): docker info no longer reports the ${runtime} runtime`];
+  }
+  const problems = runtimeConfigProblems(fresh, runtime, spec);
+  if (problems.length > 0) return problems.map((p) => `runtime configuration (${when}): ${p}`);
+  if (canonicalRuntimeConfig(fresh, runtime) !== verified) return [`runtime configuration (${when}): changed since it was verified before create`];
+  return [];
 }
 
 /** Bounded forced removal, then verification that neither the id nor the name still exists. */
@@ -327,6 +393,10 @@ export function assertUntrustedInputAllowed(r: PreflightResult, intended: { spec
   if (!Array.isArray(r.violations) || r.violations.length > 0) reasons.push("result has violations");
   if (!Array.isArray(r.steps) || !r.steps.includes("canary") || !r.steps.includes("removed-verified")) reasons.push("preflight did not complete with verified cleanup");
   if (!Array.isArray(r.steps) || !r.steps.includes("gvisor-verified")) reasons.push("gVisor was not positively verified");
+  if (!Array.isArray(r.steps) || !r.steps.includes("runtime-binary-verified") || !r.steps.includes("runtime-binary-rechecked")) reasons.push("the runtime binary was not verified before create and re-verified after the canary");
+  if (!Array.isArray(r.steps) || !r.steps.includes("runtime-config-rechecked-after-create") || !r.steps.includes("runtime-config-rechecked-after-canary")) {
+    reasons.push("the runtime configuration was not re-read after create and after the canary");
+  }
   if (!r.cleanup || r.cleanup.verifiedRemoved !== true) reasons.push("cleanup was not verified");
   const b = r.binding;
   if (!b) reasons.push("result is not bound to a run");
@@ -336,6 +406,7 @@ export function assertUntrustedInputAllowed(r: PreflightResult, intended: { spec
       if (b.runId !== run.runId || b.inputDir !== run.inputDir || b.outputDir !== run.outputDir) reasons.push("result was produced for a different run or folders");
       if (b.imageRef !== imageReference(spec)) reasons.push("result was produced for a different image");
       if (spec.gvisorProcVersion === null || b.gvisorProcVersion !== spec.gvisorProcVersion) reasons.push("result was not verified against the recorded gVisor reference");
+      if (spec.runscBinary === null || b.runtimeBinarySha256 !== spec.runscBinary.sha256) reasons.push("result was not verified against the recorded runtime binary");
       if (b.runtime !== r.runtime || !spec.isolatingRuntimes.includes(b.runtime)) reasons.push("result runtime is not an approved isolating runtime");
       const expectedHash = securityArgsHash(buildCreateArgs(spec, run, b.runtime, ["node"], "run"), spec);
       if (b.securityArgsSha256 !== expectedHash) reasons.push("result was produced for different security arguments");
