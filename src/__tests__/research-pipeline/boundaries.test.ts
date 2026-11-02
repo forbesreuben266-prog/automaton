@@ -133,7 +133,7 @@ const PARSER_IMPORTS: Record<string, readonly string[]> = {
   // Step 3: the only module with filesystem access (read-only calls; see the fs allowlist below).
   "local-files.ts": ["node:crypto", "node:fs", "./division.js", "./manifest.js", "./workbook.js"],
   // Step 4: in-memory assembly and ledger (no node: modules; Phase 0 only through the adapter).
-  "ledger.ts": ["./division.js"],
+  "ledger.ts": ["./division.js", "./workbook.js"],
   "assemble.ts": ["./division.js", "./ledger.js", "./manifest.js", "./workbook.js"],
 };
 /** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */

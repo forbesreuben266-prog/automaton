@@ -26,20 +26,25 @@
  * - criteria and hard gates with Phase 0's grades and statuses;
  * - the research assessment (structured, deterministic): an evidence-aware
  *   reading of Phase 0's results, separate from Phase 0's scoring verdict
- *   (see ResearchAssessment). A failed hard gate is never treated as a
- *   confirmed negative finding: Phase 0's relevance assessment records which
- *   claims were assessed against a gate's criterion, not that they show the
- *   gate failing, and the direction of evidence is never inferred (not from
- *   its grade, citations, claim text or the gate's passed value). Failed
- *   gates are "unconfirmed failures" and the research is "incomplete";
- *   "rejected_by_gate" is not issued until an explicit operator-recorded
- *   negative finding is approved. Missing, weak or conflicting evidence, low
- *   confidence or a low aggregate score also make the research "incomplete",
- *   never "rejected". The opportunity always stays open for reassessment,
- *   and no status authorizes any action;
+ *   (see ResearchAssessment). The direction of evidence is never inferred
+ *   (not from its grade, citations, claim text or the gate's passed value).
+ *   A failed hard gate is confirmed only by an operator-recorded negative
+ *   finding (step 4.5) that applies: exactly the gate's cited claims, all
+ *   supported sourced facts, grade A/B, a relevance assessment for exactly
+ *   those claims, and none of them in an unresolved contradiction. Only then
+ *   is the research "rejected_by_gate". Otherwise a failed gate is an
+ *   "unconfirmed failure" and the research is "incomplete". Missing, weak or
+ *   conflicting evidence, low confidence or a low aggregate score also make
+ *   it "incomplete", never "rejected". The opportunity always stays open for
+ *   reassessment, and no status authorizes any action;
+ * - operator judgments (step 4.5): negative findings and contradictions the
+ *   operator recorded in the workbook, labelled as operator assessments
+ *   (not automatically verified), with whether each finding was applied and
+ *   why not. Every recorded contradiction is unresolved and keeps the
+ *   research "incomplete"; both sides and their sources stay visible;
  * - source identity conflicts reported by Phase 0 (the same source declared
- *   with different origins). Contradictions between what sources SAY are not
- *   detected automatically;
+ *   with different origins). Contradictions between what sources SAY are
+ *   only those the operator recorded; none are detected automatically;
  * - unresolved questions: the operator's missing-information notes and the
  *   evidence gaps, each with a stable identifier.
  *
@@ -58,8 +63,11 @@ import {
   sha256Hex, sourceIdentityConflicts, validateReport,
   type ClaimType, type Currency, type EvidenceGrade, type GateStatus, type ResearchReport, type ScenarioName, type Verdict,
 } from "./division.js";
+import { parseEvidenceJudgments, type EvidenceJudgments } from "./workbook.js";
 
-export const LEDGER_VERSION = 1;
+/** Version 2 adds the operator judgments (negativeFindings, contradictions). */
+export const LEDGER_VERSION = 2;
+const NO_JUDGMENTS: EvidenceJudgments = Object.freeze({ negativeFindings: Object.freeze([]), contradictions: Object.freeze([]) });
 /** Phase 0 accepts at most this many claim-id sets per grading call. */
 const GRADE_BATCH = 100;
 
@@ -177,11 +185,11 @@ export interface LedgerCriterion {
 }
 
 /**
- * unconfirmed_failure: Phase 0 shows the gate as failed (the operator marked it failed). No input records
- * that the cited evidence supports the failure, so it is a finding to verify, whatever the evidence grade
- * or relevance assessment. There is no "confirmed" failure in Phase 1A.
+ * confirmed_failure: failed, with an operator-recorded negative finding that applies (see NegativeFindingRecord).
+ * unconfirmed_failure: failed, without an applicable negative finding: a finding to verify, whatever the
+ *   evidence grade or relevance assessment.
  */
-export type GateFinding = "passed" | "unconfirmed_failure" | "insufficient_evidence";
+export type GateFinding = "passed" | "confirmed_failure" | "unconfirmed_failure" | "insufficient_evidence";
 
 export interface LedgerGate {
   readonly gateId: string;
@@ -196,7 +204,7 @@ export interface LedgerGate {
 export interface LedgerQuestion {
   /** Stable: derived from the gap's subject, or from the operator's text. */
   readonly questionId: string;
-  readonly origin: "operator" | "evidence_gap";
+  readonly origin: "operator" | "evidence_gap" | "operator_contradiction";
   readonly text: string;
 }
 
@@ -208,14 +216,47 @@ export interface LedgerSourceConflict {
   readonly originIds: readonly string[];
 }
 
+/** An operator-recorded negative finding, as recorded, with whether it applies to its gate and why not. */
+export interface NegativeFindingRecord {
+  readonly gateId: string;
+  readonly claimIds: readonly string[];
+  readonly direction: "supports_failed_condition";
+  readonly assessedBy: string;
+  readonly assessedAt: string;
+  readonly rationale: string;
+  readonly origin: "operator_assessment";
+  readonly applied: boolean;
+  /** Why it does not apply (empty when applied), in a fixed order. */
+  readonly problems: readonly string[];
+}
+
+/** An operator-recorded contradiction between source-backed claims. Always unresolved in this version. */
+export interface ContradictionRecord {
+  readonly contradictionId: string;
+  readonly claims: readonly { readonly claimId: string; readonly kind: StatementKind; readonly sourceIds: readonly string[] }[];
+  readonly description: string;
+  readonly assessedBy: string;
+  readonly assessedAt: string;
+  readonly origin: "operator_assessment";
+  readonly status: "unresolved";
+}
+
 /**
  * supported_for_consideration: every hard gate passes under Phase 0's rules, overall confidence is not low,
- *   no source identity conflict, and the aggregate score is at least Phase 0's watch threshold.
+ *   no source identity conflict, no recorded contradiction, every negative finding applied (there are none
+ *   then, since a finding only applies to a failed gate), and the aggregate score is at least Phase 0's
+ *   watch threshold.
  *   This is preliminary screening only; it does not establish demand, profitability or commercial viability.
- * incomplete: anything else (missing, weak or conflicting evidence, an unconfirmed failed gate, low
+ * incomplete: anything else without a confirmed failed gate (missing, weak or conflicting evidence, an
+ *   unresolved contradiction, an unconfirmed failed gate, a negative finding that does not apply, low
  *   confidence or a low aggregate score).
- * rejected_by_gate: reserved; NOT issued in Phase 1A. It will need an explicit operator-recorded negative
- *   finding (which claims support the failed condition), which the inputs can't express yet.
+ * rejected_by_gate: at least one confirmed failed gate (an applicable operator-recorded negative finding).
+ *
+ * Precedence: a confirmed failed gate decides the status (rejected_by_gate), whatever else is open; the other
+ * open items (unconfirmed failures, contradictions, gaps) stay listed. A recorded contradiction invalidates
+ * only the negative findings whose cited claims it involves; an unrelated contradiction leaves a finding
+ * applicable (and, with no confirmed failure, makes the research incomplete). A confirmed failure is an
+ * operator-supported conclusion about the direction of the evidence, not independently verified truth.
  */
 export type AssessmentStatus = "supported_for_consideration" | "incomplete" | "rejected_by_gate";
 
@@ -223,9 +264,12 @@ export interface ResearchAssessment {
   readonly status: AssessmentStatus;
   /** Deterministic, in a fixed order: why the status was given. */
   readonly reasons: readonly string[];
-  /** Always empty in Phase 1A (no confirmed failures; see AssessmentStatus). Kept for a stable shape. */
+  /** Failed gates with an applicable operator-recorded negative finding. */
   readonly confirmedFailedGates: readonly string[];
   readonly unconfirmedFailedGates: readonly string[];
+  /** Gates whose recorded negative finding does not apply (see the ledger's negativeFindings for why). */
+  readonly negativeFindingsNotApplied: readonly string[];
+  readonly contradictionIds: readonly string[];
   /** Gates Phase 0 does not show as PASS or FAIL (weak, unverified, relevance unverified). */
   readonly gatesNotPassed: readonly string[];
   readonly sourceConflictIds: readonly string[];
@@ -245,17 +289,19 @@ export interface ResearchAssessment {
 }
 
 export const FAILURE_CONFIRMATION =
-  "A failed hard gate is not treated as a confirmed negative finding. Phase 0's relevance assessment records which claims " +
-  "were assessed against the gate's criterion, not that they show the gate failing, and the direction of evidence is never " +
-  "inferred from its grade, citations, claim text or the gate's failed mark. Failed gates are unconfirmed findings to verify.";
+  "A failed hard gate is confirmed only by an operator-recorded negative finding that applies: it covers exactly the gate's " +
+  "cited claims, which are supported sourced facts with grade A or B evidence and a relevance assessment for exactly those " +
+  "claims, none of them in an unresolved contradiction. The direction of evidence is the operator's assessment; it is never " +
+  "inferred from grades, citations, claim text or the gate's failed mark. Other failed gates are unconfirmed findings to verify.";
 
 export const ASSESSMENT_LIMITS =
   "No status shows that demand, profitability or commercial viability is proven, and none authorizes spending, launching, " +
-  "contacting customers or any other action. Contradictions between what sources say are not detected automatically: " +
-  "review the claims in the evidence ledger.";
+  "contacting customers or any other action. Operator-recorded findings and contradictions are operator assessments, not " +
+  "automatically verified facts. Contradictions between what sources say are not detected automatically: only those the " +
+  "operator recorded are shown; review the claims in the evidence ledger.";
 
 export interface EvidenceLedger {
-  readonly version: 1;
+  readonly version: 2;
   readonly reportId: string;
   readonly asOf: string;
   readonly notice: string;
@@ -267,6 +313,8 @@ export interface EvidenceLedger {
   readonly criteria: readonly LedgerCriterion[];
   readonly gates: readonly LedgerGate[];
   readonly sourceConflicts: readonly LedgerSourceConflict[];
+  readonly negativeFindings: readonly NegativeFindingRecord[];
+  readonly contradictions: readonly ContradictionRecord[];
   readonly assessment: ResearchAssessment;
   readonly unresolvedQuestions: readonly LedgerQuestion[];
   /** Phase 0's validation warnings, verbatim. */
@@ -330,13 +378,28 @@ function claimUses(report: ResearchReport): Map<string, string[]> {
   return uses;
 }
 
+const sameIdSet = (a: readonly string[], b: readonly string[]) => {
+  const x = new Set(a);
+  const y = new Set(b);
+  return x.size === y.size && [...x].every((id) => y.has(id));
+};
+
 /**
  * Builds the evidence ledger for a report. Runs Phase 0's validateReport
- * first and refuses (LedgerError) unless the report passes.
+ * first and refuses (LedgerError) unless the report passes. `judgments` are
+ * the operator's evidence judgments from the workbook; they are re-validated
+ * against the report's claims and date (parseEvidenceJudgments).
  */
-export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
+export function buildEvidenceLedger(rawReport: unknown, rawJudgments: unknown = NO_JUDGMENTS): EvidenceLedger {
   const v = validateReport(rawReport);
   if (!v.ok) throw new LedgerError(["the report did not pass Phase 0 validation", ...v.errors]);
+  let judgments: EvidenceJudgments;
+  try {
+    judgments = parseEvidenceJudgments(rawJudgments, v.report.claims, v.report.asOf);
+  } catch (err) {
+    if (err instanceof SchemaError) throw new LedgerError(["the evidence judgments are invalid", ...err.issues]);
+    throw err;
+  }
   const report = v.report;
   const score = v.score;
   const verification = v.verification!;
@@ -444,12 +507,52 @@ export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
     flags: [...c.flags],
   }));
 
+  // Operator-recorded contradictions (all unresolved): both sides stay visible with their sources.
+  const contradictions: ContradictionRecord[] = judgments.contradictions.map((c) => ({
+    contradictionId: c.id,
+    claims: c.claimIds.map((claimId) => {
+      const claim = claimById.get(claimId)!;
+      return { claimId, kind: KIND[claim.type], sourceIds: [...new Set(claim.citations.map((x) => x.snapshotId))] };
+    }),
+    description: c.description,
+    assessedBy: c.assessedBy,
+    assessedAt: c.assessedAt,
+    origin: "operator_assessment",
+    status: "unresolved",
+  }));
+  const contradicted = new Map<string, string[]>();
+  for (const c of judgments.contradictions) for (const claimId of c.claimIds) contradicted.set(claimId, [...(contradicted.get(claimId) ?? []), c.id]);
+
+  // Operator-recorded negative findings: each applies only if every condition holds (problems in a fixed order).
+  const negativeFindings: NegativeFindingRecord[] = judgments.negativeFindings.map((f) => {
+    const g = score.gates.find((x) => x.gateId === f.gateId)!;
+    const problems: string[] = [];
+    if (g.status !== "fail") problems.push(`the gate is not marked failed (Phase 0 status: ${g.status})`);
+    if (!sameIdSet(f.claimIds, g.claimIds)) {
+      problems.push(`the finding's claims (${[...f.claimIds].sort().join(", ")}) are not exactly the gate's cited claims (${[...new Set(g.claimIds)].sort().join(", ") || "none"})`);
+    }
+    const notSourced = f.claimIds.filter((claimId) => claimById.get(claimId)!.type !== "fact" || verification.get(claimId)!.status !== "supported");
+    if (notSourced.length > 0) problems.push(`claim(s) ${notSourced.join(", ")} are not supported sourced facts`);
+    if (g.grade !== "A" && g.grade !== "B") problems.push(`the cited evidence is grade ${g.grade}; grade A or B is required`);
+    if (g.relevance === null || !sameIdSet(g.relevance.assessedClaimIds, g.claimIds)) problems.push("the gate has no relevance assessment for exactly its cited claims");
+    const disputed = f.claimIds.filter((claimId) => contradicted.has(claimId));
+    if (disputed.length > 0) {
+      problems.push(`claim(s) ${disputed.join(", ")} are in unresolved contradiction(s) ${[...new Set(disputed.flatMap((x) => contradicted.get(x)!))].join(", ")}`);
+    }
+    return {
+      gateId: f.gateId, claimIds: [...f.claimIds], direction: f.direction, assessedBy: f.assessedBy, assessedAt: f.assessedAt, rationale: f.rationale,
+      origin: "operator_assessment", applied: problems.length === 0, problems,
+    };
+  });
+  const confirmedGateIds = new Set(negativeFindings.filter((f) => f.applied).map((f) => f.gateId));
+
   const gates: LedgerGate[] = score.gates.map((g) => ({
     gateId: g.gateId,
     label: HARD_GATES.find((h) => h.id === g.gateId)!.label,
     status: g.status,
     finding: g.status === "pass" ? "passed"
-      : g.status === "fail" ? "unconfirmed_failure" : "insufficient_evidence",
+      : g.status !== "fail" ? "insufficient_evidence"
+      : confirmedGateIds.has(g.gateId) ? "confirmed_failure" : "unconfirmed_failure",
     evidenceGrade: g.grade,
     claimIds: [...g.claimIds],
     relevanceAssessed: g.relevance !== null,
@@ -475,8 +578,17 @@ export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
     if (text) gap(`gap-gate-${g.gateId}`, `Hard gate "${g.label}": ${text}.`);
     if (g.finding === "unconfirmed_failure") {
       gap(`gap-gate-${g.gateId}-unconfirmed-failure`,
-        `Hard gate "${g.label}": marked failed, but no input records that the cited evidence supports the failure (an unconfirmed finding to verify).`);
+        `Hard gate "${g.label}": marked failed, but no applicable operator-recorded negative finding shows that the cited evidence supports the failure (an unconfirmed finding to verify).`);
     }
+  }
+  for (const f of negativeFindings) {
+    if (!f.applied) gap(`gap-finding-${f.gateId}-not-applied`, `Negative finding for gate "${f.gateId}" (operator assessment) does not apply: ${f.problems.join("; ")}.`);
+  }
+  for (const c of contradictions) {
+    gaps.push({
+      questionId: `contradiction-${c.contradictionId}`, origin: "operator_contradiction",
+      text: `Unresolved contradiction (operator assessment) between claims ${c.claims.map((x) => x.claimId).join(", ")}: ${c.description}`,
+    });
   }
   const sourceConflicts: LedgerSourceConflict[] = sourceIdentityConflicts(report.snapshots).map((c) => ({
     conflictId: `conflict-${c.kind}-${c.snapshotIds.join("-")}`, kind: c.kind, sourceIds: [...c.snapshotIds], originIds: [...c.originIds],
@@ -503,7 +615,7 @@ export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
     if (!operatorQuestions.some((q) => q.questionId === questionId)) operatorQuestions.push({ questionId, origin: "operator", text });
   }
 
-  const assessment = assess(gates, sourceConflicts, gaps, score);
+  const assessment = assess(gates, sourceConflicts, negativeFindings, contradictions, gaps, score);
 
   return freezeDeep({
     version: LEDGER_VERSION,
@@ -518,6 +630,8 @@ export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
     criteria,
     gates,
     sourceConflicts,
+    negativeFindings,
+    contradictions,
     assessment,
     unresolvedQuestions: [...operatorQuestions, ...gaps],
     warnings: [...v.warnings],
@@ -526,21 +640,33 @@ export function buildEvidenceLedger(rawReport: unknown): EvidenceLedger {
 
 /** The evidence-aware research assessment: a fixed rule over Phase 0's own results (no re-scoring). */
 function assess(
-  gates: readonly LedgerGate[], conflicts: readonly LedgerSourceConflict[], gaps: readonly LedgerQuestion[],
+  gates: readonly LedgerGate[], conflicts: readonly LedgerSourceConflict[], findings: readonly NegativeFindingRecord[],
+  contradictions: readonly ContradictionRecord[], gaps: readonly LedgerQuestion[],
   score: { verdict: Verdict; verdictReason: string; total: number; confidence: string },
 ): ResearchAssessment {
+  const confirmed = gates.filter((g) => g.finding === "confirmed_failure");
   const unconfirmed = gates.filter((g) => g.finding === "unconfirmed_failure");
+  const notApplied = findings.filter((f) => !f.applied);
   const notPassed = gates.filter((g) => g.finding === "insufficient_evidence");
   const lowConfidence = score.confidence === "low";
   const lowScore = score.total < VERDICT_THRESHOLDS.watch;
-  // rejected_by_gate is never issued in Phase 1A (no confirmed failures; see AssessmentStatus).
-  const status: AssessmentStatus = unconfirmed.length > 0 || notPassed.length > 0 || conflicts.length > 0 || lowConfidence || lowScore
-    ? "incomplete" : "supported_for_consideration";
+  const status: AssessmentStatus = confirmed.length > 0 ? "rejected_by_gate"
+    : unconfirmed.length > 0 || notApplied.length > 0 || notPassed.length > 0 || conflicts.length > 0 || contradictions.length > 0 || lowConfidence || lowScore
+      ? "incomplete" : "supported_for_consideration";
 
   const reasons: string[] = [];
+  for (const g of confirmed) {
+    const f = findings.find((x) => x.gateId === g.gateId && x.applied)!;
+    reasons.push(`Hard gate "${g.label}" failed: ${f.assessedBy} recorded on ${f.assessedAt} that the cited grade ${g.evidenceGrade} evidence ` +
+      "supports the failed condition. This is an operator assessment, not an automatically verified fact.");
+  }
   for (const g of unconfirmed) {
     reasons.push(`Hard gate "${g.label}" is marked failed (cited evidence grade ${g.evidenceGrade}; relevance ${g.relevanceAssessed ? "assessed" : "not assessed"}): ` +
-      "an unconfirmed failure to verify, not a rejection. No input records that the cited evidence supports the failure.");
+      "an unconfirmed failure to verify, not a rejection. No applicable operator-recorded negative finding shows that the cited evidence supports the failure.");
+  }
+  for (const f of notApplied) reasons.push(`The negative finding recorded for gate "${f.gateId}" does not apply: ${f.problems.join("; ")}.`);
+  for (const c of contradictions) {
+    reasons.push(`Unresolved contradiction "${c.contradictionId}" between claims ${c.claims.map((x) => x.claimId).join(", ")} (operator assessment).`);
   }
   for (const g of notPassed) reasons.push(`Hard gate "${g.label}" is not shown as passed (${g.status}, evidence grade ${g.evidenceGrade}): evidence is missing or weak.`);
   for (const c of conflicts) reasons.push(`Sources ${c.sourceIds.join(", ")} conflict: the same ${c.kind === "url" ? "web address" : "text"} is declared with different origins.`);
@@ -553,7 +679,10 @@ function assess(
   reasons.push(gaps.length > 0 ? `${gaps.length} evidence gap(s) are recorded in the ledger and remain open.` : "No evidence gaps were flagged by these checks.");
 
   let phase0Relation: string;
-  if (score.verdict === "reject") {
+  if (status === "rejected_by_gate") {
+    phase0Relation = `Phase 0's report below says "Reject" (${score.verdictReason}); this assessment agrees because of the operator-recorded ` +
+      `negative finding(s) for: ${confirmed.map((g) => g.gateId).join(", ")}. The opportunity can be reassessed if that evidence changes.`;
+  } else if (score.verdict === "reject") {
     phase0Relation = `Phase 0's report below says "Reject" (${score.verdictReason}). That is Phase 0's verdict from the operator's scores and gate marks. ` +
       `It is not a confirmed rejection of the opportunity: ${unconfirmed.length > 0 ? "the failed hard gate(s) are unconfirmed findings" : "no hard gate failed"}, ` +
       "so the research is incomplete and the opportunity stays open for reassessment.";
@@ -566,8 +695,10 @@ function assess(
   return {
     status,
     reasons,
-    confirmedFailedGates: [],
+    confirmedFailedGates: confirmed.map((g) => g.gateId),
     unconfirmedFailedGates: unconfirmed.map((g) => g.gateId),
+    negativeFindingsNotApplied: notApplied.map((f) => f.gateId),
+    contradictionIds: contradictions.map((c) => c.contradictionId),
     gatesNotPassed: notPassed.map((g) => g.gateId),
     sourceConflictIds: conflicts.map((c) => c.conflictId),
     gapIds: gaps.map((g) => g.questionId),
@@ -585,7 +716,7 @@ function assess(
 const ASSESSMENT_LABEL: Record<AssessmentStatus, string> = {
   supported_for_consideration: "SUPPORTED FOR CONSIDERATION (preliminary screening): the evidence supports further evaluation; it does not establish demand, profitability or commercial viability",
   incomplete: "INCOMPLETE: evidence is missing, weak or conflicting (this is not a rejection)",
-  rejected_by_gate: "REJECTED BY HARD GATE (reserved: requires an operator-recorded negative finding, not available in Phase 1A)",
+  rejected_by_gate: "REJECTED BY HARD GATE: an operator-recorded negative finding confirms a failed hard gate (operator assessment, not automatically verified)",
 };
 
 /**
@@ -600,7 +731,22 @@ export function renderResearchAssessment(ledger: EvidenceLedger): string {
   out.push(`**Research assessment: ${ASSESSMENT_LABEL[a.status]}**`, "");
   out.push(...a.reasons.map((r) => `- ${e(r)}`), "");
   out.push(e(a.phase0Relation), "");
-  if (a.unconfirmedFailedGates.length > 0) out.push(`**Failed gates:** ${e(a.failureConfirmation)}`, "");
+  if (a.confirmedFailedGates.length > 0 || a.unconfirmedFailedGates.length > 0) out.push(`**Failed gates:** ${e(a.failureConfirmation)}`, "");
+  if (ledger.negativeFindings.length > 0) {
+    out.push("**Operator-recorded negative findings** (operator assessments, not automatically verified):", "");
+    for (const f of ledger.negativeFindings) {
+      out.push(`- Gate ${e(f.gateId)}, claims ${f.claimIds.map((c) => e(c)).join(", ")} -- ${f.applied ? "APPLIED" : "NOT APPLIED"} ` +
+        `(by ${e(f.assessedBy)}, ${e(f.assessedAt)}): ${e(f.rationale)}${f.applied ? "" : ` -- not applied because: ${e(f.problems.join("; "))}`}`);
+    }
+    out.push("");
+  }
+  if (ledger.contradictions.length > 0) {
+    out.push("**Operator-recorded contradictions** (unresolved; operator assessments, not automatically verified):", "");
+    for (const c of ledger.contradictions) {
+      out.push(`- ${e(c.contradictionId)}: claims ${c.claims.map((x) => e(x.claimId)).join(" vs ")} (by ${e(c.assessedBy)}, ${e(c.assessedAt)}): ${e(c.description)}`);
+    }
+    out.push("");
+  }
   out.push(`**Limits:** ${e(a.limits)}`, "");
   out.push("The opportunity remains open for reassessment when new evidence is supplied. Evidence gaps, source conflicts and unresolved questions are listed in the evidence ledger (Appendix A3).", "");
   out.push(`_${e(ledger.notice)}_`, "", "---", "");
@@ -671,6 +817,20 @@ export function renderEvidenceLedger(ledger: EvidenceLedger): string {
       out.push(`  - Source ${e(cit.sourceId)}, quote: "${e(cit.quote)}" (${where})`);
     }
     out.push(`  - Used in: ${c.usedIn.map((u) => e(u)).join("; ") || "not used"}`);
+  }
+  out.push("", "### Operator judgments (operator assessments, not automatically verified)", "");
+  if (ledger.negativeFindings.length === 0 && ledger.contradictions.length === 0) out.push("- none recorded");
+  for (const f of ledger.negativeFindings) {
+    out.push(`- Negative finding for gate ${e(f.gateId)} (direction: ${e(f.direction)}; ${f.applied ? "applied" : "not applied"}), claims ` +
+      `${f.claimIds.map((c) => e(c)).join(", ")}, by ${e(f.assessedBy)} on ${e(f.assessedAt)}: ${e(f.rationale)}`);
+    for (const problem of f.problems) out.push(`  - Not applied: ${e(problem)}`);
+  }
+  for (const c of ledger.contradictions) {
+    out.push(`- Contradiction ${e(c.contradictionId)} (${e(c.status)}), by ${e(c.assessedBy)} on ${e(c.assessedAt)}: ${e(c.description)}`);
+    for (const x of c.claims) {
+      const claim = ledger.claims.find((y) => y.claimId === x.claimId);
+      out.push(`  - ${e(x.claimId)} (${KIND_LABEL[x.kind]}; sources ${x.sourceIds.map((sid) => e(sid)).join(", ")}): ${e(claim?.statement ?? "")}`);
+    }
   }
   out.push("", "### Source conflicts", "");
   if (ledger.sourceConflicts.length === 0) out.push("- none reported by Phase 0 (contradictions between what sources say are not detected automatically)");

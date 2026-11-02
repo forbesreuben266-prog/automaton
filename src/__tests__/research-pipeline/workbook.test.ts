@@ -69,7 +69,7 @@ describe("workbook: strict structure and limits", () => {
   it.each([
     ["an unknown field", (w: any) => { w.notes = "x"; }, "workbook.notes: is not an allowed field"],
     ["a missing field", (w: any) => { delete w.scoring; }, "workbook.scoring: is required"],
-    ["an unsupported version", (w: any) => { w.version = 2; }, "workbook.version: must be 1"],
+    ["an unsupported version", (w: any) => { w.version = 1; }, "workbook.version: must be 2"],
     ["a malformed report id", (w: any) => { w.reportId = "Report 1"; }, "workbook.reportId: has an invalid format"],
     ["a malformed as-of date", (w: any) => { w.asOf = "15/10/2026"; }, "workbook.asOf"],
     ["an unknown section", (w: any) => { w.sections.extra = []; }, "workbook.sections.extra: is not an allowed field"],
@@ -281,7 +281,7 @@ describe("inert input: parsing can't approve, spend, act or execute (requirement
     const w = parseWorkbook(wb((x) => { x.claims[0].statement = text; }));
     expect(w.claims[0].statement).toBe(text);
     expect(JSON.stringify({ ...w, claims: w.claims.slice(1) })).toBe(JSON.stringify({ ...parseWorkbook(validWorkbook()), claims: parseWorkbook(validWorkbook()).claims.slice(1) }));
-    expect(Object.keys(w).sort()).toEqual(["asOf", "assumptions", "claims", "experiments", "opportunityId", "reportId", "scenarios", "scoring", "sections", "version"]);
+    expect(Object.keys(w).sort()).toEqual(["asOf", "assumptions", "claims", "contradictions", "experiments", "negativeFindings", "opportunityId", "reportId", "scenarios", "scoring", "sections", "version"]);
   });
 });
 
@@ -319,3 +319,72 @@ describe("D2: a large invalid fictional workbook gives a bounded error", () => {
     expect(issues.length).toBe(101);
   });
 });
+
+describe("evidence judgments (step 4.5): operator-recorded negative findings and contradictions", () => {
+  const finding = (overrides: Record<string, unknown> = {}) => ({
+    gateId: "legal", claimIds: ["c-legal"], direction: "supports_failed_condition", assessedBy: "operator",
+    assessedAt: "2026-10-15T11:00:00Z", rationale: "Fictional operator rationale", ...overrides,
+  });
+  const contradiction = (overrides: Record<string, unknown> = {}) => ({
+    id: "demand-disagreement", claimIds: ["c-demand", "c-trend"], description: "Fictional disagreement", assessedBy: "operator",
+    assessedAt: "2026-10-15T11:00:00Z", ...overrides,
+  });
+
+  it("accepts well-formed judgments, stored as recorded (whether a finding applies is decided later, in the ledger)", () => {
+    const w = parseWorkbook(wb((x) => { x.negativeFindings = [finding()]; x.contradictions = [contradiction()]; }));
+    expect(w.negativeFindings).toEqual([finding()]);
+    expect(w.contradictions).toEqual([contradiction()]);
+    expect(Object.isFrozen(w.negativeFindings[0])).toBe(true);
+    // Structure only: a finding for a gate the workbook marks as passed is accepted here and judged in the ledger.
+    expect(gateOf(parseWorkbook(wb((x) => { x.negativeFindings = [finding()]; })), "legal").passed).toBe(true);
+  });
+
+  it("requires both judgment lists (version 2 schema)", () => {
+    expect(errorText(() => parseWorkbook(wb((x) => { delete x.negativeFindings; })))).toContain("workbook.negativeFindings: is required");
+    expect(errorText(() => parseWorkbook(wb((x) => { delete x.contradictions; })))).toContain("workbook.contradictions: is required");
+  });
+
+  it.each([
+    ["an unknown gate", { gateId: "zoning" }, "workbook.negativeFindings[0].gateId: must be one of: legal, licence, upfront_cap"],
+    ["an unknown claim", { claimIds: ["no-such-claim"] }, 'workbook.negativeFindings[0].claimIds[0]: unknown claim "no-such-claim"'],
+    ["no claims", { claimIds: [] }, "workbook.negativeFindings[0].claimIds: must have at least 1 item(s)"],
+    ["a repeated claim", { claimIds: ["c-legal", "c-legal"] }, "workbook.negativeFindings[0].claimIds: must not repeat a claim"],
+    ["any other direction", { direction: "supports_passing" }, "workbook.negativeFindings[0].direction: must be one of: supports_failed_condition"],
+    ["an assessment after the run date", { assessedAt: "2026-10-16T09:00:00Z" }, `workbook.negativeFindings[0].assessedAt: is after the run date ${AS_OF}`],
+    ["a malformed date", { assessedAt: "yesterday" }, "workbook.negativeFindings[0].assessedAt: must be a UTC timestamp"],
+    ["a blank rationale", { rationale: "  " }, "workbook.negativeFindings[0].rationale"],
+    ["a multi-line assessor", { assessedBy: "op\nerator" }, "workbook.negativeFindings[0].assessedBy"],
+    ["an extra field", { confirmed: true }, "workbook.negativeFindings[0].confirmed: is not an allowed field"],
+  ])("refuses a negative finding with %s", (_label, overrides, message) => {
+    expect(errorText(() => parseWorkbook(wb((x) => { x.negativeFindings = [finding(overrides)]; })))).toContain(message);
+  });
+
+  it("refuses two negative findings for the same gate", () => {
+    const text = errorText(() => parseWorkbook(wb((x) => { x.negativeFindings = [finding(), finding({ rationale: "again" })]; })));
+    expect(text).toContain("workbook.negativeFindings (gates)");
+  });
+
+  it.each([
+    ["a self-contradiction (the same claim twice)", { claimIds: ["c-demand", "c-demand"] }, "workbook.contradictions[0].claimIds: must not repeat a claim"],
+    ["a single claim", { claimIds: ["c-demand"] }, "workbook.contradictions[0].claimIds: must have at least 2 item(s)"],
+    ["an unknown claim", { claimIds: ["c-demand", "ghost"] }, 'workbook.contradictions[0].claimIds[1]: unknown claim "ghost"'],
+    ["a claim that is not source-backed", { claimIds: ["c-demand", "c-customer"] }, 'claim "c-customer" is not source-backed (a assumption with no citation)'],
+    ["a malformed id", { id: "../x" }, "workbook.contradictions[0].id: has an invalid format"],
+    ["a blank description", { description: "" }, "workbook.contradictions[0].description"],
+    ["an assessment after the run date", { assessedAt: "2026-11-01T00:00:00Z" }, "workbook.contradictions[0].assessedAt: is after the run date"],
+    ["a resolution field (not supported in this version)", { resolution: "resolved" }, "workbook.contradictions[0].resolution: is not an allowed field"],
+  ])("refuses a contradiction with %s", (_label, overrides, message) => {
+    expect(errorText(() => parseWorkbook(wb((x) => { x.contradictions = [contradiction(overrides)]; })))).toContain(message);
+  });
+
+  it("refuses duplicate contradictions (same id, or the same claims in any order)", () => {
+    expect(errorText(() => parseWorkbook(wb((x) => { x.contradictions = [contradiction(), contradiction({ claimIds: ["c-demand", "c-price"] })]; }))))
+      .toContain("workbook.contradictions (ids)");
+    expect(errorText(() => parseWorkbook(wb((x) => { x.contradictions = [contradiction(), contradiction({ id: "other", claimIds: ["c-trend", "c-demand"] })]; }))))
+      .toContain('"other" records the same claims as "demand-disagreement" (duplicate)');
+  });
+});
+
+function gateOf(w: any, gateId: string) {
+  return w.scoring.gates.find((g: any) => g.gateId === gateId);
+}

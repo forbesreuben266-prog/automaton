@@ -31,6 +31,11 @@
  * explains, when Phase 0's scoring says "Reject", whether a hard gate
  * actually failed with confirmed evidence.
  *
+ * The workbook's evidence judgments (operator-recorded negative findings and
+ * contradictions) are not part of the Phase 0 report; they are passed to
+ * the ledger, which re-validates them and decides whether each negative
+ * finding applies.
+ *
  * Experiments in the report are proposals for the operator to consider;
  * assembly does not queue, approve or carry out anything.
  */
@@ -188,7 +193,7 @@ export function assembleRun(run: unknown): AssembledReport {
   const v = validateReport(report);
   if (!v.ok) throw new AssemblyError(["the assembled report did not pass Phase 0 validation", ...v.errors]);
   const phase0Markdown = renderReport(report, { mode: "final" });
-  const ledger = step("ledger", () => buildEvidenceLedger(report));
+  const ledger = step("ledger", () => buildEvidenceLedger(report, { negativeFindings: workbook.negativeFindings, contradictions: workbook.contradictions }));
 
   return Object.freeze({
     report: v.report,

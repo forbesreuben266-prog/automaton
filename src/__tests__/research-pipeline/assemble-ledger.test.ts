@@ -350,8 +350,8 @@ describe("missing, weak and contradictory evidence stays visible", () => {
     expect(a.reasons[0]).toBe("The aggregate score 20 is below 45: a scoring output from the operator's criterion scores, not a gate finding.");
   });
 
-  // Phase 0's relevance assessment records which claims were assessed, not whether they show the gate failing,
-  // so no failed gate is ever confirmed in Phase 1A and rejected_by_gate is not issued.
+  // Phase 0's relevance assessment records which claims were assessed, not whether they show the gate failing:
+  // without an applicable operator-recorded negative finding (step 4.5) no failed gate is confirmed.
   it("grade A/B evidence that supports permission cannot confirm a legal-gate failure", () => {
     const run = validRun();
     Object.assign(gate(run, "legal"), { passed: false }); // cites c-legal: "commercial dog walking is permitted"
@@ -362,13 +362,13 @@ describe("missing, weak and contradictory evidence stays visible", () => {
     expect(a.confirmedFailedGates).toEqual([]);
     expect(a.unconfirmedFailedGates).toEqual(["legal"]);
     expect(a.reasons[0]).toBe('Hard gate "Legal to operate where intended" is marked failed (cited evidence grade B; relevance assessed): ' +
-      "an unconfirmed failure to verify, not a rejection. No input records that the cited evidence supports the failure.");
+      "an unconfirmed failure to verify, not a rejection. No applicable operator-recorded negative finding shows that the cited evidence supports the failure.");
     expect(a.phase0Relation).toContain("It is not a confirmed rejection of the opportunity: the failed hard gate(s) are unconfirmed findings");
     expect(a.gapIds).toContain("gap-gate-legal-unconfirmed-failure");
     expect(a.reassessment).toBe("open");
     const header = headerPart(markdown);
     expect(header).toContain("**Research assessment: INCOMPLETE");
-    expect(header).toContain("**Failed gates:** A failed hard gate is not treated as a confirmed negative finding.");
+    expect(header).toContain("**Failed gates:** A failed hard gate is confirmed only by an operator-recorded negative finding that applies");
     expect(markdown).not.toContain("REJECTED BY HARD GATE");
   });
 
@@ -414,7 +414,7 @@ describe("missing, weak and contradictory evidence stays visible", () => {
     expect(out.score).toEqual(validateReport(report).score);
   });
 
-  it("rejected_by_gate is never issued in Phase 1A", () => {
+  it("rejected_by_gate is never issued without an operator-recorded negative finding", () => {
     const variants = [validRun()];
     for (const gateId of ["legal", "licence", "upfront_cap"]) {
       const run = validRun();
@@ -599,5 +599,209 @@ describe("deterministic, in-memory and stable", () => {
     const ids = (l: typeof ledger) => l.unresolvedQuestions.filter((q) => q.origin === "operator").map((q) => [q.questionId, q.text]);
     expect(ids(assembleRun(reordered).ledger)).toEqual([...ids(ledger)].reverse());
     expect(ledger.unresolvedQuestions.every((q) => /^(q-[0-9a-f]{12}|gap-[a-z0-9_-]+)$/.test(q.questionId))).toBe(true);
+  });
+});
+
+describe("operator evidence judgments (step 4.5)", () => {
+  const BAN = "FICTIONAL FIXTURE. Commercial dog walking is not permitted in the borough's parks.";
+  /** A run whose legal gate is marked failed, citing one fresh grade-B fact with a matching relevance assessment. */
+  function failedLegalRun(): any {
+    const run = addSource(validRun(), { id: "council-ban", content: BAN, originId: "example-council-2" });
+    run.workbook.claims.push({ id: "c-ban", type: "fact", statement: "Fictional guidance says commercial dog walking is not permitted in borough parks.",
+      citations: [{ snapshotId: "council-ban", quote: "Commercial dog walking is not permitted in the borough's parks." }] });
+    run.workbook.sections.risks.push("c-ban");
+    Object.assign(gate(run, "legal"), { passed: false, claimIds: ["c-ban"], relevance: { ...gate(run, "legal").relevance, assessedClaimIds: ["c-ban"] } });
+    return run;
+  }
+  const finding = (overrides: Record<string, unknown> = {}) => ({
+    gateId: "legal", claimIds: ["c-ban"], direction: "supports_failed_condition", assessedBy: "operator",
+    assessedAt: "2026-10-15T11:00:00Z", rationale: "Fictional: the guidance excludes the intended activity.", ...overrides,
+  });
+  const contradiction = (overrides: Record<string, unknown> = {}) => ({
+    id: "trend-disagreement", claimIds: ["c-trend", "c-trend-fell"], description: "Fictional: one note says demand rose, the other that it fell.",
+    assessedBy: "operator", assessedAt: "2026-10-15T11:00:00Z", ...overrides,
+  });
+  function withFellClaim(run: any): any {
+    addSource(run, { id: "trade-note-b", content: "FICTIONAL FIXTURE. A second members' note says demand for short-notice dog walking fell in 2025." });
+    run.workbook.claims.push({ id: "c-trend-fell", type: "fact", statement: "A second trade note reports that demand for short-notice dog walking fell in 2025.",
+      citations: [{ snapshotId: "trade-note-b", quote: "demand for short-notice dog walking fell in 2025" }] });
+    run.workbook.sections.demandAndMarket.push("c-trend-fell");
+    return run;
+  }
+
+  it("a valid operator-recorded negative finding confirms the failed gate: rejected_by_gate, labelled as an operator assessment", () => {
+    const run = failedLegalRun();
+    run.workbook.negativeFindings = [finding()];
+    const { ledger, markdown } = assembleRun(run);
+    const a = ledger.assessment;
+    expect(ledger.gates[0]).toMatchObject({ gateId: "legal", status: "fail", evidenceGrade: "B", finding: "confirmed_failure" });
+    expect(ledger.negativeFindings).toEqual([{ ...finding(), origin: "operator_assessment", applied: true, problems: [] }]);
+    expect([a.status, a.confirmedFailedGates, a.unconfirmedFailedGates, a.negativeFindingsNotApplied]).toEqual(["rejected_by_gate", ["legal"], [], []]);
+    expect(a.reasons[0]).toBe('Hard gate "Legal to operate where intended" failed: operator recorded on 2026-10-15T11:00:00Z that the cited grade B evidence ' +
+      "supports the failed condition. This is an operator assessment, not an automatically verified fact.");
+    expect(a.phase0Relation).toContain("this assessment agrees because of the operator-recorded negative finding(s) for: legal");
+    expect(a.gapIds).not.toContain("gap-gate-legal-unconfirmed-failure");
+    expect(a.reassessment).toBe("open");
+    const header = headerPart(markdown);
+    expect(header).toContain("**Research assessment: REJECTED BY HARD GATE: an operator-recorded negative finding confirms a failed hard gate (operator assessment, not automatically verified)**");
+    expect(header).toContain("**Operator-recorded negative findings** (operator assessments, not automatically verified):");
+    expect(header).toContain("- Gate legal, claims c-ban -- APPLIED (by operator, 2026-10-15T11:00:00Z): Fictional: the guidance excludes the intended activity.");
+    expect(appendixPart(markdown)).toContain("- Negative finding for gate legal (direction: supports\\_failed\\_condition; applied)");
+  });
+
+  it("the Phase 0 report and validation result stay exactly as Phase 0 produces them when a finding is recorded", () => {
+    const run = failedLegalRun();
+    const without = assembleRun(failedLegalRun());
+    run.workbook.negativeFindings = [finding()];
+    const withFinding = assembleRun(run);
+    expect(phase0Part(withFinding.markdown)).toBe(phase0Part(without.markdown));
+    expect(withFinding.score).toEqual(without.score);
+    expect(withFinding.report).toEqual(without.report);
+  });
+
+  it.each([
+    ["the gate is not marked failed", (r: any) => { gate(r, "legal").passed = true; }, {}, "the gate is not marked failed (Phase 0 status: pass)"],
+    ["its claims are not exactly the gate's cited claims", () => {}, { claimIds: ["c-ban", "c-legal"] }, "are not exactly the gate's cited claims (c-ban)"],
+    ["the evidence is weak (grade C, undated source)", (r: any) => {
+      Object.assign(gate(r, "legal"), { claimIds: ["c-competitor-price"], relevance: { ...gate(r, "legal").relevance, assessedClaimIds: ["c-competitor-price"] } });
+    }, { claimIds: ["c-competitor-price"] }, "the cited evidence is grade C; grade A or B is required"],
+    ["the relevance assessment is missing", (r: any) => { gate(r, "legal").relevance = null; }, {}, "the gate has no relevance assessment for exactly its cited claims"],
+    ["the relevance assessment covers other claims", (r: any) => { gate(r, "legal").relevance.assessedClaimIds = ["c-legal"]; }, {}, "the gate has no relevance assessment for exactly its cited claims"],
+    ["it rests on an assumption, not a sourced fact", (r: any) => {
+      Object.assign(gate(r, "legal"), { claimIds: ["c-risk"], relevance: { ...gate(r, "legal").relevance, assessedClaimIds: ["c-risk"] } });
+    }, { claimIds: ["c-risk"] }, "claim(s) c-risk are not supported sourced facts"],
+  ])("a negative finding does not apply when %s: incomplete, with the reason", (_label, mutateRun, overrides, problem) => {
+    const run = failedLegalRun();
+    (mutateRun as (r: any) => void)(run);
+    run.workbook.negativeFindings = [finding(overrides)];
+    const { ledger, markdown } = assembleRun(run);
+    const f = ledger.negativeFindings[0];
+    expect(f.applied).toBe(false);
+    expect(f.problems.some((x) => x.includes(problem)), f.problems.join("; ")).toBe(true);
+    expect(ledger.assessment.status).toBe("incomplete");
+    expect(ledger.assessment.confirmedFailedGates).toEqual([]);
+    expect(ledger.assessment.negativeFindingsNotApplied).toEqual(["legal"]);
+    expect(ledger.assessment.reasons.some((x) => x.startsWith('The negative finding recorded for gate "legal" does not apply:') && x.includes(problem))).toBe(true);
+    expect(ledger.assessment.gapIds).toContain("gap-finding-legal-not-applied");
+    expect(headerPart(markdown)).toContain("-- NOT APPLIED (by operator");
+    expect(markdown).not.toContain("REJECTED BY HARD GATE");
+  });
+
+  it("a failed gate with grade A/B evidence and no recorded finding stays incomplete (grade alone is not enough)", () => {
+    const { ledger } = assembleRun(failedLegalRun());
+    expect(ledger.gates[0]).toMatchObject({ evidenceGrade: "B", relevanceAssessed: true, finding: "unconfirmed_failure" });
+    expect(ledger.assessment.status).toBe("incomplete");
+    expect(ledger.negativeFindings).toEqual([]);
+  });
+
+  it("an unresolved contradiction prevents supported_for_consideration and keeps both claims and their sources visible", () => {
+    const base = withFellClaim(validRun());
+    expect(assembleRun(base).ledger.assessment.status).toBe("supported_for_consideration"); // without the recorded contradiction
+    const run = withFellClaim(validRun());
+    run.workbook.contradictions = [contradiction()];
+    const { ledger, markdown } = assembleRun(run);
+    expect(ledger.contradictions).toEqual([{
+      contradictionId: "trend-disagreement",
+      claims: [{ claimId: "c-trend", kind: "sourced_fact", sourceIds: ["trade-body-2026"] }, { claimId: "c-trend-fell", kind: "sourced_fact", sourceIds: ["trade-note-b"] }],
+      description: contradiction().description, assessedBy: "operator", assessedAt: "2026-10-15T11:00:00Z", origin: "operator_assessment", status: "unresolved",
+    }]);
+    expect(ledger.assessment.status).toBe("incomplete");
+    expect(ledger.assessment.contradictionIds).toEqual(["trend-disagreement"]);
+    expect(ledger.assessment.reasons).toContain('Unresolved contradiction "trend-disagreement" between claims c-trend, c-trend-fell (operator assessment).');
+    expect(ledger.unresolvedQuestions.find((q) => q.questionId === "contradiction-trend-disagreement")!.origin).toBe("operator_contradiction");
+    expect(ledger.claims.map((c) => c.claimId)).toEqual(expect.arrayContaining(["c-trend", "c-trend-fell"]));
+    expect(headerPart(markdown)).toContain("**Operator-recorded contradictions** (unresolved; operator assessments, not automatically verified):");
+    expect(headerPart(markdown)).toContain("- trend-disagreement: claims c-trend vs c-trend-fell (by operator, 2026-10-15T11:00:00Z)");
+    const appendix = appendixPart(markdown);
+    expect(appendix).toContain("  - c-trend (sourced fact; sources trade-body-2026): A trade body reports that demand for short-notice dog walking rose in 2025.");
+    expect(appendix).toContain("  - c-trend-fell (sourced fact; sources trade-note-b): A second trade note reports that demand for short-notice dog walking fell in 2025.");
+  });
+
+  it("a negative finding whose claim is in an unresolved contradiction does not apply", () => {
+    const run = failedLegalRun();
+    run.workbook.negativeFindings = [finding()];
+    run.workbook.contradictions = [contradiction({ id: "ban-vs-guidance", claimIds: ["c-ban", "c-legal"], description: "Fictional: the two council texts disagree." })];
+    const { ledger } = assembleRun(run);
+    expect(ledger.negativeFindings[0].applied).toBe(false);
+    expect(ledger.negativeFindings[0].problems).toContain("claim(s) c-ban are in unresolved contradiction(s) ban-vs-guidance");
+    expect(ledger.assessment.status).toBe("incomplete");
+  });
+
+  // Precedence: a confirmed failure decides; a contradiction invalidates only findings whose cited claims it involves.
+  it("an unrelated contradiction does not override an independently confirmed failed gate, and stays visible", () => {
+    const run = failedLegalRun();
+    run.workbook.negativeFindings = [finding()];
+    run.workbook.contradictions = [contradiction({ id: "market-size", claimIds: ["c-demand", "c-trend"], description: "Fictional: the sources disagree on market size." })];
+    const { ledger, markdown } = assembleRun(run);
+    const a = ledger.assessment;
+    expect(ledger.negativeFindings.map((f) => [f.gateId, f.applied, f.problems])).toEqual([["legal", true, []]]);
+    expect([a.status, a.confirmedFailedGates, a.unconfirmedFailedGates, a.contradictionIds]).toEqual(["rejected_by_gate", ["legal"], [], ["market-size"]]);
+    expect(a.reasons).toContain('Unresolved contradiction "market-size" between claims c-demand, c-trend (operator assessment).');
+    expect(ledger.contradictions.map((c) => [c.contradictionId, c.status])).toEqual([["market-size", "unresolved"]]);
+    expect(headerPart(markdown)).toContain("- market-size: claims c-demand vs c-trend (by operator, 2026-10-15T11:00:00Z)");
+    expect(ledger.unresolvedQuestions.map((q) => q.questionId)).toContain("contradiction-market-size");
+  });
+
+  it("a contradiction invalidates only the finding it involves; another independent confirmed failed gate still rejects", () => {
+    const run = failedLegalRun();
+    gate(run, "upfront_cap").passed = false; // cites c-insurance (grade B) with a matching relevance assessment
+    run.workbook.negativeFindings = [finding(), finding({ gateId: "upfront_cap", claimIds: ["c-insurance"], rationale: "Fictional: the cost exceeds the cap." })];
+    run.workbook.contradictions = [contradiction({ id: "ban-dispute", claimIds: ["c-ban", "c-legal"], description: "Fictional: the two council texts disagree." })];
+    const { ledger, markdown } = assembleRun(run);
+    const a = ledger.assessment;
+    expect(ledger.negativeFindings.map((f) => [f.gateId, f.applied])).toEqual([["legal", false], ["upfront_cap", true]]);
+    expect(ledger.negativeFindings[0].problems).toEqual(["claim(s) c-ban are in unresolved contradiction(s) ban-dispute"]);
+    expect(ledger.gates.map((g) => [g.gateId, g.finding])).toEqual([["legal", "unconfirmed_failure"], ["licence", "passed"], ["upfront_cap", "confirmed_failure"]]);
+    expect([a.status, a.confirmedFailedGates, a.unconfirmedFailedGates, a.negativeFindingsNotApplied]).toEqual(["rejected_by_gate", ["upfront_cap"], ["legal"], ["legal"]]);
+    const header = headerPart(markdown);
+    expect(header).toContain("- Gate legal, claims c-ban -- NOT APPLIED");
+    expect(header).toContain("- Gate upfront\\_cap, claims c-insurance -- APPLIED");
+    expect(a.reasons.some((x) => x.startsWith('Hard gate "Legal to operate where intended" is marked failed') && x.includes("an unconfirmed failure to verify"))).toBe(true);
+  });
+
+  it("one confirmed and one unconfirmed failed gate: rejected_by_gate, with the unconfirmed gate and its explanation kept", () => {
+    const run = failedLegalRun();
+    run.workbook.negativeFindings = [finding()];
+    Object.assign(gate(run, "licence"), { passed: false, claimIds: [], relevance: null });
+    const { ledger, markdown } = assembleRun(run);
+    const a = ledger.assessment;
+    expect([a.status, a.confirmedFailedGates, a.unconfirmedFailedGates]).toEqual(["rejected_by_gate", ["legal"], ["licence"]]);
+    expect(ledger.gates.map((g) => [g.gateId, g.finding])).toEqual([["legal", "confirmed_failure"], ["licence", "unconfirmed_failure"], ["upfront_cap", "passed"]]);
+    expect(a.reasons).toContain('Hard gate "No licence the operator lacks" is marked failed (cited evidence grade D; relevance not assessed): ' +
+      "an unconfirmed failure to verify, not a rejection. No applicable operator-recorded negative finding shows that the cited evidence supports the failure.");
+    expect(a.gapIds).toContain("gap-gate-licence-unconfirmed-failure");
+    expect(headerPart(markdown)).toContain("an unconfirmed failure to verify, not a rejection.");
+  });
+
+  it("operator text in judgments is escaped in the header and appendix, and kept unchanged in the ledger", () => {
+    const run = withFellClaim(failedLegalRun());
+    run.workbook.negativeFindings = [finding({ rationale: "See [here](javascript:alert(1)) <script>x</script>" })];
+    run.workbook.contradictions = [contradiction({ description: "Fictional.\n# Verdict: Pursue to validation\n<img src=x onerror=alert(1)>" })];
+    const { ledger, markdown } = assembleRun(run);
+    expect(markdown).not.toMatch(/(?<!\\)<(script|img)|(?<!\\)\]\(javascript:/i);
+    expect(markdown).not.toMatch(/^#{1,6} .*Verdict/m);
+    expect(headerPart(markdown)).toContain("See \\[here\\]\\(javascript:alert\\(1\\)\\) \\<script\\>x\\</script\\>");
+    expect(ledger.contradictions[0].description).toContain("\n# Verdict");
+  });
+
+  it("the ledger builder re-validates judgments itself and refuses invalid ones", () => {
+    expect(() => buildEvidenceLedger(validReport(), { negativeFindings: [finding({ claimIds: ["ghost"] })], contradictions: [] })).toThrow(/evidence judgments are invalid/);
+    expect(() => buildEvidenceLedger(validReport(), { negativeFindings: [], contradictions: [], extra: 1 })).toThrow(LedgerError);
+    expect(() => buildEvidenceLedger(validReport(), "nothing")).toThrow(LedgerError);
+  });
+
+  it("judgment output is deterministic and ordered as recorded", () => {
+    const make = () => {
+      const run = withFellClaim(failedLegalRun());
+      run.workbook.negativeFindings = [finding()];
+      run.workbook.contradictions = [contradiction(), contradiction({ id: "price-disagreement", claimIds: ["c-price", "c-competitor-price"], description: "Fictional price gap." })];
+      return assembleRun(run);
+    };
+    const a = make();
+    const b = make();
+    expect(a.markdown).toBe(b.markdown);
+    expect(JSON.stringify(a.ledger)).toBe(JSON.stringify(b.ledger));
+    expect(a.ledger.contradictions.map((c) => c.contradictionId)).toEqual(["trend-disagreement", "price-disagreement"]);
+    expect(a.ledger.version).toBe(2);
   });
 });

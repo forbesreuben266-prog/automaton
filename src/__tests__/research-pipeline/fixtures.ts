@@ -35,8 +35,9 @@ export function validManifest(): any {
 export function validWorkbook(): any {
   const r = validReport();
   return {
-    version: 1, opportunityId: OPPORTUNITY_ID, reportId: r.id, asOf: AS_OF,
+    version: 2, opportunityId: OPPORTUNITY_ID, reportId: r.id, asOf: AS_OF,
     claims: r.claims, sections: r.sections, assumptions: r.assumptions, scenarios: r.scenarios, scoring: r.scoring, experiments: r.experiments,
+    negativeFindings: [], contradictions: [],
   };
 }
 
