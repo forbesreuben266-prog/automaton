@@ -67,7 +67,7 @@ function specifiers(file: string): string[] {
 
 describe("research pipeline boundaries (step 1: adapter only)", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["assemble.ts", "division.ts", "ledger.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
+    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["assemble.ts", "division.ts", "history.ts", "ledger.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
   });
 
   it("the adapter imports nothing but the division's public index; no dynamic import, require or import.meta", () => {
@@ -135,6 +135,8 @@ const PARSER_IMPORTS: Record<string, readonly string[]> = {
   // Step 4: in-memory assembly and ledger (no node: modules; Phase 0 only through the adapter).
   "ledger.ts": ["./division.js", "./workbook.js"],
   "assemble.ts": ["./division.js", "./ledger.js", "./manifest.js", "./workbook.js"],
+  // Step 5: in-memory comparison of two runs, each assembled (and so validated) through assemble.ts.
+  "history.ts": ["./assemble.js", "./division.js", "./ledger.js"],
 };
 /** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -239,7 +241,7 @@ describe("research pipeline boundaries (step 3: local files)", () => {
   });
 
   it("the parsers and the adapter still import no filesystem, network or process module", () => {
-    for (const file of ["assemble.ts", "division.ts", "ledger.ts", "manifest.ts", "workbook.ts"]) {
+    for (const file of ["assemble.ts", "division.ts", "history.ts", "ledger.ts", "manifest.ts", "workbook.ts"]) {
       for (const spec of specifiers(path.join(PIPELINE, file))) expect(spec.startsWith("node:"), `${file} imports ${spec}`).toBe(false);
     }
   });
@@ -282,5 +284,35 @@ describe("research pipeline boundaries (step 4: assembly and ledger)", () => {
 
   it("ledger.ts validates with Phase 0 before building anything", () => {
     expect(identifiers("ledger.ts").has("validateReport")).toBe(true);
+  });
+});
+
+/** Step 5: the comparison assembles its own inputs, stays in memory and never touches proposals, files or rendering of Phase 0 drafts. */
+describe("research pipeline boundaries (step 5: history)", () => {
+  const source = parse(path.join(PIPELINE, "history.ts"));
+  const names = new Set<string>();
+  const literals: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n)) names.add(n.text);
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) literals.push(n.text);
+    ts.forEachChild(n, visit);
+  };
+  visit(source);
+
+  it("uses no proposal queue, budget, model, filesystem or loader name, and no Phase 0 renderer", () => {
+    for (const name of ["ProposalQueue", "fs", "RunBudgetController", "DISABLED_MODEL_PORT", "loadRun", "renderReport", "validateReport"]) {
+      expect(names.has(name), `history.ts uses ${name}`).toBe(false);
+    }
+  });
+
+  it("obtains assembled runs only by calling assembleRun itself", () => {
+    expect(names.has("assembleRun")).toBe(true);
+    expect(literals).not.toContain("draft");
+  });
+
+  it("is imported by no other pipeline module", () => {
+    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "history.ts")) {
+      expect(specifiers(path.join(PIPELINE, file)), file).not.toContain("./history.js");
+    }
   });
 });
