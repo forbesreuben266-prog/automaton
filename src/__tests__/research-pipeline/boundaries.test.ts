@@ -6,12 +6,19 @@
  * pipeline (tests excepted) imports it. Syntax-tree checks, not a sandbox.
  */
 
+import childProcess from "child_process";
 import fs from "fs";
+import http from "http";
+import https from "https";
+import net from "net";
 import path from "path";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as adapter from "../../research-pipeline/division.js";
 import * as division from "../../divisions/business-research/index.js";
+import { parseManifestText } from "../../research-pipeline/manifest.js";
+import { checkRunInputs, parseOpportunityText, parseWorkbookText } from "../../research-pipeline/workbook.js";
+import { validManifest, validOpportunity, validWorkbook } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
 const PIPELINE = path.join(SRC, "research-pipeline");
@@ -60,7 +67,7 @@ function specifiers(file: string): string[] {
 
 describe("research pipeline boundaries (step 1: adapter only)", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["division.ts"]);
+    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["division.ts", "manifest.ts", "workbook.ts"]);
   });
 
   it("the adapter imports nothing but the division's public index; no dynamic import, require or import.meta", () => {
@@ -116,5 +123,75 @@ describe("research pipeline boundaries (step 1: adapter only)", () => {
     const naming = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(division_ + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`))
       .filter((f) => fs.readFileSync(f, "utf8").includes("business-research"));
     expect(naming).toEqual([ADAPTER]);
+  });
+});
+
+/** Step 2 parsers: sibling imports only (the division solely via the adapter), no capability names. */
+const PARSER_IMPORTS: Record<string, readonly string[]> = {
+  "manifest.ts": ["./division.js"],
+  "workbook.ts": ["./division.js", "./manifest.js"],
+};
+/** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */
+const FORBIDDEN_IDENTIFIERS = new Set([
+  "process", "require", "globalThis", "global", "fetch", "eval", "Function", "Reflect", "Proxy", "XMLHttpRequest", "WebSocket", "Worker",
+  "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Date", "performance", "Buffer", "Deno", "Bun", "crypto",
+]);
+
+describe("research pipeline boundaries (step 2: parsers)", () => {
+  for (const [file, allowed] of Object.entries(PARSER_IMPORTS)) {
+    it(`${file} imports only ${allowed.join(" and ")}; no dynamic import, require or import.meta`, () => {
+      const specs = specifiers(path.join(PIPELINE, file));
+      expect(specs.length).toBeGreaterThan(0);
+      for (const spec of specs) expect(allowed, `${file} imports ${spec}`).toContain(spec);
+    });
+
+    it(`${file} references no file, network, process, environment, clock, randomness or dynamic-code name`, () => {
+      const found: string[] = [];
+      const visit = (n: ts.Node): void => {
+        if (ts.isIdentifier(n) && FORBIDDEN_IDENTIFIERS.has(n.text)) {
+          const parent = n.parent;
+          const isMemberName = parent && ts.isPropertyAccessExpression(parent) && parent.name === n;
+          if (!isMemberName) found.push(n.text);
+        }
+        if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "Math" && n.name.text === "random") found.push("Math.random");
+        if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && /^(node:)?(fs|net|http|https|child_process|dgram|dns|tls|worker_threads|os|process|vm|module|inspector)$/.test(n.text)) found.push(n.text);
+        // Constant strings naming a capability (catches bracket access such as globalThis["process"] or obj["eval"]).
+        if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && (FORBIDDEN_IDENTIFIERS.has(n.text) || n.text === "constructor" || n.text === "__proto__")) found.push(`"${n.text}"`);
+        // Reaching constructors or prototypes through objects (e.g. ({}).constructor.constructor("code")).
+        if (ts.isPropertyAccessExpression(n) && (n.name.text === "constructor" || n.name.text === "__proto__")) found.push(`.${n.name.text}`);
+        if (ts.isIdentifier(n) && n.text === "__proto__") found.push("__proto__");
+        ts.forEachChild(n, visit);
+      };
+      visit(parse(path.join(PIPELINE, file)));
+      expect(found).toEqual([]);
+    });
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("at runtime the parsers make no file, network, process or environment calls", () => {
+    const calls: string[] = [];
+    const spy = (obj: any, name: string, label: string) => {
+      if (typeof obj[name] === "function") vi.spyOn(obj, name).mockImplementation(((...a: unknown[]) => { calls.push(label); throw new Error(`${label} called`); }) as any);
+    };
+    for (const name of ["readFileSync", "writeFileSync", "openSync", "readdirSync", "statSync", "lstatSync", "existsSync", "readFile", "writeFile", "open"]) spy(fs, name, `fs.${name}`);
+    for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) spy(childProcess, name, `child_process.${name}`);
+    spy(net, "connect", "net.connect"); spy(net, "createConnection", "net.createConnection");
+    spy(http, "request", "http.request"); spy(https, "request", "https.request");
+    spy(globalThis, "fetch", "fetch");
+    const envBefore = { ...process.env };
+    const envProxy = new Proxy(process.env, { get: (t, k) => { if (typeof k === "string") calls.push(`env.${k}`); return Reflect.get(t, k); } });
+    const realEnv = process.env;
+    process.env = envProxy as NodeJS.ProcessEnv;
+    try {
+      const o = parseOpportunityText(JSON.stringify(validOpportunity()));
+      const m = parseManifestText(JSON.stringify(validManifest()));
+      const w = parseWorkbookText(JSON.stringify(validWorkbook()));
+      checkRunInputs(o, m, w);
+    } finally {
+      process.env = realEnv;
+    }
+    expect(calls).toEqual([]);
+    expect(process.env).toEqual(envBefore);
   });
 });
