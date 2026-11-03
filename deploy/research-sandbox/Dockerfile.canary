@@ -1,0 +1,39 @@
+# Research sandbox canary-probe image (Phase 1, stage S3 preparation).
+#
+# NOT BUILT. This file has never been built, pulled or run, and no image or
+# digest exists for it. Building it is a separately authorized step on the
+# dedicated host (see the README in this folder for what must be pinned and
+# verified first).
+#
+# Purpose: run only the existing canary probe (src/research-sandbox/
+# canary-probe.ts, compiled) inside a sandbox container created by the
+# preflight with the exact production flags. The preflight's create argv
+# supplies the user (10001:10001), the read-only root filesystem, the network
+# (none), the capabilities (all dropped), the command
+# ("node /app/canary-probe.js --canary <host canary path>") and
+# --no-healthcheck; this image must not change any of that.
+#
+# Constraints from the preflight's inspect checks (src/research-sandbox/inspect.ts):
+#   - Config.WorkingDir must be /app            -> WORKDIR /app
+#   - Config.Labels must be empty               -> no LABEL
+#   - Config.Env must equal the recorded image env (PATH, NODE_VERSION,
+#     YARN_VERSION) plus the preflight's own    -> no ENV, no ARG after FROM
+#   - Config.Entrypoint must equal the pinned entrypoint -> no ENTRYPOINT
+#     (the base image's entrypoint is inherited and must be recorded)
+#   - no healthcheck, user, volume or exposed port is set here
+# No package is installed: the probe uses only Node's built-in fs and net.
+
+# The base image MUST be pinned by digest. There is deliberately no default:
+# without --build-arg NODE_BASE_DIGEST=sha256:<recorded digest> the reference
+# is invalid and the build fails. The digest is recorded only at the
+# separately approved image pull (SANDBOX_SPEC.image.digest).
+ARG NODE_BASE_DIGEST
+FROM docker.io/library/node:22.22.0-bookworm-slim@${NODE_BASE_DIGEST}
+
+WORKDIR /app
+
+# Exactly three files from a prepared build context (see README): the
+# compiled probe, its one module dependency, and a package.json that marks
+# them as ES modules. Root-owned and read-only (BuildKit is required for
+# --chmod).
+COPY --chown=0:0 --chmod=0444 package.json canary-probe.js canary.js /app/

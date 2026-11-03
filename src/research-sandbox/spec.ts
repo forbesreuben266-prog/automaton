@@ -105,6 +105,15 @@ export interface SandboxSpec {
    * itself prove isolation (see host-paths.ts verifyRuntimeBinary).
    */
   readonly runscBinary: RuntimeBinary | null;
+  /**
+   * The Docker SERVER (daemon) version approved for the target host, exactly
+   * as the daemon reports it in `docker info` (ServerVersion), recorded at a
+   * separately approved host setup. The inspect and info formats this code
+   * checks are version-specific, so any other version refuses. The client
+   * version is never used as evidence. null = not recorded: preflight
+   * refuses. No version is chosen here.
+   */
+  readonly dockerServerVersion: string | null;
 }
 
 export interface RuntimeBinary {
@@ -140,6 +149,7 @@ export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
   dockerDataRoot: null,
   hostname: "sandbox",
   runscBinary: null,
+  dockerServerVersion: null,
 }) as SandboxSpec;
 
 /** The exact environment a container must have: the recorded image environment plus ours. null if the image's isn't recorded. */
@@ -174,8 +184,11 @@ export type SpecOverrides = Partial<Record<(typeof NUMERIC_LIMITS)[number], numb
   readonly imageManifestDigest?: string;
   readonly dockerDataRoot?: string;
   readonly runscBinary?: RuntimeBinary;
+  readonly dockerServerVersion?: string;
 };
-const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary"];
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary", "dockerServerVersion"];
+/** A Docker server version as `docker info` reports it: MAJOR.MINOR.PATCH, optionally with a short pre-release/build suffix. */
+export const DOCKER_SERVER_VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]{0,63})?$/;
 /** Root-owned system directories the approved runtime binary may live in. */
 export const RUNTIME_BINARY_DIRS = Object.freeze(["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin"]);
 /** A binary file name: no dot-only or hidden names (".", "..", "...", ".x"). */
@@ -231,8 +244,9 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
   }
   if ("gvisorProcVersion" in values) {
     const pv = values.gvisorProcVersion;
-    if (typeof pv !== "string" || !/^Linux version [\x20-\x7e]{1,500}$/.test(pv)) {
-      violations.push("gvisorProcVersion: must be the printable /proc/version text starting \"Linux version \"");
+    // At most 512 characters in total, the same limit the gVisor evidence check applies to observed values (canary.ts PROC_VERSION_MAX).
+    if (typeof pv !== "string" || !/^Linux version [\x20-\x7e]{1,498}$/.test(pv)) {
+      violations.push("gvisorProcVersion: must be the printable /proc/version text starting \"Linux version \" (at most 512 characters)");
     } else if (base.gvisorProcVersion !== null && base.gvisorProcVersion !== pv) {
       violations.push("gvisorProcVersion: differs from the already recorded value");
     } else {
@@ -288,6 +302,16 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
       violations.push("runscBinary: differs from the already recorded binary");
     } else {
       next.runscBinary = Object.freeze({ path, sha256: b!.sha256 as string, args: Object.freeze([...(args as string[])]) });
+    }
+  }
+  if ("dockerServerVersion" in values) {
+    const v = values.dockerServerVersion;
+    if (typeof v !== "string" || !DOCKER_SERVER_VERSION_PATTERN.test(v)) {
+      violations.push("dockerServerVersion: must be the daemon's reported ServerVersion (MAJOR.MINOR.PATCH, optional short suffix)");
+    } else if (base.dockerServerVersion !== null && base.dockerServerVersion !== v) {
+      violations.push("dockerServerVersion: differs from the already recorded value");
+    } else {
+      next.dockerServerVersion = v;
     }
   }
   if (violations.length > 0) throw new SandboxSpecError(violations);

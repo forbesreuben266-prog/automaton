@@ -39,13 +39,21 @@ describe("engine adapter (fake runner)", () => {
   it("docker info: parses rootless, runtimes and the seccomp profile only (no other fields leak)", async () => {
     const f = fakeRunner([okResult(JSON.stringify({ SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"], Runtimes: { runc: {}, runsc: {} }, HttpsProxy: "http://user:pw@proxy" }))]);
     const info = await docker(f.runner).info();
-    expect(info).toEqual({ engine: "docker", rootless: true, runtimes: ["runc", "runsc"], seccompProfile: "builtin", runtimeConfigs: { runc: {}, runsc: {} } });
+    expect(info).toEqual({ engine: "docker", rootless: true, runtimes: ["runc", "runsc"], seccompProfile: "builtin", runtimeConfigs: { runc: {}, runsc: {} }, serverVersion: null });
     expect(f.calls[0]).toMatchObject({ file: "/usr/bin/docker", args: [...G, "info", "--format", "{{json .}}"] });
+  });
+
+  it("docker info: the server version is the daemon's ServerVersion, never the client version", async () => {
+    const parse = async (body: unknown) => (await createCliEngine("/usr/bin/docker", DOCKER_CONFIG_DIR, fakeRunner([okResult(JSON.stringify(body))]).runner).info()).serverVersion;
+    expect(await parse({ ServerVersion: "0.0.0-fake.test", ClientInfo: { Version: "9.9.9" } })).toBe("0.0.0-fake.test");
+    expect(await parse({ ClientInfo: { Version: "9.9.9" } })).toBeNull(); // a client version is not evidence
+    expect(await parse({ ServerVersion: 27 })).toBeNull();
+    expect(await parse({ ServerVersion: ["27.3.1"] })).toBeNull();
   });
 
   it("podman info is parsed (the preflight then refuses Podman)", async () => {
     const f = fakeRunner([okResult(JSON.stringify({ host: { security: { rootless: true }, ociRuntime: { name: "crun" } } }))]);
-    expect(await createCliEngine("/usr/bin/podman", DOCKER_CONFIG_DIR, f.runner).info()).toEqual({ engine: "podman", rootless: true, runtimes: ["crun"], seccompProfile: null, runtimeConfigs: {} });
+    expect(await createCliEngine("/usr/bin/podman", DOCKER_CONFIG_DIR, f.runner).info()).toEqual({ engine: "podman", rootless: true, runtimes: ["crun"], seccompProfile: null, runtimeConfigs: {}, serverVersion: null });
   });
 
   it("seccomp profile identity: exactly one well-formed seccomp entry, otherwise null (refused by the preflight)", () => {

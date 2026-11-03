@@ -35,6 +35,7 @@ processed until a preflight on the target host returns `meets-spec`.
 | Namespaces/cgroups | ipc none; pid/uts/userns private; `--cgroupns private`; no cgroup parent |
 | Resources | 512 MiB memory, no swap, 0.5 CPU (`NanoCpus` only: CPU shares/period/quota/realtime/cpuset, memory reservation/swappiness and all block-IO knobs must be unset), 64 pids, ulimits exactly fsize/nofile/core 50 MiB/256/0 (soft = hard; no other or duplicate entries), `ShmSize` ≤ 64 MiB |
 | Image | `--pull never`; pinned digest; pinned entrypoint; `--no-healthcheck`; `--hostname sandbox` (so `Config.Hostname` has a known value) |
+| Docker server version | the daemon's `docker info` `ServerVersion` must equal the recorded `dockerServerVersion` (recorded at an approved host setup; `null` refuses; missing, malformed or different refuses; re-checked whenever `docker info` is re-read; the client version is never used). No version is chosen in code. This is groundwork for M3; it does not resolve the trust decision. |
 | Engine target | every Docker call uses `--host unix:///var/run/docker.sock --config <operator-prepared empty folder>`; verified before any engine call (see below) |
 | Lifecycle | named `research-sandbox-<runId>-<canary|run>`; no restart; no auto-remove (removal is verified instead); `--log-driver none` |
 | Environment | exactly the recorded image environment (`PATH`, `NODE_VERSION`, `YARN_VERSION` values recorded at the approved pull) plus `NODE_ENV=production` and `RESEARCH_RUN_ID=<runId>`: names **and values**, no duplicates, every entry a printable `NAME=value`; values never appear in messages |
@@ -200,6 +201,7 @@ on a fully configured host.
 - Approved host setup step: record gVisor's `/proc/version` on this host as `gvisorProcVersion` (it must differ from the host kernel's).
 - Operator-prepared empty Docker client config folder (outside the runs root, mode 700), passed to the engine adapter.
 - Before `meets-spec`: host-side runtime verification (M1) implemented and reviewed; Docker version and seccomp trust decision (M3) recorded.
+- Docker server version pin (fail closed, recorded at host setup) implemented with fake-host tests; the canary-probe Dockerfile is prepared but not built (`deploy/research-sandbox/`).
 - cgroup v2; engine CLI at an allowlisted absolute path.
 - Approved one-time pull of the pinned base image; digest, entrypoint, image environment and platform manifest digest recorded in the spec.
 - Approved host setup step: record the Docker data root (`docker info` DockerRootDir, confirmed on the host) as `dockerDataRoot`.

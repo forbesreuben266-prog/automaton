@@ -40,6 +40,11 @@ describe("baseline specification", () => {
     expect(pinned.gvisorProcVersion).toBe("Linux version 4.4.0 #1 SMP");
     expect(resolveSpec({ gvisorProcVersion: "Linux version 4.4.0 #1 SMP" }, pinned).gvisorProcVersion).toBe("Linux version 4.4.0 #1 SMP");
     expect(() => resolveSpec({ gvisorProcVersion: "Linux version 6.0 other" }, pinned)).toThrow("differs from the already recorded value");
+    // The recorded reference is limited to 512 characters, like the observed value in the gVisor evidence check.
+    const longest = `Linux version ${"x".repeat(498)}`;
+    expect(longest.length).toBe(512);
+    expect(resolveSpec({ gvisorProcVersion: longest }).gvisorProcVersion).toBe(longest);
+    expect(() => resolveSpec({ gvisorProcVersion: `${longest}x` })).toThrow("at most 512 characters");
     for (const bad of ["", "4.4.0", "Linux version ", "Linux version 4.4.0\nextra", `Linux version ${"x".repeat(501)}`, 42, null]) {
       expect(() => resolveSpec({ gvisorProcVersion: bad })).toThrow("gvisorProcVersion");
     }
@@ -77,6 +82,22 @@ describe("overrides can only tighten", () => {
     }
     expect(() => resolveSpec({ imageDigest: `sha256:${"cd".repeat(32)}` }, SPEC)).toThrow("differs from the already pinned digest");
     expect(() => resolveSpec({ imageEntrypoint: ["/bin/sh"] }, SPEC)).toThrow("differs from the already pinned entrypoint");
+  });
+});
+
+describe("dockerServerVersion pin (recorded at an approved host setup; nothing chosen here)", () => {
+  it("is unset by default and can be recorded once, in the daemon's ServerVersion form", () => {
+    expect(SANDBOX_SPEC.dockerServerVersion).toBeNull();
+    for (const v of ["0.0.0-fake.test", "1.2.3", "12.34.56+build.7"]) expect(resolveSpec({ dockerServerVersion: v }).dockerServerVersion).toBe(v);
+    const pinned = resolveSpec({ dockerServerVersion: "0.0.0-fake.test" });
+    expect(resolveSpec({ dockerServerVersion: "0.0.0-fake.test" }, pinned).dockerServerVersion).toBe("0.0.0-fake.test");
+    expect(() => resolveSpec({ dockerServerVersion: "0.0.1-fake.test" }, pinned)).toThrow("dockerServerVersion: differs from the already recorded value");
+  });
+
+  it("refuses malformed versions", () => {
+    for (const bad of ["", "27", "27.3", "v27.3.1", "27.3.1\n", "27.3.1 ", "27.3.1;x", "latest", 27, null, ["27.3.1"], "1.2.3-" + "x".repeat(80)]) {
+      expect(() => resolveSpec({ dockerServerVersion: bad })).toThrow("dockerServerVersion: must be the daemon's reported ServerVersion");
+    }
   });
 });
 

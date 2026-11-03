@@ -17,15 +17,19 @@ export const FAKE_DATA_ROOT = "/var/lib/docker";
 export const FAKE_RUNSC_PATH = "/usr/local/bin/runsc";
 export const FAKE_RUNSC_SHA256 = "5e".repeat(32);
 export const FAKE_RUNSC = Object.freeze({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, args: Object.freeze([] as string[]) });
+/** FAKE Docker server version for tests (deliberately not a real release). */
+export const FAKE_DOCKER_SERVER_VERSION = "0.0.0-fake.test";
 /** Fully pinned spec (fake values); SANDBOX_SPEC itself has nothing pinned. */
 export const SPEC = resolveSpec({
   imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: FAKE_GVISOR_PROC_VERSION,
   imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
+  dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
 });
 /** `docker info` as parsed by the engine adapter: Docker with runc and runsc, built-in seccomp profile. */
 export const DOCKER_INFO = Object.freeze({
   engine: "docker" as const, rootless: false, runtimes: Object.freeze(["runc", "runsc"]), seccompProfile: "builtin",
   runtimeConfigs: Object.freeze({ runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH } }),
+  serverVersion: FAKE_DOCKER_SERVER_VERSION,
 });
 export const RUN: RunPaths = { inputDir: "/srv/research-runs/r1/in", outputDir: "/srv/research-runs/r1/out", runId: "r1" };
 export const HOST_CANARY = "/srv/research-canary/host-canary.txt";

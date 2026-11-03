@@ -7,7 +7,10 @@
  *  3. engine target verified (local socket /var/run/docker.sock and an
  *     empty, private client config folder; see host-paths.ts) BEFORE any
  *     engine call; engine info; Podman is refused (its inspect/canary formats are not
- *     verified); the daemon must report Docker's built-in seccomp profile
+ *     verified); the daemon's ServerVersion must equal the recorded, approved
+ *     dockerServerVersion (not recorded, missing, malformed or different
+ *     refuses; the client version is never evidence; re-checked whenever
+ *     `docker info` is re-read); the daemon must report Docker's built-in seccomp profile
  *     (custom, unconfined or unreported refuses); a runtime from the
  *     specification must be available; (M1) for an isolating runtime, its
  *     binary is verified on the host (recorded path and SHA-256, no runtime
@@ -64,7 +67,7 @@ import {
 } from "./host-paths.js";
 import { validateInspect } from "./inspect.js";
 import {
-  SandboxSpecError, buildCreateArgs, containerName, imageReference, securityArgsHash, validateRunPaths,
+  DOCKER_SERVER_VERSION_PATTERN, SandboxSpecError, buildCreateArgs, containerName, imageReference, securityArgsHash, validateRunPaths,
   type RunPaths, type SandboxSpec,
 } from "./spec.js";
 
@@ -81,6 +84,8 @@ export interface RunBinding {
   readonly gvisorProcVersion: string;
   /** SHA-256 of the runtime binary verified on the host before create and re-verified after the canary ("" for development runtimes). */
   readonly runtimeBinarySha256: string;
+  /** The recorded Docker server version the daemon reported during this preflight. */
+  readonly dockerServerVersion: string;
 }
 
 export interface CleanupOutcome {
@@ -148,10 +153,30 @@ export function chooseRuntime(info: EngineInfo, spec: SandboxSpec): string | nul
     ?? null;
 }
 
-/** The approved configuration before blockers: Docker + positively identified gVisor + built-in seccomp profile. */
+/** The approved configuration before blockers: Docker at the recorded server version + positively identified gVisor + built-in seccomp profile. */
 function approvedConfiguration(info: EngineInfo, runtime: string, spec: SandboxSpec, gvisorVerified: boolean): boolean {
   return info.engine === "docker" && spec.isolatingRuntimes.includes(runtime) && gvisorVerified === true &&
-    info.seccompProfile === spec.seccompProfile;
+    info.seccompProfile === spec.seccompProfile && serverVersionProblems(info, spec).length === 0;
+}
+
+/**
+ * The daemon-reported Docker server version must equal the recorded,
+ * approved pin. Not recorded, missing, malformed or different refuses.
+ * Only `docker info` ServerVersion (the daemon's report) is used, never the
+ * client version. Returns violations.
+ */
+export function serverVersionProblems(info: EngineInfo, spec: SandboxSpec): string[] {
+  if (spec.dockerServerVersion === null) {
+    return ["Docker server version: no approved version has been recorded for this host (approved host setup step), so its inspect and info formats can't be trusted"];
+  }
+  const reported = info?.serverVersion;
+  if (typeof reported !== "string" || !DOCKER_SERVER_VERSION_PATTERN.test(reported)) {
+    return [`Docker server version: the daemon did not report a well-formed ServerVersion (got ${JSON.stringify(reported ?? null)?.slice(0, 40)})`];
+  }
+  if (reported !== spec.dockerServerVersion) {
+    return [`Docker server version: the daemon reports ${reported}; the approved version is ${spec.dockerServerVersion}`];
+  }
+  return [];
 }
 
 /**
@@ -201,6 +226,9 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   if (info.engine !== "docker") {
     return result({ violations: ["Podman is not supported yet: its inspect and canary formats have not been verified (fail closed)"], steps, engine: info });
   }
+  const versionProblems = serverVersionProblems(info, spec);
+  if (versionProblems.length > 0) return result({ violations: versionProblems, steps: [...steps, "engine-version"], engine: info });
+  steps.push("engine-version");
   if (info.seccompProfile !== spec.seccompProfile) {
     return result({ violations: [`seccomp: the daemon must report the built-in default profile ("${spec.seccompProfile}"); got ${JSON.stringify(info.seccompProfile)} (custom, unconfined or unreported profiles refuse)`], steps, engine: info });
   }
@@ -291,6 +319,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
       securityArgsSha256: securityArgsHash(args, spec),
       gvisorProcVersion: spec.gvisorProcVersion ?? "",
       runtimeBinarySha256: binary?.sha256 ?? "",
+      dockerServerVersion: spec.dockerServerVersion ?? "",
     }),
   });
 }
@@ -343,7 +372,7 @@ async function recheckRuntimeConfig(engine: ContainerEngine, runtime: string, sp
   if (typeof fresh !== "object" || fresh === null || fresh.engine !== "docker" || !Array.isArray(fresh.runtimes) || !fresh.runtimes.includes(runtime)) {
     return [`runtime configuration (${when}): docker info no longer reports the ${runtime} runtime`];
   }
-  const problems = runtimeConfigProblems(fresh, runtime, spec);
+  const problems = [...serverVersionProblems(fresh, spec), ...runtimeConfigProblems(fresh, runtime, spec)];
   if (problems.length > 0) return problems.map((p) => `runtime configuration (${when}): ${p}`);
   if (canonicalRuntimeConfig(fresh, runtime) !== verified) return [`runtime configuration (${when}): changed since it was verified before create`];
   return [];
@@ -393,6 +422,7 @@ export function assertUntrustedInputAllowed(r: PreflightResult, intended: { spec
   if (!Array.isArray(r.violations) || r.violations.length > 0) reasons.push("result has violations");
   if (!Array.isArray(r.steps) || !r.steps.includes("canary") || !r.steps.includes("removed-verified")) reasons.push("preflight did not complete with verified cleanup");
   if (!Array.isArray(r.steps) || !r.steps.includes("gvisor-verified")) reasons.push("gVisor was not positively verified");
+  if (!Array.isArray(r.steps) || !r.steps.includes("engine-version")) reasons.push("the Docker server version was not verified against the recorded pin");
   if (!Array.isArray(r.steps) || !r.steps.includes("runtime-binary-verified") || !r.steps.includes("runtime-binary-rechecked")) reasons.push("the runtime binary was not verified before create and re-verified after the canary");
   if (!Array.isArray(r.steps) || !r.steps.includes("runtime-config-rechecked-after-create") || !r.steps.includes("runtime-config-rechecked-after-canary")) {
     reasons.push("the runtime configuration was not re-read after create and after the canary");
@@ -407,6 +437,7 @@ export function assertUntrustedInputAllowed(r: PreflightResult, intended: { spec
       if (b.imageRef !== imageReference(spec)) reasons.push("result was produced for a different image");
       if (spec.gvisorProcVersion === null || b.gvisorProcVersion !== spec.gvisorProcVersion) reasons.push("result was not verified against the recorded gVisor reference");
       if (spec.runscBinary === null || b.runtimeBinarySha256 !== spec.runscBinary.sha256) reasons.push("result was not verified against the recorded runtime binary");
+      if (spec.dockerServerVersion === null || b.dockerServerVersion !== spec.dockerServerVersion) reasons.push("result was not verified against the recorded Docker server version");
       if (b.runtime !== r.runtime || !spec.isolatingRuntimes.includes(b.runtime)) reasons.push("result runtime is not an approved isolating runtime");
       const expectedHash = securityArgsHash(buildCreateArgs(spec, run, b.runtime, ["node"], "run"), spec);
       if (b.securityArgsSha256 !== expectedHash) reasons.push("result was produced for different security arguments");

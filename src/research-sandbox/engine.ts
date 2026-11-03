@@ -56,6 +56,12 @@ export interface EngineInfo {
    * self-report: it says what the daemon claims to execute, not what it does.
    */
   readonly runtimeConfigs: Readonly<Record<string, unknown>>;
+  /**
+   * The daemon's own version: `docker info` ServerVersion (reported by the
+   * server, not the CLI client); null if absent or not a string (and for
+   * Podman). Daemon self-report, checked against the recorded pin.
+   */
+  readonly serverVersion: string | null;
 }
 
 export interface ContainerEngine {
@@ -197,11 +203,12 @@ export function createCliEngine(binary: string, configDir: string, runner: Proce
         const runtimesObj = j?.Runtimes && typeof j.Runtimes === "object" && !Array.isArray(j.Runtimes) ? j.Runtimes as Record<string, unknown> : {};
         const runtimes = Object.keys(runtimesObj);
         const runtimeConfigs = Object.freeze(Object.fromEntries(runtimes.map((n) => [n, structuredClone(runtimesObj[n])])));
-        return { engine: "docker", rootless: opts.some((o) => o === "name=rootless"), runtimes, seccompProfile: seccompProfileOf(opts), runtimeConfigs };
+        const serverVersion = typeof j?.ServerVersion === "string" ? j.ServerVersion : null;
+        return { engine: "docker", rootless: opts.some((o) => o === "name=rootless"), runtimes, seccompProfile: seccompProfileOf(opts), runtimeConfigs, serverVersion };
       }
       const rootless = j?.host?.security?.rootless === true;
       const name = j?.host?.ociRuntime?.name;
-      return { engine: "podman", rootless, runtimes: typeof name === "string" ? [name] : [], seccompProfile: null, runtimeConfigs: Object.freeze({}) };
+      return { engine: "podman", rootless, runtimes: typeof name === "string" ? [name] : [], seccompProfile: null, runtimeConfigs: Object.freeze({}), serverVersion: null };
     },
     async create(args, imageRef) {
       const problem = createArgvProblem(args, imageRef);

@@ -1,0 +1,6 @@
+{
+  "name": "research-sandbox-canary-probe",
+  "private": true,
+  "type": "module",
+  "description": "Marks the compiled canary probe files as ES modules inside the (not yet built) canary image. No dependencies."
+}
