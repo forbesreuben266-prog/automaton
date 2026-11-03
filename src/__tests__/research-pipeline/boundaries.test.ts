@@ -67,7 +67,7 @@ function specifiers(file: string): string[] {
 
 describe("research pipeline boundaries (step 1: adapter only)", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["assemble.ts", "division.ts", "history.ts", "ledger.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
+    expect(fs.readdirSync(PIPELINE).sort()).toEqual(["assemble.ts", "cli-main.ts", "cli.ts", "division.ts", "history.ts", "ledger.ts", "local-files.ts", "manifest.ts", "workbook.ts"]);
   });
 
   it("the adapter imports nothing but the division's public index; no dynamic import, require or import.meta", () => {
@@ -137,6 +137,8 @@ const PARSER_IMPORTS: Record<string, readonly string[]> = {
   "assemble.ts": ["./division.js", "./ledger.js", "./manifest.js", "./workbook.js"],
   // Step 5: in-memory comparison of two runs, each assembled (and so validated) through assemble.ts.
   "history.ts": ["./assemble.js", "./division.js", "./ledger.js"],
+  // Step 6: the CLI logic (no process or filesystem access of its own; files only through the step 3 loader).
+  "cli.ts": ["./assemble.js", "./history.js", "./local-files.js"],
 };
 /** Names that would reach files, network, processes, environment, time, randomness, dynamic code or global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -234,14 +236,14 @@ describe("research pipeline boundaries (step 3: local files)", () => {
     expect([...flags].sort()).toEqual([...OPEN_FLAGS].sort());
   });
 
-  it("is imported by nothing in the pipeline (no other module gains filesystem access through it)", () => {
-    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "local-files.ts")) {
+  it("is imported by nothing in the pipeline but the CLI (no other module gains filesystem access through it)", () => {
+    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "local-files.ts" && f !== "cli.ts")) {
       expect(specifiers(path.join(PIPELINE, file)), file).not.toContain("./local-files.js");
     }
   });
 
   it("the parsers and the adapter still import no filesystem, network or process module", () => {
-    for (const file of ["assemble.ts", "division.ts", "history.ts", "ledger.ts", "manifest.ts", "workbook.ts"]) {
+    for (const file of ["assemble.ts", "cli.ts", "division.ts", "history.ts", "ledger.ts", "manifest.ts", "workbook.ts"]) {
       for (const spec of specifiers(path.join(PIPELINE, file))) expect(spec.startsWith("node:"), `${file} imports ${spec}`).toBe(false);
     }
   });
@@ -310,9 +312,48 @@ describe("research pipeline boundaries (step 5: history)", () => {
     expect(literals).not.toContain("draft");
   });
 
-  it("is imported by no other pipeline module", () => {
-    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "history.ts")) {
+  it("is imported by no other pipeline module but the CLI", () => {
+    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "history.ts" && f !== "cli.ts")) {
       expect(specifiers(path.join(PIPELINE, file)), file).not.toContain("./history.js");
+    }
+  });
+});
+
+/** Step 6: the CLI. cli.ts holds the logic (no process, filesystem or environment access); cli-main.ts only wires process I/O. */
+describe("research pipeline boundaries (step 6: CLI)", () => {
+  const MAIN = path.join(PIPELINE, "cli-main.ts");
+
+  it("cli-main.ts imports only ./cli.js and uses only process.argv, process.stdout, process.stderr and process.exitCode", () => {
+    expect(specifiers(MAIN)).toEqual(["./cli.js"]);
+    const used = new Set<string>();
+    const others: string[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "process") used.add(n.name.text);
+      else if (ts.isIdentifier(n) && n.text === "process" && !(n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n)) others.push("bare process");
+      if (ts.isIdentifier(n) && FORBIDDEN_IDENTIFIERS.has(n.text) && n.text !== "process") others.push(n.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(parse(MAIN));
+    expect([...used].sort()).toEqual(["argv", "exitCode", "stderr", "stdout"]);
+    expect(others).toEqual([]);
+  });
+
+  it("cli.ts uses no filesystem, Docker, sandbox, model, proposal or scheduling name", () => {
+    const names = new Set<string>();
+    const literals: string[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n)) names.add(n.text);
+      if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) literals.push(n.text);
+      ts.forEachChild(n, visit);
+    };
+    visit(parse(path.join(PIPELINE, "cli.ts")));
+    for (const name of ["fs", "ProposalQueue", "RunBudgetController", "DISABLED_MODEL_PORT", "renderReport", "writeFileSync"]) expect(names.has(name), name).toBe(false);
+    expect(literals.some((l) => /docker|sandbox|runsc|\.sock|cron|schedule/i.test(l))).toBe(false);
+  });
+
+  it("only the CLI imports the history module and the loader together, and nothing imports the CLI but its entry point", () => {
+    for (const file of fs.readdirSync(PIPELINE).filter((f) => f !== "cli-main.ts")) {
+      expect(specifiers(path.join(PIPELINE, file)), file).not.toContain("./cli.js");
     }
   });
 });
