@@ -1,9 +1,11 @@
 /**
- * Trading research foundation (milestone T1): strict schemas for fictional
- * instruments, daily price bars, spreads, fees and datasets with SHA-256
- * provenance, and deterministic descriptive metrics. Offline and pure: no
- * market data feeds, network, broker, orders, strategies, backtests or paper
- * trading. US stocks, UK stocks and forex only (no cryptocurrency).
+ * Trading research foundation. T1: strict schemas for fictional instruments,
+ * daily price bars, spreads, fees and datasets with SHA-256 provenance, and
+ * deterministic descriptive metrics. T2: long-or-flat strategies, an offline
+ * backtest (next-bar-open execution; explicit spread, fees and slippage) and
+ * a report. Offline and pure: no market data feeds, network, broker, real
+ * orders or paper trading. US stocks, UK stocks and forex only (no
+ * cryptocurrency).
  */
 
 export * from "./validation.js";
@@ -11,3 +13,6 @@ export * from "./instruments.js";
 export * from "./prices.js";
 export * from "./dataset.js";
 export * from "./metrics.js";
+export * from "./strategy.js";
+export * from "./backtest.js";
+export * from "./report.js";

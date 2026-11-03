@@ -18,7 +18,7 @@ import { fxDataset, text, ukDataset, usDataset } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
 const MODULE = path.join(SRC, "trading-research");
-const FILES = ["dataset.ts", "index.ts", "instruments.ts", "metrics.ts", "prices.ts", "validation.ts"];
+const FILES = ["backtest.ts", "dataset.ts", "index.ts", "instruments.ts", "metrics.ts", "prices.ts", "report.ts", "strategy.ts", "validation.ts"];
 const parse = (file: string) => ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.ES2022, true);
 /** Capability names: files, network, processes, environment, time, randomness, dynamic code, global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([

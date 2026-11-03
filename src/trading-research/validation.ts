@@ -27,7 +27,7 @@ export const MAX_JSON_DEPTH = 16;
 export const DECIMAL_PATTERN = /^(0|[1-9][0-9]{0,14})(\.[0-9]{1,8})?$/;
 const TIMESTAMP_PATTERN = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$/;
 /** C0 (except tab/LF/CR handled by the caller), DEL, C1, bidi controls, zero-width and other invisible formatting characters. */
-const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/;
+export const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/;
 const LINE_BREAK = /[\t\n\r]/;
 const UNPAIRED_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
