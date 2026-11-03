@@ -13,6 +13,8 @@ export const FAKE_GVISOR_PROC_VERSION = "Linux version 4.4.0 #1 SMP (fake gVisor
 export const HOST_PROC_VERSION = "Linux version 6.8.0-fake-host (test fixture) #1 SMP";
 export const FAKE_IMAGE_ENV = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.22.0", "YARN_VERSION=1.22.22"];
 export const FAKE_MANIFEST_DIGEST = `sha256:${"ef".repeat(32)}`;
+/** FAKE image ID of the locally built canary image (V1B); the created container's top-level Image. */
+export const FAKE_IMAGE_ID = `sha256:${"cd".repeat(32)}`;
 export const FAKE_DATA_ROOT = "/var/lib/docker";
 export const FAKE_RUNSC_PATH = "/usr/local/bin/runsc";
 export const FAKE_RUNSC_SHA256 = "5e".repeat(32);
@@ -23,7 +25,7 @@ export const FAKE_DOCKER_SERVER_VERSION = "0.0.0-fake.test";
 export const SPEC = resolveSpec({
   imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: FAKE_GVISOR_PROC_VERSION,
   imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
-  dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
+  dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID,
 });
 /** `docker info` as parsed by the engine adapter: Docker with runc and runsc, built-in seccomp profile. */
 export const DOCKER_INFO = Object.freeze({
@@ -33,7 +35,8 @@ export const DOCKER_INFO = Object.freeze({
 });
 export const RUN: RunPaths = { inputDir: "/srv/research-runs/r1/in", outputDir: "/srv/research-runs/r1/out", runId: "r1" };
 export const HOST_CANARY = "/srv/research-canary/host-canary.txt";
-export const IMAGE_REF = `${SANDBOX_SPEC.image.repository}@${FAKE_DIGEST}`;
+/** Containers are created from the recorded image ID (V1B), never a tag or repository reference. */
+export const IMAGE_REF = FAKE_IMAGE_ID;
 export const CONTAINER_ID = "0123456789ab0123456789ab0123456789ab0123456789ab0123456789abcdef";
 export const PROBE_COMMAND = ["node", "/app/canary-probe.js", "--canary", HOST_CANARY];
 export const OPERATOR_UID = 1000;
@@ -54,7 +57,7 @@ export function compliantInspect(runtime = "runsc"): any {
     Created: "2026-10-17T00:00:00.000000000Z",
     Path: FAKE_ENTRYPOINT[0],
     Args: [...PROBE_COMMAND],
-    Image: `sha256:${"cd".repeat(32)}`,
+    Image: FAKE_IMAGE_ID,
     ResolvConfPath: `/var/lib/docker/containers/${CONTAINER_ID}/resolv.conf`,
     HostnamePath: `/var/lib/docker/containers/${CONTAINER_ID}/hostname`,
     HostsPath: `/var/lib/docker/containers/${CONTAINER_ID}/hosts`,

@@ -365,6 +365,8 @@ export function validateInspect(raw: unknown, spec: SandboxSpec, expected: Inspe
   try { ref = imageReference(spec); } catch (err) { v.push(...(err as Error).message.split("\n- ").slice(1)); }
   if (ref !== null) {
     expect(config.Image === ref, `Config.Image: must be ${ref}`);
+    // V1B: the image the created container actually uses (top-level Image), not just the reference requested, must be the recorded ID.
+    expect(container.Image === spec.image.id, `Image: the created container's image must be the recorded image ID ${spec.image.id}`);
     expect(JSON.stringify(config.Entrypoint ?? null) === JSON.stringify(spec.image.entrypoint), "Config.Entrypoint: must equal the pinned image entrypoint");
   }
   expect(JSON.stringify(config.Cmd ?? null) === JSON.stringify(expected.command), "Config.Cmd: must equal the requested command");

@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { ALLOWED_SECURITY_OPTS, OPTIONAL_FIELDS, REQUIRED_FIELDS, SANDBOX_SPEC, resolveSpec, validateInspect } from "../../research-sandbox/index.js";
-import { CONTAINER_ID, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ENV, FAKE_MANIFEST_DIGEST, PROBE_COMMAND, RUN, SPEC, compliantInspect } from "./fixtures.js";
+import { CONTAINER_ID, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ENV, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, PROBE_COMMAND, RUN, SPEC, compliantInspect } from "./fixtures.js";
 
 const EXPECT = { run: RUN, purpose: "canary" as const, command: PROBE_COMMAND };
 const check = (mutate: (c: any) => void, spec = SPEC) => {
@@ -369,7 +369,7 @@ describe("v5 review: host file paths, attach flags, exact environment, metadata 
   });
 
   it("unrecorded data root, image environment or manifest digest: refused rather than guessed", () => {
-    const base = { imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT };
+    const base = { imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageId: FAKE_IMAGE_ID };
     expect(check(() => {}, resolveSpec({ ...base, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST }))).toContain("dockerDataRoot is not recorded");
     expect(check(() => {}, resolveSpec({ ...base, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: "/var/lib/docker" }))).toContain("Config.Env: the image environment has not been recorded");
     const noDigest = resolveSpec({ ...base, imageEnv: FAKE_IMAGE_ENV, dockerDataRoot: "/var/lib/docker" });

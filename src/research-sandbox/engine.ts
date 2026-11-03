@@ -17,9 +17,10 @@
  * redirect the CLI or inject settings. The preflight verifies both via
  * `target` before the first engine call. Podman has no target (refused).
  *
- * Create guard: exactly one "--pull" token, immediately followed by "never",
- * placed before the single occurrence of the pinned image reference; no
- * "--pull=..." form anywhere; no "--pull" among the command arguments.
+ * Create guard: the image reference is the recorded image ID
+ * ("sha256:<64 hex>"; V1B), appearing exactly once; exactly one "--pull"
+ * token, immediately followed by "never", placed before it; no "--pull=..."
+ * form anywhere; no "--pull" among the command arguments.
  */
 
 import { spawn } from "node:child_process";
@@ -68,7 +69,7 @@ export interface ContainerEngine {
   /** The daemon endpoint and client config folder every call uses; null if not pinned (refused). */
   readonly target: EngineTarget | null;
   info(): Promise<EngineInfo>;
-  /** imageRef must be the pinned repository@sha256 reference that appears once in args. */
+  /** imageRef must be the recorded image ID (sha256:<64 hex>, never a tag) and appear exactly once in args. */
   create(args: readonly string[], imageRef: string): Promise<string>;
   inspect(id: string): Promise<unknown>;
   start(id: string, timeoutMs: number, maxOutputBytes: number): Promise<ProcessResult>;
@@ -161,8 +162,9 @@ export function seccompProfileOf(securityOptions: readonly unknown[]): string | 
 export function createArgvProblem(args: readonly string[], imageRef: string): string | null {
   if (!Array.isArray(args) || args.some((a) => typeof a !== "string")) return "argv must be an array of strings";
   if (args[0] !== "create") return "argv must start with create";
-  if (typeof imageRef !== "string" || !/^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$/.test(imageRef) || !DIGEST_PATTERN.test(imageRef.slice(imageRef.indexOf("@") + 1))) {
-    return "image reference must be pinned by digest";
+  // V1B: only the full, immutable image ID; tags, short IDs and repository references are refused.
+  if (typeof imageRef !== "string" || !DIGEST_PATTERN.test(imageRef)) {
+    return "image reference must be the recorded image ID (sha256:<64 hex>; no tag, short ID or repository)";
   }
   const imageAt = args.indexOf(imageRef);
   if (imageAt < 0 || args.lastIndexOf(imageRef) !== imageAt) return "the image reference must appear exactly once";

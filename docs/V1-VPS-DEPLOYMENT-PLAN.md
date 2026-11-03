@@ -60,7 +60,8 @@ the runner configuration.
 | `dockerServerVersion` | `docker info` -> `ServerVersion` |
 | `dockerDataRoot` | `docker info` -> `DockerRootDir` |
 | `runscBinary` | Path, plus the SHA-256 computed on the host; `args: []` |
-| `imageDigest`, `imageEntrypoint`, `imageEnv`, `imageManifestDigest` | Recorded at the one approved base-image pull (`imageManifestDigest` may be `null` on a classic image store) |
+| `imageDigest`, `imageEntrypoint`, `imageEnv`, `imageManifestDigest` | Recorded at the one approved base-image pull (`imageManifestDigest` may be `null` on a classic image store; see the manifest conflict in section 7) |
+| `imageId` | The full ID (`sha256:<64 hex>`) of the locally built canary image, recorded at the approved build (section 7) |
 | `gvisorProcVersion` | `/proc/version` inside one container started under `runsc` from the pinned image. It must differ from the host's. This is a trust-on-first-use fingerprint and needs its own approval (one Docker run) |
 
 Then run the V1A preflight runner (section 6).
@@ -104,7 +105,7 @@ These are already enforced by `spec.ts` and the preflight.
 | 3 | Install Docker (download) and hold the version | Rootless, no builtin seccomp, wrong socket or CLI path, or cgroup v1 |
 | 4 | Install runsc (download, verify checksum) and register it without args | Checksum or ownership mismatch, or args present |
 | 5 | Pull the base image once and record the pins; record `gvisorProcVersion` (one Docker run) | Any pin that can't be recorded exactly |
-| 6 | Build the canary image | Blocked until U4 is decided (section 7) |
+| 6 | Build the canary image and record its `imageId` (section 7) | The ID can't be recorded exactly, its entrypoint or environment differ from the base pins, or the manifest conflict (section 7) is unresolved on this host |
 | 7 | Run the V1A runner | Any result other than "refused only by M1/M3" |
 | 8 | Review the evidence; decide on M1 and M3 | Any doubt: the blockers stay |
 
@@ -142,6 +143,7 @@ node dist/research-sandbox/preflight-main.js --config /etc/research-sandbox/pref
     "imageEntrypoint": ["<recorded>"],
     "imageEnv": ["PATH=<recorded>", "NODE_VERSION=<recorded>", "YARN_VERSION=<recorded>"],
     "imageManifestDigest": "sha256:<recorded> or null",
+    "imageId": "sha256:<recorded at the canary build>",
     "gvisorProcVersion": "<recorded>",
     "dockerDataRoot": "/var/lib/docker",
     "runscBinary": { "path": "/usr/local/bin/runsc", "sha256": "<recorded>", "args": [] },
@@ -166,31 +168,65 @@ node dist/research-sandbox/preflight-main.js --config /etc/research-sandbox/pref
 - The empty client config folder exists.
 - The canary image exists (Stage 6).
 
-## 7. U4: referencing the locally built canary image (recommendation, not implemented)
+## 7. Canary image pinning by image ID (U4 Option A, V1B)
 
-**Today:**
-- `imageReference()` and the create guard accept only
-  `<repository>@sha256:<digest>`.
-- Inspect requires `Config.Image` to equal that string.
-- The top-level `Image` (the resolved image ID) is checked for **format
-  only**.
+**How it works:**
+- A locally built image has an image ID but no repository digest, so the
+  canary image is pinned by its recorded **image ID** (`imageId`,
+  `sha256:<64 hex>`). No registry service is needed.
+- `imageReference()` returns that ID, and only once the base digest, the
+  entrypoint **and** the ID are all recorded. The ID must not equal the base
+  digest.
+- The engine's create guard accepts only a full image ID. Tags, short IDs and
+  repository references are refused, and `--pull never` is still required.
+- Inspect requires both the requested reference (`Config.Image`) **and** the
+  image the created container actually uses (top-level `Image`) to equal the
+  recorded ID. A substituted image is refused before the container is
+  started, and the container is then removed.
 
-A locally built image has an image ID but no repository digest. So the
-canary image can't be referenced without a change.
+**Unchanged:**
+- The base `imageDigest`, `imageEntrypoint`, `imageEnv` and
+  `imageManifestDigest` pins are all still required.
+- The canary Dockerfile adds no `ENTRYPOINT` or `ENV`, so the canary image
+  keeps the base values the inspect checks require.
+- The base digest is now **provenance**: it is enforced by the build's
+  `FROM ...@digest`, and the preflight doesn't observe it at run time (the
+  container's image is the canary image, not the base).
 
-| Option | Assessment |
-|---|---|
-| A. Pin the image ID (**recommended**) | Add a recorded `imageId` pin (`sha256:<64 hex>`, the content-addressed ID of the local image) and allow the reference `sha256:<id>`. Inspect would require `Config.Image` to equal the reference **and** the top-level `Image` to equal `imageId`, which is stronger than today, where `Image` is not bound. No new service. Integrity is equivalent, because the ID is a hash of the image configuration, which names every layer. Provenance comes from the reviewed Dockerfile, `FROM` the pinned base digest, and the recorded SHA-256 of each copied file |
-| B. Local registry | A new long-running service and listener, plus more trust decisions. Not needed |
-| C. A tag such as `canary:1` | Tags are mutable. **Rejected:** it weakens verification |
+**Future recording procedure.** Each step needs separate approval and Docker
+socket access on the host.
 
-Option A changes image-verification semantics in `spec.ts`, `engine.ts`
-(the create guard) and `inspect.ts`. It needs your approval as its own small
-reviewed change. Until then, the canary image can't be referenced, and
-Stage 6 stays blocked.
+1. Prepare the build context described in `deploy/research-sandbox/README.md`
+   and record the SHA-256 of its three files.
+2. Build with `--pull=false` and
+   `--build-arg NODE_BASE_DIGEST=<recorded base digest>`, writing the ID to a
+   file with `--iidfile`. Don't tag the image.
+3. Record the file's contents as `imageId`. Check it with
+   `docker image inspect --format '{{.Id}}' <imageId>`.
+4. Confirm that the image's `Config.Entrypoint` and `Config.Env` equal the
+   recorded base pins.
+5. Put `imageId` in the runner configuration (section 6).
 
-A related point applies under option A or not: binding the top-level `Image`
-to a recorded ID would also harden the current digest path.
+**Manifest-digest conflict (reported, not bypassed):**
+- On Docker's **containerd image store**, a container reports an
+  `ImageManifestDescriptor` for its **own** image. For the canary that is the
+  canary's manifest, not the base image's manifest recorded at the pull, so
+  every preflight there would refuse. That is fail-closed, and the check has
+  not been changed.
+- The options need a decision and must be verified on the host:
+  - (a) use the classic image store, which reports no descriptor;
+  - (b) a separately approved change that records the canary image's own
+    manifest digest (taken at the build) as the value compared.
+- Neither is chosen here. Which store the pinned Docker version uses by
+  default, and exactly what it reports, are unverified offline.
+
+**Limitations (unverified offline):**
+- Docker is assumed to accept `docker create sha256:<id>` as an image ID and
+  never as a repository name.
+- Container inspect is assumed to report the resolved ID in the top-level
+  `Image` field on both stores.
+- An image ID identifies content only. The canary's provenance rests on the
+  reviewed Dockerfile, the pinned base digest and the recorded file hashes.
 
 ## 8. Preventing the agent, wallet, spending or trading from starting
 
@@ -212,7 +248,7 @@ to a recorded ID would also harden the current digest path.
 - The canary image build.
 - Each trust decision: the runsc checksum source, the Docker version and
   seccomp (M3), and M1's residual limits.
-- Each code change: U4, and removing either blocker.
+- Each code change: the manifest-conflict option (section 7), and removing either blocker.
 - Paid snapshots.
 - Any destructive rollback (section 10).
 - Any real-world research or data, and anything to do with the agent, keys,

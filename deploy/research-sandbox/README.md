@@ -28,13 +28,13 @@ out of the build context.
    recorded at the same pull. The Dockerfile adds no `ENV`, `LABEL` or
    `ENTRYPOINT`, so the built image keeps the base image's values, and the
    preflight's inspect checks require exactly those.
-3. **The built image's own reference.** The preflight refers to images as
-   `<repository>@sha256:<digest>` (`SANDBOX_SPEC.image.repository` is currently
-   the base `docker.io/library/node`). A locally built image has an image ID
-   but no repository digest unless it is pushed to a registry. How the canary
-   image is referenced (a local registry, or a reviewed change to accept an
-   image ID) is an open decision. It changes the specification, so it is
-   not decided here.
+3. **The built image's own ID (V1B).** The preflight creates containers from
+   the recorded image ID (`SANDBOX_SPEC.image.id`, `sha256:<64 hex>`), never a
+   tag, and inspect requires the created container's actual image to equal it.
+   Build with `--pull=false`, the base digest build argument and `--iidfile`.
+   Record the ID from that file at the approved build, and don't tag the image.
+   On the containerd image store, see the manifest-digest conflict in
+   `docs/V1-VPS-DEPLOYMENT-PLAN.md` section 7.
 4. **The compiled probe files**: their SHA-256 values, recorded from the
    reviewed build that produced them.
 5. **The platform manifest digest** (`image.manifestDigest`), when the

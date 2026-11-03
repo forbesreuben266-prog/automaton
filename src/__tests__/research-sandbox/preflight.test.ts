@@ -10,7 +10,7 @@ import {
   buildCreateArgs, imageReference, resolveSpec, runPreflight, securityArgsHash, serverVersionProblems, type ContainerEngine, type EngineInfo, type PreflightResult, type ProcessResult,
 } from "../../research-sandbox/index.js";
 import {
-  CONTAINER_ID, DOCKER_CONFIG_DIR, DOCKER_INFO, ENGINE_TARGET, FAKE_DOCKER_SERVER_VERSION, FAKE_DATA_ROOT, FAKE_IMAGE_ENV, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_DIGEST, FAKE_ENTRYPOINT, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC,
+  CONTAINER_ID, DOCKER_CONFIG_DIR, DOCKER_INFO, ENGINE_TARGET, FAKE_DOCKER_SERVER_VERSION, FAKE_IMAGE_ID, FAKE_DATA_ROOT, FAKE_IMAGE_ENV, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_DIGEST, FAKE_ENTRYPOINT, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC,
   compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
 } from "./fixtures.js";
 
@@ -334,7 +334,7 @@ describe("binding: results can't be reused for another run or configuration (che
     const r = wouldBePassing();
     expect(extra(r)).toBe("");
     expect(extra(r, SPEC, { runId: "r2", ...expectedRunPaths(SPEC, "r2") })).toContain("different run or folders");
-    const otherImage = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: `sha256:${"cd".repeat(32)}`, imageEntrypoint: ["docker-entrypoint.sh"], gvisorProcVersion: SPEC.gvisorProcVersion! });
+    const otherImage = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: `sha256:${"9f".repeat(32)}`, imageDigest: `sha256:${"cd".repeat(32)}`, imageEntrypoint: ["docker-entrypoint.sh"], gvisorProcVersion: SPEC.gvisorProcVersion! });
     expect(extra(r, otherImage)).toContain("different image");
     expect(extra(r, resolveSpec({ pidsLimit: 32 }, SPEC))).toContain("different security arguments");
   });
@@ -383,7 +383,7 @@ describe("acceptance finding 1: a runtime NAMED runsc is not evidence of gVisor"
   });
 
   it("no recorded gVisor reference: refused even when every other check passes", async () => {
-    const unrecorded = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
+    const unrecorded = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
     expect(unrecorded.gvisorProcVersion).toBeNull();
     const r = await run(fakeEngine().engine, { spec: unrecorded });
     expectGvisorRefused(r, "no reference /proc/version has been recorded");
@@ -391,7 +391,7 @@ describe("acceptance finding 1: a runtime NAMED runsc is not evidence of gVisor"
   });
 
   it("a recorded reference equal to the host's own kernel still refuses (host kernel is never gVisor)", async () => {
-    const wrongReference = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: HOST_PROC_VERSION, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
+    const wrongReference = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: HOST_PROC_VERSION, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
     const r = await run(withReport({ procVersion: HOST_PROC_VERSION }).engine, { spec: wrongReference });
     expectGvisorRefused(r, "sees the host kernel");
   });
@@ -422,9 +422,9 @@ describe("acceptance finding 1: a runtime NAMED runsc is not evidence of gVisor"
     const r = wouldBePassing();
     const noStep = { ...r, steps: r.steps.filter((x) => x !== "gvisor-verified") } as PreflightResult;
     expect(refusalReasons(noStep)).toContain("gVisor was not positively verified");
-    const otherReference = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: "Linux version 4.4.0 #2 other" });
+    const otherReference = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: "Linux version 4.4.0 #2 other" });
     expect(refusalReasons(r, otherReference)).toContain("result was not verified against the recorded gVisor reference");
-    const unrecorded = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
+    const unrecorded = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] } });
     expect(refusalReasons(r, unrecorded)).toContain("result was not verified against the recorded gVisor reference");
   });
 
@@ -474,7 +474,7 @@ describe("acceptance finding 2: only Docker's built-in default seccomp profile i
 
 describe("M1 at the preflight level", () => {
   it("no approved runtime binary recorded: refused before anything is created (not downgraded)", async () => {
-    const noBinary = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST,
+    const noBinary = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST,
       dockerDataRoot: FAKE_DATA_ROOT, gvisorProcVersion: SPEC.gvisorProcVersion! });
     const f = fakeEngine();
     const r = await run(f.engine, { spec: noBinary });
@@ -601,7 +601,7 @@ describe("v5 review finding 1 at the preflight level", () => {
   });
 
   it("no recorded Docker data root: refused at inspect, never started", async () => {
-    const noRoot = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, gvisorProcVersion: SPEC.gvisorProcVersion!, runscBinary: { ...FAKE_RUNSC, args: [] } });
+    const noRoot = resolveSpec({ dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID, imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, gvisorProcVersion: SPEC.gvisorProcVersion!, runscBinary: { ...FAKE_RUNSC, args: [] } });
     const f = fakeEngine();
     expectRefused(await run(f.engine, { spec: noRoot }), "dockerDataRoot is not recorded");
     expect(f.calls.some((c) => c.startsWith("start"))).toBe(false);
@@ -639,7 +639,7 @@ describe("acceptance findings 3 and 4 at the preflight level", () => {
 describe("Docker server version (M3 groundwork): recorded pin, daemon-reported ServerVersion only", () => {
   const unpinned = () => resolveSpec({
     imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: SPEC.gvisorProcVersion!, imageEnv: FAKE_IMAGE_ENV,
-    imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
+    imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] }, imageId: FAKE_IMAGE_ID,
   });
 
   it("the shipped specification records no version, so every preflight refuses (no version is chosen in code)", async () => {

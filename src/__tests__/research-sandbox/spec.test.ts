@@ -21,12 +21,14 @@ describe("baseline specification", () => {
   });
 
   it("D3: digest and entrypoint are unpinned until an approved pull; the image reference is refused", () => {
-    expect(SANDBOX_SPEC.image).toEqual({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null });
+    expect(SANDBOX_SPEC.image).toEqual({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null });
     const msg = (() => { try { imageReference(SANDBOX_SPEC); return ""; } catch (e) { return (e as Error).message; } })();
     expect(msg).toContain("image digest is not pinned");
     expect(msg).toContain("image entrypoint is not pinned");
     expect(() => imageReference(resolveSpec({ imageDigest: FAKE_DIGEST }))).toThrow("entrypoint is not pinned");
     expect(() => imageReference(resolveSpec({ imageEntrypoint: FAKE_ENTRYPOINT }))).toThrow("digest is not pinned");
+    expect(msg).toContain("image ID is not recorded");
+    expect(() => imageReference(resolveSpec({ imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT }))).toThrow("image ID is not recorded");
     expect(imageReference(SPEC)).toBe(IMAGE_REF);
   });
 

@@ -103,8 +103,8 @@ describe("engine adapter (fake runner)", () => {
       await expect(docker(f.runner).create(args, IMAGE_REF), JSON.stringify(args)).rejects.toThrow(message);
       expect(f.calls).toEqual([]);
     }
-    for (const ref of ["img:latest", "img@sha256:short", "", "IMG@sha256:" + "a".repeat(64)]) {
-      expect(createArgvProblem(["create", "--pull", "never", ref], ref)).toContain("pinned by digest");
+    for (const ref of ["img:latest", "img@sha256:short", "", "IMG@sha256:" + "a".repeat(64), `docker.io/library/node@sha256:${"a".repeat(64)}`, `sha256:${"a".repeat(63)}`, `sha256:${"A".repeat(64)}`, "a".repeat(64), "abcdef012345"]) {
+      expect(createArgvProblem(["create", "--pull", "never", ref], ref)).toContain("must be the recorded image ID");
     }
     expect(createArgvProblem(["create", "--pull", "never", IMAGE_REF, "node"], IMAGE_REF)).toBeNull();
   });

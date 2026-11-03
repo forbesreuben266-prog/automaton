@@ -16,7 +16,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_CONFIG_DIR, FAKE_DATA_ROOT, FAKE_DIGEST, FAKE_DOCKER_SERVER_VERSION, FAKE_ENTRYPOINT, FAKE_GVISOR_PROC_VERSION, FAKE_IMAGE_ENV,
-  FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
+  FAKE_MANIFEST_DIGEST, FAKE_IMAGE_ID, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
 } from "./fixtures.js";
 
 const NAME = "research-sandbox-r1-canary";
@@ -31,7 +31,7 @@ const config = (edit: (c: any) => void = () => {}) => {
     version: 1, engineBinary: "/usr/bin/docker", engineConfigDir: DOCKER_CONFIG_DIR, runId: "r1", hostCanaryPath: HOST_CANARY,
     operatorUid: OPERATOR_UID, outputOwnerUid: OUTPUT_UID,
     pins: {
-      imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST,
+      imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, imageId: FAKE_IMAGE_ID,
       gvisorProcVersion: FAKE_GVISOR_PROC_VERSION, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] }, dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
     },
   };

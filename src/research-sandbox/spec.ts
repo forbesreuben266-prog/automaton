@@ -39,6 +39,16 @@ export interface ImageSpec {
    * recorded: a container that reports a descriptor is refused.
    */
   readonly manifestDigest: string | null;
+  /**
+   * V1B: the exact Docker image ID ("sha256:<64 hex>") of the locally built
+   * canary image (FROM the pinned base digest above), recorded at the
+   * separately approved build step. Containers are created from this ID (an
+   * immutable, content-addressed identifier; never a tag), and inspect
+   * requires both the requested reference (Config.Image) and the image the
+   * created container actually uses (top-level Image) to equal it. It must
+   * differ from the base digest. null = not recorded: preflight refuses.
+   */
+  readonly id: string | null;
 }
 
 export interface SandboxSpec {
@@ -123,7 +133,7 @@ export interface RuntimeBinary {
 }
 
 export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
-  image: Object.freeze({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null }),
+  image: Object.freeze({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null }),
   isolatingRuntimes: Object.freeze(["runsc"]),
   developmentRuntimes: Object.freeze(["runc", "crun"]),
   user: "10001:10001",
@@ -185,8 +195,9 @@ export type SpecOverrides = Partial<Record<(typeof NUMERIC_LIMITS)[number], numb
   readonly dockerDataRoot?: string;
   readonly runscBinary?: RuntimeBinary;
   readonly dockerServerVersion?: string;
+  readonly imageId?: string;
 };
-const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary", "dockerServerVersion"];
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary", "dockerServerVersion", "imageId"];
 /** A Docker server version as `docker info` reports it: MAJOR.MINOR.PATCH, optionally with a short pre-release/build suffix. */
 export const DOCKER_SERVER_VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]{0,63})?$/;
 /** Root-owned system directories the approved runtime binary may live in. */
@@ -272,6 +283,14 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
     else if (base.image.manifestDigest !== null && base.image.manifestDigest !== d) violations.push("imageManifestDigest: differs from the already recorded digest");
     else next.image = Object.freeze({ ...(next.image as ImageSpec), manifestDigest: d });
   }
+  if ("imageId" in values) {
+    const id = values.imageId;
+    const baseDigest = (next.image as ImageSpec).digest;
+    if (typeof id !== "string" || !DIGEST_PATTERN.test(id)) violations.push("imageId: must be the full image ID sha256:<64 lowercase hex> (no tag, short ID or repository)");
+    else if (base.image.id !== null && base.image.id !== id) violations.push("imageId: differs from the already recorded image ID");
+    else if (baseDigest !== null && baseDigest === id) violations.push("imageId: equals the base image digest; it must be the locally built canary image's own ID");
+    else next.image = Object.freeze({ ...(next.image as ImageSpec), id });
+  }
   if ("dockerDataRoot" in values) {
     const r = values.dockerDataRoot;
     if (typeof r !== "string" || !/^(\/[A-Za-z0-9._-]+)+$/.test(r) || r.split("/").some((c) => c === "." || c === "..") ||
@@ -318,7 +337,12 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
   return Object.freeze(next) as unknown as SandboxSpec;
 }
 
-/** Reference to the pinned image; refuses when the digest or entrypoint isn't pinned (D3). */
+/**
+ * The reference containers are created from: the recorded canary image ID
+ * (V1B), "sha256:<64 hex>", never a tag. Refuses unless the base digest, the
+ * entrypoint AND the image ID are all pinned (D3), and the ID is not the
+ * base digest itself (the base image has no probe; the canary is built FROM it).
+ */
 export function imageReference(spec: SandboxSpec): string {
   const problems: string[] = [];
   if (spec.image.digest === null || !DIGEST_PATTERN.test(spec.image.digest)) {
@@ -327,8 +351,13 @@ export function imageReference(spec: SandboxSpec): string {
   if (spec.image.entrypoint === null) {
     problems.push("image entrypoint is not pinned: it must be recorded at the approved image pull (D3)");
   }
+  if (spec.image.id === null || !DIGEST_PATTERN.test(spec.image.id)) {
+    problems.push("image ID is not recorded: the separately approved canary image build must record its full ID (sha256:<64 hex>) first (V1B)");
+  } else if (spec.image.id === spec.image.digest) {
+    problems.push("image ID equals the base image digest: it must be the locally built canary image's own ID (V1B)");
+  }
   if (problems.length > 0) throw new SandboxSpecError(problems);
-  return `${spec.image.repository}@${spec.image.digest}`;
+  return spec.image.id!;
 }
 
 export interface RunPaths {
