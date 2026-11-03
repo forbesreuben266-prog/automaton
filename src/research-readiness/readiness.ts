@@ -102,9 +102,12 @@ export function assertRealWorldInputApproved(r: unknown): never {
   ]);
 }
 
+/** Escapes Markdown so supplied text can't add formatting, links or HTML. */
+export const escapeMarkdown = (t: string): string => t.replace(/[\\`*_{}[\]()<>#+|!~-]/g, (c) => `\\${c}`);
+
 /** Markdown rendering; all text is escaped so supplied names can't add formatting or links. */
 export function renderReadiness(r: ReadinessResult): string {
-  const esc = (t: string) => t.replace(/[\\`*_{}[\]()<>#+|!~-]/g, (c) => `\\${c}`);
+  const esc = escapeMarkdown;
   const label: Record<CheckStatus, string> = { pass: "PASS", fail: "FAIL", unverified: "UNVERIFIED" };
   const out = [
     `# Readiness: ${r.subject === "business_evidence" ? "business evidence" : "market data"}`, "",

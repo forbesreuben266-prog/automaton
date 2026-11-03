@@ -5,6 +5,8 @@
  * verified, so each test can break exactly one thing.
  */
 
+import { createHash } from "node:crypto";
+
 export const HASH = "a".repeat(64);
 export const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 
@@ -88,3 +90,17 @@ export function marketRecord(kind: "us" | "uk" | "fx" = "us"): any {
 
 export const statusOf = (r: { checks: readonly { id: string; status: string }[] }, id: string) => r.checks.find((c) => c.id === id)?.status;
 export const detailsOf = (r: { checks: readonly { id: string; details: readonly string[] }[] }, id: string) => r.checks.find((c) => c.id === id)?.details ?? [];
+
+/** R2: a complete, verified FICTIONAL import manifest for `content` (its size and SHA-256 computed from the exact text). */
+export function importManifest(content: string, dataType: "business_evidence" | "market_data", file = "content.json"): any {
+  return {
+    version: 1, importId: `imp-${dataType.replace("_", "-")}`, receivedAt: "2026-11-02T09:00:00Z", receivedBy: "operator", preparedAt: "2026-11-02T10:00:00Z",
+    dataType, dataOrigin: "fictional",
+    content: { file, format: "json", encoding: "utf-8", sizeBytes: new TextEncoder().encode(content).length, sha256: createHash("sha256").update(content, "utf8").digest("hex") },
+    supplier: { name: "Fictional Research Supplier", supplierId: "fict-supplier", declaredPublisher: "Fictional Data Vendor", declaredPublisherId: "fict-vendor" },
+    licence: {
+      licenceId: "FICT-LICENCE-1", permittedUses: ["internal_research", "historical_backtesting"], restrictions: ["No redistribution of the fictional file."],
+      attestation: verified("2026-11-02T09:30:00Z", "Read the fictional licence text and matched its terms."),
+    },
+  };
+}

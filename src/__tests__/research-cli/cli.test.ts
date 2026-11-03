@@ -65,7 +65,7 @@ describe("help and usage", () => {
 
   it.each([
     ["no command", [], "no command given"],
-    ["an unknown command", ["trade"], "unknown command (expected assess, compare or trading)"],
+    ["an unknown command", ["trade"], "unknown command (expected assess, compare, trading or import)"],
     ["trading without a subcommand", ["trading"], "missing trading command (expected validate, backtest or paper)"],
     ["an unknown trading command", ["trading", "live"], "unknown trading command (expected validate, backtest or paper)"],
     ["an unknown option", [...base("validate"), "--output", "x"], "unknown option --output for trading validate"],

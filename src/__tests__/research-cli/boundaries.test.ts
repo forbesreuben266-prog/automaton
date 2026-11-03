@@ -45,8 +45,8 @@ describe("research CLI boundaries", () => {
     expect(fs.readdirSync(DIR).sort()).toEqual(["cli.ts", "main.ts", "trading-files.ts"]);
   });
 
-  it("cli.ts reaches the business and trading modules only through their public entry points, and has no process or filesystem access", () => {
-    expect(specifiers("cli.ts").sort()).toEqual(["../research-pipeline/cli.js", "../trading-research/index.js", "./trading-files.js"]);
+  it("cli.ts reaches the business, trading and readiness modules only through their public entry points, and has no process or filesystem access", () => {
+    expect(specifiers("cli.ts").sort()).toEqual(["../research-pipeline/cli.js", "../research-readiness/index.js", "../trading-research/index.js", "./trading-files.js"]);
     const { names } = identifiers("cli.ts");
     for (const name of ["process", "fs", "require", "fetch", "globalThis", "eval", "Function", "Date", "setTimeout", "setInterval", "loadRun"]) expect(names.has(name), name).toBe(false);
   });

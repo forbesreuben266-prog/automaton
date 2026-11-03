@@ -199,3 +199,50 @@ export function deepFreeze<T>(value: T): T {
   }
   return value;
 }
+
+export const MAX_JSON_DEPTH = 32;
+
+/**
+ * Parses JSON text strictly (R2): text only, at most `maxChars` characters,
+ * no byte-order mark, at most MAX_JSON_DEPTH levels of nesting and no
+ * duplicate object keys (JSON.parse would silently keep the last one;
+ * escaped spellings of the same key count as duplicates). One linear scan,
+ * then JSON.parse. Throws ReadinessInputError.
+ */
+export function parseJsonStrict(text: unknown, label: string, maxChars: number): unknown {
+  if (typeof text !== "string") throw new ReadinessInputError([`${label}: must be text`]);
+  if (text.length > maxChars) throw new ReadinessInputError([`${label}: is longer than ${maxChars} characters`]);
+  if (text.charCodeAt(0) === 0xfeff) throw new ReadinessInputError([`${label}: must not start with a byte-order mark`]);
+  const stack: Array<{ object: boolean; keys: Set<string>; expectKey: boolean }> = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\"") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== "\"") j += text[j] === "\\" ? 2 : 1;
+      const top = stack[stack.length - 1];
+      if (top?.object && top.expectKey) {
+        let key: unknown;
+        try { key = JSON.parse(text.slice(i, j + 1)); } catch { break; } // malformed: JSON.parse below reports it
+        if (top.keys.has(key as string)) throw new ReadinessInputError([`${label}: has a duplicate key ${JSON.stringify(key).slice(0, 80)} (ambiguous)`]);
+        top.keys.add(key as string);
+        top.expectKey = false;
+      }
+      i = j;
+    } else if (c === "{" || c === "[") {
+      stack.push({ object: c === "{", keys: new Set(), expectKey: c === "{" });
+      if (stack.length > MAX_JSON_DEPTH) throw new ReadinessInputError([`${label}: is nested more than ${MAX_JSON_DEPTH} levels deep`]);
+    } else if (c === "}" || c === "]") {
+      stack.pop();
+    } else if (c === "," && stack[stack.length - 1]?.object) {
+      stack[stack.length - 1].expectKey = true;
+    }
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ReadinessInputError([`${label}: is not valid JSON`]);
+  }
+}
+
+/** UTF-8 length in bytes (strings here are already strict UTF-8 without lone surrogates). */
+export const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length;

@@ -198,7 +198,7 @@ leak into the output.
 
 | Message (abridged) | Cause and fix |
 |---|---|
-| `Usage error: unknown command ...` | The first word must be `assess`, `compare` or `trading`. |
+| `Usage error: unknown command ...` | The first word must be `assess`, `compare`, `trading` or `import`. |
 | `Usage error: missing option --sizing (give every run setting, or --config ...)` | Give every run setting, or use `--config <file.json>`. You can't mix the two forms. |
 | `... must be a normalized absolute path` | Use full paths such as `/tmp/automaton-demo`, with no trailing `/`, `.` or `..`. Use `"$PWD"` for `--repo-root`. |
 | `data root: must be outside the repository` | Keep data outside the repository folder. |
@@ -235,6 +235,7 @@ is then removed.
 | Paper-trading replay with a verifiable, hash-chained ledger | Brokers, exchanges, trading accounts, real orders and live trading |
 | Bounded, path-redacted errors and fixed exit codes | Deploying or launching the autonomous agent, wallets, payments and spending |
 | Readiness checks for future real-world evidence and market data (R1: library and tests only; see [R1-REAL-WORLD-READINESS.md](R1-REAL-WORLD-READINESS.md)) | Approving or ingesting real-world input (readiness results never approve anything) |
+| Offline import quarantine review of fictional files: `import review` (R2; see [R2-IMPORT-QUARANTINE.md](R2-IMPORT-QUARANTINE.md)) | Any approved state, approval command or real-world import (`real_world` origin is rejected) |
 
 Every result here describes invented data under stated assumptions. It cannot
 show that an opportunity or strategy works in reality.

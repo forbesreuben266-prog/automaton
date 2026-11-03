@@ -23,7 +23,7 @@ import { businessBundle, marketRecord } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
 const MODULE = path.join(SRC, "research-readiness");
-const FILES = ["business.ts", "index.ts", "market-data.ts", "provenance.ts", "readiness.ts", "validation.ts"];
+const FILES = ["business.ts", "index.ts", "market-data.ts", "provenance.ts", "quarantine.ts", "readiness.ts", "validation.ts"];
 const FORBIDDEN_IDENTIFIERS = new Set([
   "process", "require", "globalThis", "global", "fetch", "eval", "Function", "Proxy", "XMLHttpRequest", "WebSocket", "Worker", "URL",
   "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Date", "Intl", "performance", "Buffer", "Deno", "Bun",
@@ -71,8 +71,11 @@ describe("readiness module boundaries (static)", () => {
     });
   }
 
-  it("nothing outside the module imports or names it (tests excepted), so neither the agent nor the engines can reach it", () => {
-    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`));
+  it("nothing outside the module imports or names it (tests excepted; one approved coordinator, the unified CLI, via the public index), so neither the agent nor the engines can reach it", () => {
+    const COORDINATOR = path.join(SRC, "research-cli", "cli.ts");
+    const coordinatorSpecs = [...fs.readFileSync(COORDINATOR, "utf8").matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]).filter((spec) => spec.includes("research-readiness"));
+    expect(coordinatorSpecs).toEqual(["../research-readiness/index.js"]);
+    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`) && f !== COORDINATOR);
     expect(outside.length).toBeGreaterThan(50);
     for (const file of outside) expect(fs.readFileSync(file, "utf8").includes("research-readiness"), path.relative(SRC, file)).toBe(false);
   });

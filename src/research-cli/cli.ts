@@ -12,6 +12,10 @@
  *   trading validate  --data-root <abs> --repo-root <abs> --dataset <file.json>
  *   trading backtest  --data-root <abs> --repo-root <abs> --dataset <file.json> <run settings>
  *   trading paper     --data-root <abs> --repo-root <abs> --dataset <file.json> <run settings>
+ *   import review     --data-root <abs> --repo-root <abs> --manifest <file.json>
+ *                     (R2 quarantine review: reads the manifest and the content
+ *                     file it names, both through trading-files.ts; prints the
+ *                     review; exit 0 awaiting approval, 1 rejected; never approves)
  * Run settings: either --config <file.json> (a run configuration file in the
  * data root) or ALL of --strategy, --sizing, --cash, --cash-currency and
  * --slippage-bps (plus --fast/--slow for ma_crossover and --units for
@@ -29,6 +33,7 @@ import {
   PaperSession, ValidationError, parseBacktestConfig, parseBacktestConfigText, parseDatasetText, renderBacktestReport, renderDatasetReport,
   renderPaperReport, runBacktest, type BacktestConfig, type Dataset,
 } from "../trading-research/index.js";
+import { MAX_IMPORT_CONTENT_BYTES, MAX_IMPORT_MANIFEST_BYTES, importContentFile, renderImportReview, reviewImport } from "../research-readiness/index.js";
 import { MAX_CONFIG_FILE_BYTES, MAX_DATASET_FILE_BYTES, TradingFileError, readTradingInput } from "./trading-files.js";
 
 export { EXIT };
@@ -44,6 +49,10 @@ export const USAGE = [
   "  trading validate --data-root <abs> --repo-root <abs> --dataset <file.json>",
   "  trading backtest --data-root <abs> --repo-root <abs> --dataset <file.json> RUN-SETTINGS",
   "  trading paper    --data-root <abs> --repo-root <abs> --dataset <file.json> RUN-SETTINGS",
+  "",
+  "Import quarantine review (R2; fictional data only; validation never authorizes real-world use):",
+  "  import review --data-root <abs> --repo-root <abs> --manifest <file.json>",
+  "  (reads the manifest and the content file it names; exit 0 = awaiting approval, 1 = rejected)",
   "",
   "RUN-SETTINGS: either   --config <file.json>",
   "              or all of --strategy buy_and_hold|ma_crossover [--fast N --slow N]",
@@ -67,7 +76,15 @@ export const TRADING_BANNER = [
   "",
 ].join("\n");
 
+const IMPORT_BANNER = [
+  "Offline import quarantine review -- FICTIONAL data only. Imported content is untrusted; nothing was fetched, approved,",
+  "traded or passed to the research engines, and a successful validation does not authorize real-world use.",
+  "",
+  "",
+].join("\n");
+
 const COMMON = ["data-root", "repo-root", "dataset"];
+const IMPORT_OPTIONS = ["data-root", "repo-root", "manifest"];
 const SETTINGS = ["strategy", "fast", "slow", "sizing", "units", "cash", "cash-currency", "slippage-bps"];
 const TRADING_OPTIONS: Record<string, readonly string[]> = {
   validate: COMMON,
@@ -77,19 +94,19 @@ const TRADING_OPTIONS: Record<string, readonly string[]> = {
 
 class UsageError extends Error {}
 
-function parseOptions(rest: readonly string[], allowed: readonly string[], command: string): Map<string, string> {
+function parseOptions(rest: readonly string[], allowed: readonly string[], command: string, required: readonly string[] = COMMON): Map<string, string> {
   const options = new Map<string, string>();
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i];
     const name = /^--[a-z][a-z-]{0,31}$/.test(flag) ? flag.slice(2) : null;
     if (name === null) throw new UsageError(`argument ${i + 3} is not an option (options look like --name value)`);
-    if (!allowed.includes(name)) throw new UsageError(`unknown option --${name} for trading ${command}`);
+    if (!allowed.includes(name)) throw new UsageError(`unknown option --${name} for ${command}`);
     if (options.has(name)) throw new UsageError(`option --${name} is given more than once`);
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new UsageError(`option --${name} needs a value`);
     options.set(name, value);
   }
-  for (const name of COMMON) if (!options.has(name)) throw new UsageError(`missing option --${name}`);
+  for (const name of required) if (!options.has(name)) throw new UsageError(`missing option --${name}`);
   return options;
 }
 
@@ -126,7 +143,7 @@ function settingsFromOptions(o: Map<string, string>): unknown {
 
 function runTrading(command: string, rest: readonly string[], io: CliIo, roots: string[]): number {
   if (!Object.hasOwn(TRADING_OPTIONS, command)) throw new UsageError("unknown trading command (expected validate, backtest or paper)");
-  const o = parseOptions(rest, TRADING_OPTIONS[command], command);
+  const o = parseOptions(rest, TRADING_OPTIONS[command], `trading ${command}`);
   roots.push(o.get("data-root")!, o.get("repo-root")!);
   const location = (file: string) => ({ dataRoot: o.get("data-root")!, repositoryRoot: o.get("repo-root")!, file });
   let config: BacktestConfig | null = null;
@@ -151,6 +168,27 @@ function runTrading(command: string, rest: readonly string[], io: CliIo, roots: 
   return EXIT.ok;
 }
 
+/**
+ * R2 import review: the manifest, then the content file it names, are read
+ * through the same read-only loader as trading inputs (data root only, plain
+ * .json names, no symbolic links, size limits, strict UTF-8). File problems
+ * are refusals (exit 1); a completed review is printed (exit 0 when awaiting
+ * approval, 1 when rejected). Nothing is written, moved or deleted.
+ */
+function runImport(command: string, rest: readonly string[], io: CliIo, roots: string[]): number {
+  if (command !== "review") throw new UsageError("unknown import command (expected review)");
+  const o = parseOptions(rest, IMPORT_OPTIONS, "import review", IMPORT_OPTIONS);
+  roots.push(o.get("data-root")!, o.get("repo-root")!);
+  const location = (file: string) => ({ dataRoot: o.get("data-root")!, repositoryRoot: o.get("repo-root")!, file });
+  const manifestText = readTradingInput(location(o.get("manifest")!), "--manifest", MAX_IMPORT_MANIFEST_BYTES);
+  const file = importContentFile(manifestText);
+  if (file !== null && file === o.get("manifest")) throw new TradingFileError(["manifest.content.file: must name a different file from the manifest"]);
+  const contentText = file === null ? null : readTradingInput(location(file), "manifest.content.file", MAX_IMPORT_CONTENT_BYTES);
+  const review = reviewImport(manifestText, contentText);
+  io.out(terminalSafe(IMPORT_BANNER + renderImportReview(review)));
+  return review.state === "awaiting_approval" ? EXIT.ok : EXIT.refused;
+}
+
 /** Runs one command; returns the exit code. Never throws. */
 export function runResearchCli(argv: readonly string[], io: CliIo): number {
   if (argv[0] === "assess" || argv[0] === "compare") return runBusinessCli(argv, io); // existing business CLI, unchanged
@@ -162,7 +200,8 @@ export function runResearchCli(argv: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     if (argv[0] === undefined) throw new UsageError("no command given");
-    if (argv[0] !== "trading") throw new UsageError("unknown command (expected assess, compare or trading)");
+    if (argv[0] === "import") return runImport(argv[1] ?? "", argv.slice(2), io, roots);
+    if (argv[0] !== "trading") throw new UsageError("unknown command (expected assess, compare, trading or import)");
     if (argv[1] === undefined) throw new UsageError("missing trading command (expected validate, backtest or paper)");
     return runTrading(argv[1], argv.slice(2), io, roots);
   } catch (err) {
