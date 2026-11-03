@@ -10,3 +10,4 @@ export * from "./inspect.js";
 export * from "./canary.js";
 export * from "./engine.js";
 export * from "./preflight.js";
+export * from "./runner.js";

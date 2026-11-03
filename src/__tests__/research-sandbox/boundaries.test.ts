@@ -20,6 +20,7 @@ const ALLOWED_EXTERNAL: Record<string, readonly string[]> = {
   "canary-probe.ts": ["node:fs", "node:net"],
   "host-paths.ts": ["node:crypto", "node:fs"],
   "spec.ts": ["node:crypto"],
+  "preflight-main.ts": ["node:fs"],
 };
 
 function imports(file: string): string[] {
@@ -46,7 +47,7 @@ function stringLiterals(file: string): string[] {
 
 describe("research sandbox static boundaries", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "host-paths.ts", "index.ts", "inspect.ts", "preflight.ts", "spec.ts"]);
+    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "host-paths.ts", "index.ts", "inspect.ts", "preflight-main.ts", "preflight.ts", "runner.ts", "spec.ts"]);
   });
 
   it("each file imports only siblings and its allowlisted Node modules; no dynamic import/require", () => {
@@ -103,13 +104,26 @@ describe("research sandbox static boundaries", () => {
     for (const f of outside) expect(fs.readFileSync(f, "utf8").includes("research-sandbox"), path.relative(SRC, f)).toBe(false);
   });
 
-  it("no module performs work at import time (no top-level calls outside declarations)", () => {
-    for (const file of files) {
+  it("no module performs work at import time (no top-level calls outside declarations); the one entry point is preflight-main.ts", () => {
+    for (const file of files.filter((f) => f !== "preflight-main.ts")) {
       for (const stmt of parse(file).statements) {
         const ok = ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) || ts.isFunctionDeclaration(stmt) ||
           ts.isClassDeclaration(stmt) || ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt) || ts.isVariableStatement(stmt);
         expect(ok, `${file}: top-level ${ts.SyntaxKind[stmt.kind]}`).toBe(true);
       }
     }
+  });
+
+  it("preflight-main.ts (V1A entry point) runs only when executed as the entry script, and only calls main()", () => {
+    const extra = parse("preflight-main.ts").statements.filter((st) => !(ts.isImportDeclaration(st) || ts.isFunctionDeclaration(st)));
+    expect(extra).toHaveLength(1);
+    const guard = extra[0];
+    expect(ts.isIfStatement(guard)).toBe(true);
+    const text = guard.getText();
+    expect(text.startsWith('if (process.argv[1]?.endsWith("/research-sandbox/preflight-main.js")) {')).toBe(true);
+    expect(text).toContain("main(process.argv.slice(2))");
+    expect(fs.readFileSync(path.join(PKG, "index.ts"), "utf8")).not.toContain("preflight-main");
+    const runner = fs.readFileSync(path.join(PKG, "runner.ts"), "utf8");
+    expect(runner).not.toMatch(/\bprocess\./); // the runner has no process access of its own
   });
 });

@@ -195,6 +195,19 @@ no `runsc`, no `podman`, no pinned image, no recorded gVisor reference.
 Nothing can be rated `meets-spec`, and the M1/M3 blockers would refuse even
 on a fully configured host.
 
+## Operator-invoked runner (V1A)
+`runner.ts` (pure) and `preflight-main.ts` (the package's only entry point)
+wrap the existing preflight for future use on the approved host:
+`node dist/research-sandbox/preflight-main.js --config <abs.json> --confirm-docker-access [--output text|json]`.
+The runner validates an operator configuration (all pins required; spec pins
+through `resolveSpec`), builds the engine with `createCliEngine` and calls
+`runPreflight`; no check is re-implemented and there is no override. Exit 0
+(meets-spec) is unreachable while `MEETS_SPEC_BLOCKERS` is non-empty, and a
+result claiming it would be reported as an internal inconsistency (exit 3).
+Tested offline only (fake process runner and fake host filesystem). See
+`docs/V1-VPS-DEPLOYMENT-PLAN.md` for the configuration, prerequisites and
+approvals.
+
 ## Target host requirements (to verify before S3)
 - Dedicated machine/VM you control; `/srv/research-runs` owned by root or the operator, mode 755 or stricter; no secrets anywhere under it.
 - Docker Engine with gVisor (`runsc`) registered; versions recorded; daemon reports `name=seccomp,profile=builtin`.
