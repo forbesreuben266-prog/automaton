@@ -234,6 +234,7 @@ is then removed.
 | Deterministic backtests (buy and hold, moving-average crossover) with spread, fee and slippage costs | Short selling, leverage, portfolios, multiple instruments, currency conversion, intraday bars |
 | Paper-trading replay with a verifiable, hash-chained ledger | Brokers, exchanges, trading accounts, real orders and live trading |
 | Bounded, path-redacted errors and fixed exit codes | Deploying or launching the autonomous agent, wallets, payments and spending |
+| Readiness checks for future real-world evidence and market data (R1: library and tests only; see [R1-REAL-WORLD-READINESS.md](R1-REAL-WORLD-READINESS.md)) | Approving or ingesting real-world input (readiness results never approve anything) |
 
 Every result here describes invented data under stated assumptions. It cannot
 show that an opportunity or strategy works in reality.
