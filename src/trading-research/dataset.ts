@@ -47,7 +47,8 @@ export const ADJUSTMENTS = ["none", "splits", "splits_and_dividends", "not_appli
 export type Adjustment = (typeof ADJUSTMENTS)[number];
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
-export interface Dataset {
+/** Everything in a dataset except its bars (used to start a paper-trading session, which receives bars one at a time). */
+export interface DatasetHeader {
   readonly version: 1;
   readonly id: string;
   readonly title: string;
@@ -58,15 +59,41 @@ export interface Dataset {
   readonly limitations: readonly string[];
   readonly instrument: Instrument;
   readonly costs: Costs;
+}
+
+export interface Dataset extends DatasetHeader {
   readonly bars: readonly Bar[];
 }
+
+const HEADER_KEYS = ["version", "id", "title", "source", "adjustment", "interval", "annualization", "limitations", "instrument", "costs"];
 
 /** Validates a dataset object (normally from parseDatasetText). Throws ValidationError listing the problems. */
 export function parseDataset(raw: unknown): Dataset {
   const issues = new Issues();
-  const o = readObject(issues, "dataset", raw, ["version", "id", "title", "source", "adjustment", "interval", "annualization", "limitations", "instrument", "costs", "bars"]);
+  const o = readObject(issues, "dataset", raw, [...HEADER_KEYS, "bars"]);
   issues.throwIfAny();
-  const d = o!;
+  const header = readHeader(issues, o!);
+  const bars = readBars(issues, "dataset.bars", o!.bars, header.instrument, header.costs);
+  if (bars !== null && header.source.recordedAt < bars[bars.length - 1].t) {
+    issues.add("dataset.source.recordedAt", "must not be earlier than the last bar");
+  }
+  issues.throwIfAny();
+  return Object.freeze({ ...header, bars: bars! });
+}
+
+/**
+ * Validates a dataset header: the same fields and rules as a dataset, with no
+ * bars (and so no check of recordedAt against the last bar). Throws ValidationError.
+ */
+export function parseDatasetHeader(raw: unknown): DatasetHeader {
+  const issues = new Issues();
+  const o = readObject(issues, "dataset", raw, HEADER_KEYS);
+  issues.throwIfAny();
+  return readHeader(issues, o!);
+}
+
+/** Header fields of an already shape-checked dataset object; throws on any problem. */
+function readHeader(issues: Issues, d: Record<string, unknown>): DatasetHeader {
   if (d.version !== DATASET_VERSION) issues.add("dataset.version", `must be ${DATASET_VERSION}`);
   const id = readText(issues, "dataset.id", d.id, { max: 64, pattern: ID_PATTERN });
   const title = readText(issues, "dataset.title", d.title, { max: 200 });
@@ -95,14 +122,9 @@ export function parseDataset(raw: unknown): Dataset {
   }
   const costs = readCosts(issues, "dataset.costs", d.costs, instrument!);
   issues.throwIfAny();
-  const bars = readBars(issues, "dataset.bars", d.bars, instrument!, costs!);
-  if (bars !== null && source !== null && source.recordedAt && source.recordedAt < bars[bars.length - 1].t) {
-    issues.add("dataset.source.recordedAt", "must not be earlier than the last bar");
-  }
-  issues.throwIfAny();
   return Object.freeze({
     version: DATASET_VERSION, id, title, source: Object.freeze(source!), adjustment, interval, annualization: Object.freeze(annualization!),
-    limitations: Object.freeze(limitations), instrument: instrument!, costs: costs!, bars: bars!,
+    limitations: Object.freeze(limitations), instrument: instrument!, costs: costs!,
   });
 }
 
@@ -111,17 +133,24 @@ export function parseDatasetText(text: unknown): Dataset {
   return parseDataset(parseJsonText(text, "dataset", MAX_DATASET_CHARS));
 }
 
-/** The exact text that datasetSha256 hashes (see the module comment). */
-export function canonicalDatasetText(ds: Dataset): string {
-  const i = ds.instrument;
-  const c = ds.costs;
-  return JSON.stringify([
-    HASH_DOMAIN, ds.version, ds.id, ds.title, ds.source.kind, ds.source.label, ds.source.recordedBy, ds.source.recordedAt,
-    ds.adjustment, ds.interval, ds.annualization.periodsPerYear, ds.annualization.basis, [...ds.limitations],
+/** The header fields in their canonical order (shared by the dataset hash and the paper-trading header hash). */
+export function canonicalHeaderParts(h: DatasetHeader): unknown[] {
+  const i = h.instrument;
+  const c = h.costs;
+  return [
+    h.version, h.id, h.title, h.source.kind, h.source.label, h.source.recordedBy, h.source.recordedAt,
+    h.adjustment, h.interval, h.annualization.periodsPerYear, h.annualization.basis, [...h.limitations],
     [i.symbol, i.assetClass, i.name, i.priceUnit, i.tickSize, i.base, i.quote, i.pipSize],
     [c.spreadMode, c.fixedSpread, c.feeCurrency, c.feePerOrder, c.feeProportionalBps],
-    ds.bars.map((b) => [b.t, b.open, b.high, b.low, b.close, b.volume, b.spread]),
-  ]);
+  ];
+}
+
+/** Canonical form of one bar: [t, open, high, low, close (ticks), volume|null, spread (ticks)]. */
+export const canonicalBar = (b: Bar): unknown[] => [b.t, b.open, b.high, b.low, b.close, b.volume, b.spread];
+
+/** The exact text that datasetSha256 hashes (see the module comment). */
+export function canonicalDatasetText(ds: Dataset): string {
+  return JSON.stringify([HASH_DOMAIN, ...canonicalHeaderParts(ds), ds.bars.map(canonicalBar)]);
 }
 
 /** SHA-256 (lowercase hex) of canonicalDatasetText. */

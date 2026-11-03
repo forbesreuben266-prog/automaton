@@ -18,7 +18,7 @@ import { fxDataset, text, ukDataset, usDataset } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
 const MODULE = path.join(SRC, "trading-research");
-const FILES = ["backtest.ts", "dataset.ts", "index.ts", "instruments.ts", "metrics.ts", "prices.ts", "report.ts", "strategy.ts", "validation.ts"];
+const FILES = ["backtest.ts", "dataset.ts", "execution.ts", "index.ts", "instruments.ts", "metrics.ts", "paper.ts", "prices.ts", "report.ts", "strategy.ts", "validation.ts"];
 const parse = (file: string) => ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.ES2022, true);
 /** Capability names: files, network, processes, environment, time, randomness, dynamic code, global scope. */
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -38,7 +38,7 @@ describe("trading research boundaries (static)", () => {
   });
 
   for (const file of FILES) {
-    it(`${file}: imports only sibling modules (and node:crypto in dataset.ts); no dynamic import, require or import.meta`, () => {
+    it(`${file}: imports only sibling modules (and node:crypto in dataset.ts and paper.ts); no dynamic import, require or import.meta`, () => {
       const specs: string[] = [];
       const visit = (n: ts.Node): void => {
         if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) specs.push(n.moduleSpecifier.text);
@@ -47,7 +47,7 @@ describe("trading research boundaries (static)", () => {
         ts.forEachChild(n, visit);
       };
       visit(parse(path.join(MODULE, file)));
-      const allowed = (s: string) => /^\.\/[a-z-]+\.js$/.test(s) && FILES.includes(s.slice(2, -3) + ".ts") || (file === "dataset.ts" && s === "node:crypto");
+      const allowed = (s: string) => /^\.\/[a-z-]+\.js$/.test(s) && FILES.includes(s.slice(2, -3) + ".ts") || ((file === "dataset.ts" || file === "paper.ts") && s === "node:crypto");
       expect(specs.filter((s) => !allowed(s))).toEqual([]);
     });
 

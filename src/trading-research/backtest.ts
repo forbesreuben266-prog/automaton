@@ -21,6 +21,8 @@
  *   sell whose fees would exceed the cash available is rejected and the
  *   position is kept. Rejected orders leave the position unchanged; the
  *   strategy's next decision may retry.
+ * The execution and accounting rules live in execution.ts (Account), shared
+ * with the paper-trading simulator, so both use one execution model.
  * Accounting:
  * - Money is exact: integers scaled by 10^18 in the instrument's PRICE unit
  *   (USD, GBP, GBX pence, or the forex quote currency). Initial cash and
@@ -38,18 +40,17 @@
  *   status "insufficient_data" and no figures.
  */
 
-import { datasetSha256, type Dataset } from "./dataset.js";
-import { MIN_VOLATILITY_RETURNS, round, type Metric } from "./metrics.js";
+import { datasetSha256, type Dataset, type DatasetHeader } from "./dataset.js";
+import { Account, type BacktestMetrics, type EquityPoint, type Fill, type Rejection } from "./execution.js";
 import { historyView, readStrategy, type Signal, type Strategy } from "./strategy.js";
 import {
   Issues, ValidationError, parseJsonText, readDecimal, readObject, readOneOf, readSafeInt, type Decimal,
 } from "./validation.js";
 
-const DIGITS = 18;
-const SCALE = 10n ** BigInt(DIGITS);
 export const MAX_SLIPPAGE_BPS = 1_000;
 export const MAX_CONFIG_CHARS = 10_000;
 
+/** Validated run settings, shared by the backtester and the paper-trading simulator. */
 export interface BacktestConfig {
   readonly version: 1;
   readonly strategy: Strategy;
@@ -59,57 +60,6 @@ export interface BacktestConfig {
   readonly slippageBps: string;
   readonly initialCashDecimal: Decimal;
   readonly slippageDecimal: Decimal;
-}
-
-export interface Fill {
-  readonly side: "buy" | "sell";
-  readonly decisionIndex: number;
-  readonly fillIndex: number;
-  readonly fillTime: string;
-  readonly units: number;
-  /** Prices are in the instrument's price unit; amounts in the accounting currency. */
-  readonly openPrice: string;
-  readonly fillPrice: string;
-  readonly fees: string;
-  readonly spreadCost: string;
-  readonly slippageCost: string;
-  readonly cashAfter: string;
-  /** Sells only: proceeds after fees minus the purchase cost including fees. */
-  readonly realizedPnl: string | null;
-}
-
-export interface Rejection {
-  readonly side: "buy" | "sell";
-  readonly decisionIndex: number;
-  readonly fillIndex: number;
-  readonly fillTime: string;
-  readonly reason: string;
-}
-
-export interface EquityPoint {
-  readonly t: string;
-  readonly units: number;
-  readonly cash: string;
-  readonly equity: string;
-}
-
-export interface BacktestMetrics {
-  readonly initialEquity: string;
-  readonly finalEquity: string;
-  readonly totalReturn: number;
-  readonly maxDrawdown: number;
-  readonly annualizedVolatility: Metric<number>;
-  /** Fraction of closes with a position. */
-  readonly exposure: number;
-  readonly fills: number;
-  readonly rejections: number;
-  readonly roundTrips: number;
-  readonly winningRoundTrips: number;
-  readonly realizedPnl: string;
-  readonly unrealizedPnl: string;
-  readonly totalFees: string;
-  readonly totalSpreadCost: string;
-  readonly totalSlippageCost: string;
 }
 
 export interface BacktestResult {
@@ -133,8 +83,8 @@ export interface BacktestResult {
   readonly unexecutedFinalSignal: Signal | null;
 }
 
-/** Validates a backtest configuration against the dataset's instrument. Throws ValidationError. */
-export function parseBacktestConfig(raw: unknown, ds: Dataset): BacktestConfig {
+/** Validates a run configuration against the dataset (or paper-session header) instrument. Throws ValidationError. */
+export function parseBacktestConfig(raw: unknown, ds: DatasetHeader): BacktestConfig {
   const issues = new Issues();
   const o = readObject(issues, "config", raw, ["version", "strategy", "execution", "initialCash", "sizing", "slippageBps"]);
   issues.throwIfAny();
@@ -170,65 +120,13 @@ export function parseBacktestConfig(raw: unknown, ds: Dataset): BacktestConfig {
 }
 
 /** Parses backtest configuration JSON text (size-checked, duplicate keys refused). */
-export function parseBacktestConfigText(text: unknown, ds: Dataset): BacktestConfig {
+export function parseBacktestConfigText(text: unknown, ds: DatasetHeader): BacktestConfig {
   return parseBacktestConfig(parseJsonText(text, "config", MAX_CONFIG_CHARS), ds);
-}
-
-const scaledOf = (d: Decimal) => d.units * 10n ** BigInt(DIGITS - d.scale);
-const ceilDiv = (a: bigint, b: bigint) => (a % b === 0n ? a / b : a / b + 1n);
-
-/** Exact decimal text of a scaled amount, with `shift` extra decimal places (2 to show GBX amounts in GBP). */
-function formatScaled(v: bigint, shift: number): string {
-  const negative = v < 0n;
-  const digits = (negative ? -v : v).toString().padStart(DIGITS + shift + 1, "0");
-  const point = digits.length - (DIGITS + shift);
-  const fraction = digits.slice(point).replace(/0+$/, "");
-  return `${negative ? "-" : ""}${digits.slice(0, point)}${fraction ? `.${fraction}` : ""}`;
-}
-
-const toNumber = (v: bigint): number => {
-  const n = Number(v) / Number(SCALE);
-  if (!Number.isFinite(n)) throw new RangeError("backtest calculation produced a non-finite value");
-  return n;
-};
-
-function drawdown(values: readonly number[]): number {
-  let peak = values[0];
-  let worst = 0;
-  for (const v of values) {
-    if (v > peak) peak = v;
-    if (peak > 0) worst = Math.min(worst, v / peak - 1);
-  }
-  return round(worst);
-}
-
-function volatility(values: readonly number[], periodsPerYear: number): Metric<number> {
-  const n = values.length - 1;
-  if (n < MIN_VOLATILITY_RETURNS) {
-    return { status: "insufficient_data", required: MIN_VOLATILITY_RETURNS + 1, available: values.length, reason: `volatility needs at least ${MIN_VOLATILITY_RETURNS} returns` };
-  }
-  if (values.some((v) => v <= 0)) return { status: "insufficient_data", required: 1, available: 0, reason: "equity reached zero, so log returns are undefined" };
-  const logs = values.slice(1).map((v, i) => Math.log(v / values[i]));
-  const mean = logs.reduce((s, x) => s + x, 0) / n;
-  const variance = logs.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1);
-  return { status: "ok", value: round(Math.sqrt(variance) * Math.sqrt(periodsPerYear)) };
 }
 
 /** Runs a long-or-flat backtest of a validated dataset with a validated config. */
 export function runBacktest(ds: Dataset, config: BacktestConfig): BacktestResult {
   const inst = ds.instrument;
-  const shift = inst.priceUnit === "GBX" ? 2 : 0; // price unit -> accounting currency (pence -> pounds)
-  const toPriceUnit = (accounting: bigint) => (shift === 2 ? accounting * 100n : accounting);
-  const show = (priceUnitAmount: bigint) => formatScaled(priceUnitAmount, shift);
-  const tick = scaledOf(inst.tick);
-  const price = (ticks: number) => BigInt(ticks) * tick;
-  const slip = config.slippageDecimal;
-  const slipDivisor = 10n ** BigInt(slip.scale + 4);
-  const feeBps = ds.costs.feeProportionalBpsDecimal;
-  const feeDivisor = 10n ** BigInt(feeBps.scale + 4);
-  const fixedFee = toPriceUnit(scaledOf(ds.costs.feePerOrderDecimal));
-  const fee = (value: bigint) => fixedFee + ceilDiv(value * feeBps.units, feeDivisor);
-  const initialCash = toPriceUnit(scaledOf(config.initialCashDecimal));
   const bars = ds.bars;
   const base = {
     datasetId: ds.id, datasetSha256: datasetSha256(ds), symbol: inst.symbol, priceUnit: inst.priceUnit, accountingCurrency: inst.accountingCurrency,
@@ -241,113 +139,25 @@ export function runBacktest(ds: Dataset, config: BacktestConfig): BacktestResult
     });
   }
 
-  let cash = initialCash;
-  let units = 0n;
-  let costBasis = 0n;
+  const account = new Account(ds, config);
   let pending: Signal = "flat";
   let pendingFrom = -1;
-  let realized = 0n;
-  let fees = 0n;
-  let spreadCost = 0n;
-  let slippageCost = 0n;
-  let roundTrips = 0;
-  let wins = 0;
-  let barsInMarket = 0;
-  const fills: Fill[] = [];
-  const rejections: Rejection[] = [];
-  const equity: EquityPoint[] = [];
-  const equityValues: number[] = [];
   let unexecutedFinalSignal: Signal | null = null;
-
   for (let t = 0; t < bars.length; t++) {
-    const bar = bars[t];
-    const want = pending === "long" ? 1 : 0;
-    const have = units > 0n ? 1 : 0;
-    if (pendingFrom >= 0 && want !== have) {
-      const open = price(bar.open);
-      const half = price(bar.spread) / 2n; // exact: the scale is even
-      const slipAmount = (open * slip.units) / slipDivisor; // exact: prices have at most 8 decimals, the scale 18
-      const reject = (side: "buy" | "sell", reason: string) => rejections.push(Object.freeze({ side, decisionIndex: pendingFrom, fillIndex: t, fillTime: bar.t, reason }));
-      if (want === 1) {
-        const fill = open + slipAmount + half;
-        let qty: bigint;
-        if (config.sizing.mode === "fixed_units") qty = BigInt(config.sizing.units);
-        else {
-          qty = cash > fixedFee ? ((cash - fixedFee) * feeDivisor) / (fill * (feeDivisor + feeBps.units)) : 0n;
-          while (qty > 0n && qty * fill + fee(qty * fill) > cash) qty -= 1n; // proportional-fee rounding
-        }
-        const cost = qty * fill + fee(qty * fill);
-        if (qty < 1n) reject("buy", "cash does not cover one unit plus fees");
-        else if (qty > BigInt(Number.MAX_SAFE_INTEGER)) reject("buy", "position size exceeds the supported range");
-        else if (cost > cash) reject("buy", `insufficient cash for ${qty} units including fees`);
-        else {
-          const orderFee = cost - qty * fill;
-          cash -= cost;
-          units = qty;
-          costBasis = cost;
-          fees += orderFee;
-          spreadCost += qty * half;
-          slippageCost += qty * slipAmount;
-          fills.push(Object.freeze({
-            side: "buy", decisionIndex: pendingFrom, fillIndex: t, fillTime: bar.t, units: Number(qty), openPrice: formatScaled(open, 0), fillPrice: formatScaled(fill, 0),
-            fees: show(orderFee), spreadCost: show(qty * half), slippageCost: show(qty * slipAmount), cashAfter: show(cash), realizedPnl: null,
-          }));
-        }
-      } else {
-        const fill = open - slipAmount - half;
-        const proceeds = units * fill;
-        const orderFee = fee(proceeds > 0n ? proceeds : 0n);
-        if (fill <= 0n) reject("sell", "the spread and slippage would make the sale price zero or negative");
-        else if (cash + proceeds - orderFee < 0n) reject("sell", "fees would exceed the cash available (no negative cash)");
-        else {
-          const net = proceeds - orderFee;
-          const pnl = net - costBasis;
-          cash += net;
-          realized += pnl;
-          fees += orderFee;
-          spreadCost += units * half;
-          slippageCost += units * slipAmount;
-          roundTrips += 1;
-          if (pnl > 0n) wins += 1;
-          fills.push(Object.freeze({
-            side: "sell", decisionIndex: pendingFrom, fillIndex: t, fillTime: bar.t, units: Number(units), openPrice: formatScaled(open, 0), fillPrice: formatScaled(fill, 0),
-            fees: show(orderFee), spreadCost: show(units * half), slippageCost: show(units * slipAmount), cashAfter: show(cash), realizedPnl: show(pnl),
-          }));
-          units = 0n;
-          costBasis = 0n;
-        }
-      }
-    }
-    if (cash < 0n) throw new RangeError("backtest invariant broken: negative cash");
-    const value = cash + units * price(bar.close);
-    if (units > 0n) barsInMarket += 1;
-    equity.push(Object.freeze({ t: bar.t, units: Number(units), cash: show(cash), equity: show(value) }));
-    equityValues.push(toNumber(value));
-
+    if (pendingFrom >= 0) account.execute(pending, pendingFrom, t, bars[t]);
+    account.mark(bars[t]);
     const signal = config.strategy.decide(historyView(bars, t));
     if (signal !== "long" && signal !== "flat") throw new RangeError("strategy returned an invalid signal");
     if (t === bars.length - 1) {
-      if ((signal === "long" ? 1 : 0) !== (units > 0n ? 1 : 0)) unexecutedFinalSignal = signal;
+      if (signal !== account.position) unexecutedFinalSignal = signal;
     } else {
       pending = signal;
       pendingFrom = t;
     }
   }
-
-  const last = bars[bars.length - 1];
-  const finalValue = cash + units * price(last.close);
-  const unrealized = units > 0n ? units * price(last.close) - costBasis : 0n;
-  const initialNumber = toNumber(initialCash);
-  const metrics: BacktestMetrics = Object.freeze({
-    initialEquity: show(initialCash), finalEquity: show(finalValue),
-    totalReturn: round(toNumber(finalValue) / initialNumber - 1), maxDrawdown: drawdown([initialNumber, ...equityValues]),
-    annualizedVolatility: volatility(equityValues, ds.annualization.periodsPerYear), exposure: round(barsInMarket / bars.length),
-    fills: fills.length, rejections: rejections.length, roundTrips, winningRoundTrips: wins, realizedPnl: show(realized), unrealizedPnl: show(unrealized),
-    totalFees: show(fees), totalSpreadCost: show(spreadCost), totalSlippageCost: show(slippageCost),
-  });
   return Object.freeze({
-    ...base, status: "ok", reason: null, fills: Object.freeze(fills), rejections: Object.freeze(rejections), equity: Object.freeze(equity), metrics,
-    endUnits: Number(units), unexecutedFinalSignal,
+    ...base, status: "ok", reason: null, fills: Object.freeze([...account.fills]), rejections: Object.freeze([...account.rejections]),
+    equity: Object.freeze([...account.equity]), metrics: account.metrics(), endUnits: Number(account.units), unexecutedFinalSignal,
   });
 }
 
