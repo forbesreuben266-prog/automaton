@@ -22,6 +22,8 @@ The result is the first automaton.
 
 Update: development of Automaton has continued across Conway's internal RL environments for faster iteration & new capabilities. Stay tuned. It's beautiful.
 
+> **This fork:** for the offline, fictional-data research tools (business research, trading backtests and paper-trading replay) see [docs/OFFLINE-RESEARCH-GUIDE.md](docs/OFFLINE-RESEARCH-GUIDE.md). They need no wallet, API key, network or deployment. The Quick Start below launches the autonomous agent instead.
+
 ## Quick Start
 
 ```bash
