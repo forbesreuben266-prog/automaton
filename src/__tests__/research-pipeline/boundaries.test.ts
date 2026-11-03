@@ -105,8 +105,10 @@ describe("research pipeline boundaries (step 1: adapter only)", () => {
     for (const name of RUNTIME_EXPORTS) expect((adapter as Record<string, unknown>)[name], name).toBe((division as Record<string, unknown>)[name]);
   });
 
-  it("nothing outside the pipeline imports or names it (tests excepted)", () => {
-    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(PIPELINE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`));
+  it("nothing outside the pipeline imports or names it (tests excepted; one approved coordinator, the unified CLI)", () => {
+    const COORDINATOR = path.join(SRC, "research-cli", "cli.ts");
+    expect(specifiers(COORDINATOR).filter((spec) => spec.includes("research-pipeline"))).toEqual(["../research-pipeline/cli.js"]);
+    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(PIPELINE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`) && f !== COORDINATOR);
     expect(outside.length).toBeGreaterThan(50);
     for (const file of outside) {
       const rel = path.relative(SRC, file);

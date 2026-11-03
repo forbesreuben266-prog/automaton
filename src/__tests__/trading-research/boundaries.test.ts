@@ -78,8 +78,11 @@ describe("trading research boundaries (static)", () => {
     for (const code of ["BTC", "ETH", "USDT", "USDC", "XRP", "SOL"]) expect(FX_CURRENCIES as readonly string[]).not.toContain(code);
   });
 
-  it("nothing outside the module imports or names it (tests excepted), so the agent has no route to it", () => {
-    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`));
+  it("nothing outside the module imports or names it (tests excepted; one approved coordinator, the unified CLI), so the agent has no route to it", () => {
+    const COORDINATOR = path.join(SRC, "research-cli", "cli.ts");
+    const coordinatorSpecs = [...fs.readFileSync(COORDINATOR, "utf8").matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]).filter((spec) => spec.includes("trading-research"));
+    expect(coordinatorSpecs).toEqual(["../trading-research/index.js"]);
+    const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`) && f !== COORDINATOR);
     expect(outside.length).toBeGreaterThan(50);
     for (const file of outside) expect(fs.readFileSync(file, "utf8").includes("trading-research"), path.relative(SRC, file)).toBe(false);
   });

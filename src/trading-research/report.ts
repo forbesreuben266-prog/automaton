@@ -14,6 +14,7 @@ import type { BacktestConfig, BacktestResult } from "./backtest.js";
 import { datasetSha256, type Dataset, type DatasetHeader } from "./dataset.js";
 import type { BacktestMetrics, Fill, Rejection } from "./execution.js";
 import type { PaperSession } from "./paper.js";
+import { summarizeDataset } from "./metrics.js";
 import { UNSAFE_TEXT, ValidationError } from "./validation.js";
 
 const MARKDOWN_SPECIAL = /[\\`*_{}[\]()#|<>~!]/g;
@@ -148,5 +149,37 @@ export function renderPaperReport(session: PaperSession): string {
     "Simulated paper trading: no trading account, exchange connection, real order types or live market data; fills are computed, not executed.",
     "Bars arrive only when the operator supplies them; there is no clock, schedule or background process.",
   ]), "");
+  return out.join("\n");
+}
+
+export const DATASET_DISCLAIMER =
+  "Validation of a FICTIONAL, operator-supplied dataset. The figures are descriptive statistics of these invented prices: " +
+  "not a forecast, not evidence that any strategy works, and not advice.";
+
+/** Validation report of a dataset: provenance, instrument, costs and descriptive metrics (no trading simulation). */
+export function renderDatasetReport(ds: Dataset): string {
+  const e = escapeText;
+  const s = summarizeDataset(ds);
+  const c = ds.costs;
+  const metric = (m: { status: string; value?: unknown; reason?: string }, fmt: (v: number) => string) =>
+    m.status === "ok" ? fmt(m.value as number) : `not reported (${e(m.reason ?? "insufficient data")})`;
+  const dd = s.maxDrawdown;
+  const out: string[] = [];
+  out.push(`# Dataset validation report: ${e(ds.title)}`, "", `**${DATASET_DISCLAIMER}**`, "", "Status: **valid**", "");
+  out.push("## Dataset and provenance", "");
+  out.push(`- Dataset ${e(ds.id)}: ${s.bars} daily bars, ${s.firstBar} to ${s.lastBar}`);
+  out.push(`- Source: ${e(ds.source.kind)} (${e(ds.source.label)}), recorded by ${e(ds.source.recordedBy)} at ${ds.source.recordedAt}`);
+  out.push(`- SHA-256 of the validated dataset: ${datasetSha256(ds)} (record it to detect later changes; it does not authenticate the source)`);
+  out.push(`- Corporate-action adjustment (as stated, not checked): ${e(ds.adjustment)}`, "");
+  out.push("## Instrument and currency", "", ...instrumentLines(ds), "");
+  out.push("## Costs recorded in the dataset", "");
+  out.push(`- Spread: ${c.spreadMode === "fixed" ? `fixed ${c.fixedSpread} ticks` : "per bar, from the data"}`);
+  out.push(`- Fees: ${e(c.feePerOrder)} ${e(c.feeCurrency)} per order plus ${e(c.feeProportionalBps)} basis points of traded value`);
+  out.push("- Slippage is not part of a dataset: it is an explicit backtest or paper-trading setting.", "");
+  out.push("## Descriptive metrics (closes, mid prices, no costs deducted)", "", "| Measure | Value |", "|---|---|");
+  out.push(`| Total return over the data | ${metric(s.totalReturn, pct)} |`);
+  out.push(`| Annualised volatility | ${metric(s.annualizedVolatility, pct)} |`);
+  out.push(`| Maximum drawdown | ${dd.status === "ok" ? `${pct(dd.value.maxDrawdown)} (bars ${dd.value.peakIndex} to ${dd.value.troughIndex}${dd.value.recoveryIndex === null ? ", not recovered" : `, recovered at bar ${dd.value.recoveryIndex}`})` : `not reported (${e(dd.reason)})`} |`, "");
+  out.push("## Assumptions and limitations", "", ...s.notes.map((n) => `- ${e(n)}`), ...ds.limitations.map((l) => `- Operator note: ${e(l)}`), "");
   return out.join("\n");
 }
