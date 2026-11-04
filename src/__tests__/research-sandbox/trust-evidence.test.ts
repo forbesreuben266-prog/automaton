@@ -354,3 +354,18 @@ describe("Step A final review: secrets, evidence kinds and verdicts", () => {
     expect(blocking(reported).join("\n")).toContain("package runsc: dpkg --verify reports changed files: ??5?????? c /etc/containerd/runsc.toml");
   });
 });
+
+describe("Step A follow-up: Docker 29's AppArmor format", () => {
+  const g = `--host unix:///var/run/docker.sock --config ${EXPECT.engineConfigDir}`;
+  const withOpts = async (SecurityOptions: string[]) => {
+    const info = { ServerVersion: "29.9.3", SecurityOptions, DefaultRuntime: "runc", Runtimes: { runsc: { path: RUNSC, runtimeArgs: ["--oci-seccomp"] } } };
+    const e = withDockerKey(await collectTrustEvidence(host({ runs: { [`/usr/bin/docker ${g} info --format {{json .}}`]: ok(JSON.stringify(info)) } }).deps, EXPECT));
+    return evaluateTrustEvidence(e, EXPECT).map((f) => f.message).join("\n");
+  };
+  it.each([["name=apparmor,profile=default"], ["name=apparmor,profile=/etc/apparmor.d/docker-custom"], ["name=apparmor"]])("%s counts as AppArmor reported", async (opt) => {
+    expect(await withOpts([opt, "name=seccomp,profile=builtin", "name=cgroupns"])).not.toContain("AppArmor is not reported");
+  });
+  it.each([[[]], [["name=apparmorx"]], [["name=selinux"]]])("%j: AppArmor not reported (review, with the gVisor note)", async (opts) => {
+    expect(await withOpts([...opts, "name=seccomp,profile=builtin"])).toContain("AppArmor is not reported (gVisor ignores container AppArmor profiles");
+  });
+});

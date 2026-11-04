@@ -442,7 +442,9 @@ export function evaluateTrustEvidence(e: TrustEvidence, expect: TrustEvidenceExp
     const sec = opts.filter((o) => /^name=seccomp(,|$)/.test(o));
     if (sec.length !== 1 || sec[0] !== "name=seccomp,profile=builtin") block(`docker info: seccomp must be exactly name=seccomp,profile=builtin (got ${JSON.stringify(sec)})`);
     if (opts.includes("name=rootless")) block("docker info: rootless Docker");
-    if (!opts.includes("name=apparmor")) review("docker info: AppArmor is not reported");
+    // Docker 29 reports "name=apparmor,profile=<default|path>" (moby daemon/info.go); older versions "name=apparmor".
+    // Note: gVisor ignores a container's AppArmor profile (runsc/specutils), so AppArmor is not an isolation control for runsc.
+    if (!opts.some((o) => /^name=apparmor(,|$)/.test(o))) review("docker info: AppArmor is not reported (gVisor ignores container AppArmor profiles, so this does not affect the runsc isolation path)");
     if (i.DefaultRuntime !== "runc") block(`docker info: DefaultRuntime must be runc (got ${JSON.stringify(i.DefaultRuntime)})`);
   }
   const wantRt = { path: expect.runscPath, runtimeArgs: [...APPROVED_RUNSC_ARGS] };
