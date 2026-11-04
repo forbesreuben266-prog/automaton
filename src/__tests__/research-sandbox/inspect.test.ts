@@ -17,7 +17,7 @@ const check = (mutate: (c: any) => void, spec = SPEC) => {
 
 describe("inspect validation", () => {
   it("a compliant gVisor container passes and reports runtime and id", () => {
-    expect(validateInspect(compliantInspect(), SPEC, EXPECT)).toEqual({ violations: [], runtime: "runsc", containerId: CONTAINER_ID });
+    expect(validateInspect(compliantInspect(), SPEC, EXPECT)).toEqual({ violations: [], runtime: "runsc", containerId: CONTAINER_ID, hostFilesPending: false });
   });
 
   it("a compliant runc container passes inspection (its weaker rating is decided by the preflight)", () => {
@@ -154,9 +154,11 @@ describe("acceptance finding 3: required inspect fields must be present and vali
   const obj = (c: any, where: string) => (where === "top" ? c : c[where]);
   const label = (where: string, key: string) => (where === "top" ? key : `${where}.${key}`);
 
-  it("covers exactly the 68 reviewed fields (29 + 7 from the v3 review + 29 from the v4 review + AttachStdout, AttachStderr, Created from the v5 review), all present in the fixture", () => {
-    expect(REQUIRED_FIELDS).toHaveLength(68);
-    expect(new Set(REQUIRED_FIELDS.map(([w, k]) => `${w}.${k}`)).size).toBe(68);
+  it("covers exactly the 64 reviewed fields (68 before V2.2, minus GraphDriver and the omitempty maps Annotations, StorageOpt, Sysctls, now checked separately), all present in the fixture", () => {
+    expect(REQUIRED_FIELDS).toHaveLength(64);
+    expect(new Set(REQUIRED_FIELDS.map(([w, k]) => `${w}.${k}`)).size).toBe(64);
+    for (const moved of ["top.GraphDriver", "HostConfig.Annotations", "HostConfig.StorageOpt", "HostConfig.Sysctls"]) expect(REQUIRED_FIELDS.map(([w, k]) => `${w}.${k}`)).not.toContain(moved);
+    expect(REQUIRED_FIELDS.map(([w, k]) => `${w}.${k}`)).toContain("HostConfig.Init");
     for (const [where, key] of REQUIRED_FIELDS) expect(Object.prototype.hasOwnProperty.call(obj(compliantInspect()[0], where), key), label(where, key)).toBe(true);
   });
 
@@ -201,14 +203,15 @@ describe("M5 and L1: review probes and nested objects are refused", () => {
   it.each([
     // the exact probes from the review
     ["Annotations with a runtime flag", (c: any) => { c.HostConfig.Annotations = { "dev.gvisor.flag.network": "host" }; }, "HostConfig.Annotations: must be empty"],
-    ["Init true (host docker-init injected)", (c: any) => { c.HostConfig.Init = true; }, "HostConfig.Init: must not inject"],
+    ["Init true (host docker-init injected)", (c: any) => { c.HostConfig.Init = true; }, "HostConfig.Init: must be false"],
+    ["Init null (daemon default would apply)", (c: any) => { c.HostConfig.Init = null; }, "HostConfig.Init: must be false"],
     ["State running", (c: any) => { c.State = { Status: "running", Running: true, Pid: 1234 }; }, "State: must be a created, never-started container"],
     ["ExecIDs non-empty", (c: any) => { c.ExecIDs = ["x"]; }, "ExecIDs: no exec sessions"],
     ["Healthcheck command", (c: any) => { c.Config.Healthcheck = { Test: ["CMD", "node", "-e", "1"] }; }, "Config.Healthcheck: must be disabled"],
     ["mount BindOptions.ReadOnlyNonRecursive", (c: any) => { c.HostConfig.Mounts[0].BindOptions.ReadOnlyNonRecursive = true; }, "no NonRecursive, ReadOnlyNonRecursive"],
     ["NetworkSettings published ports", (c: any) => { c.NetworkSettings.Ports = { "80/tcp": [{ HostIp: "0.0.0.0", HostPort: "8080" }] }; }, "NetworkSettings: must contain only the none network"],
     ["NetworkSettings unknown key", (c: any) => { c.NetworkSettings.SandboxKeyX = "/var/run/docker/netns/x"; }, "NetworkSettings: must contain only the none network"],
-    ["StorageOpt absent", (c: any) => { delete c.HostConfig.StorageOpt; }, "HostConfig.StorageOpt: missing"],
+    ["StorageOpt set", (c: any) => { c.HostConfig.StorageOpt = { size: "1G" }; }, "HostConfig.StorageOpt: must be empty"],
     ["CpuRealtimeRuntime absent", (c: any) => { delete c.HostConfig.CpuRealtimeRuntime; }, "HostConfig.CpuRealtimeRuntime: missing"],
     // further unsafe or ambiguous nested values
     ["State with an unknown key", (c: any) => { c.State.Unexpected = 1; }, "State: must be a created"],
@@ -216,7 +219,8 @@ describe("M5 and L1: review probes and nested objects are refused", () => {
     ["State missing a required flag", (c: any) => { delete c.State.Running; }, "State: must be a created"],
     ["Healthcheck missing (not disabled)", (c: any) => { delete c.Config.Healthcheck; }, "Config.Healthcheck: missing"],
     ["Healthcheck with extra keys", (c: any) => { c.Config.Healthcheck = { Test: ["NONE"], Interval: 1 }; }, "Config.Healthcheck: must be disabled"],
-    ["Annotations missing", (c: any) => { delete c.HostConfig.Annotations; }, "HostConfig.Annotations: missing"],
+    ["Annotations set", (c: any) => { c.HostConfig.Annotations = { "dev.gvisor.flag": "x" }; }, "HostConfig.Annotations: must be empty"],
+    ["Sysctls set", (c: any) => { c.HostConfig.Sysctls = { "net.ipv4.ip_forward": "1" }; }, "HostConfig.Sysctls: must be empty"],
     ["Init missing", (c: any) => { delete c.HostConfig.Init; }, "HostConfig.Init: missing"],
     ["mount BindOptions.NonRecursive", (c: any) => { c.HostConfig.Mounts[1].BindOptions.NonRecursive = true; }, "HostConfig.Mounts: entries may have only"],
     ["mount BindOptions.CreateMountpoint", (c: any) => { c.HostConfig.Mounts[0].BindOptions.CreateMountpoint = true; }, "HostConfig.Mounts: entries may have only"],
@@ -309,7 +313,7 @@ describe("v4 review: exact allowlists for security options, ulimits, tmpfs optio
   it("optional keys may be absent, and are accepted only with their safe values", () => {
     expect(check(() => {})).toBe(""); // fixture has none of them
     const safe: Record<string, unknown> = { KernelMemory: 0, KernelMemoryTCP: 0, CpuCount: 0, CpuPercent: 0, IOMaximumIOps: 0, IOMaximumBandwidth: 0, ConsoleSize: [0, 0],
-      Domainname: "", ExposedPorts: null, OnBuild: null, MacAddress: "", NetworkDisabled: false, ArgsEscaped: false, Shell: null, StopSignal: "SIGTERM", StopTimeout: 10, SizeRw: 0, SizeRootFs: 0 };
+      Annotations: null, StorageOpt: {}, Sysctls: null, Domainname: "", ExposedPorts: null, OnBuild: null, MacAddress: "", NetworkDisabled: false, ArgsEscaped: false, Shell: null, StopSignal: "SIGTERM", StopTimeout: 10, SizeRw: 0, SizeRootFs: 0 };
     expect(check((c) => { for (const [where, key] of OPTIONAL_FIELDS) (where === "top" ? c : c[where])[key] = safe[key]; })).toBe("");
   });
 });

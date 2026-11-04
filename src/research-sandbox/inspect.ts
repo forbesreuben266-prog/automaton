@@ -19,11 +19,19 @@
  *   (each object is checked against a reviewed allowlist), so a new or
  *   unexpected setting refuses rather than being ignored. Nested objects
  *   allowlisted key by key: State, NetworkSettings and Networks.none,
- *   Config.Healthcheck, HostConfig.LogConfig, GraphDriver,
+ *   Config.Healthcheck, HostConfig.LogConfig, GraphDriver or Storage,
  *   ImageManifestDescriptor, every Ulimits, Mounts and HostConfig.Mounts
  *   entry and its BindOptions.
+ * - Storage metadata (V2.2, Docker 29): EXACTLY ONE of GraphDriver (classic
+ *   graph drivers) or Storage (containerd image store; only the exact shape
+ *   {RootFS:{Snapshot:{Name}}}) must be present, and its name must equal
+ *   Driver. Both, neither, or any other shape refuses.
  * - ResolvConfPath/HostnamePath/HostsPath must be the exact paths under the
- *   recorded dockerDataRoot for this container id (null refuses); the
+ *   recorded dockerDataRoot for this container id, or (V2.2, Docker 29: the
+ *   daemon sets them only when the container starts) ALL three empty on this
+ *   never-started container; any mix, other value or null refuses. When they
+ *   are empty, the preflight re-inspects after the canary
+ *   (validateFinishedInspect) and requires the exact paths then. The
  *   environment must be exactly the recorded image environment plus ours
  *   (not recorded refuses); a reported ImageManifestDescriptor must carry the
  *   recorded manifest digest (not recorded refuses).
@@ -47,7 +55,7 @@ export const REQUIRED_READONLY_PATHS = Object.freeze(["/proc/sys", "/proc/sysrq-
 const TOP_LEVEL_KEYS = new Set([
   "Id", "Created", "Path", "Args", "State", "Image", "ResolvConfPath", "HostnamePath", "HostsPath", "LogPath", "Name",
   "RestartCount", "Driver", "Platform", "MountLabel", "ProcessLabel", "AppArmorProfile", "ExecIDs", "HostConfig",
-  "GraphDriver", "SizeRw", "SizeRootFs", "Mounts", "Config", "NetworkSettings", "ImageManifestDescriptor",
+  "GraphDriver", "Storage", "SizeRw", "SizeRootFs", "Mounts", "Config", "NetworkSettings", "ImageManifestDescriptor",
 ]);
 const HOST_CONFIG_KEYS = new Set([
   "Binds", "ContainerIDFile", "LogConfig", "NetworkMode", "PortBindings", "RestartPolicy", "AutoRemove", "VolumeDriver",
@@ -112,6 +120,15 @@ const GRAPH_DRIVER_DATA_KEYS = new Set(["LowerDir", "MergedDir", "UpperDir", "Wo
 const graphDriverOk = (v: unknown) => isObj(v) && Object.keys(v).every((k) => k === "Name" || k === "Data") &&
   typeof v.Name === "string" && /^[a-z0-9_-]{1,32}$/.test(v.Name) &&
   (v.Data === null || v.Data === undefined || (isObj(v.Data) && Object.entries(v.Data).every(([k, x]) => GRAPH_DRIVER_DATA_KEYS.has(k) && typeof x === "string")));
+/**
+ * V2.2: Docker 29 with the containerd image store reports the snapshotter in
+ * Storage instead of GraphDriver (moby daemon/inspect.go). Only this exact
+ * shape is accepted: {"RootFS":{"Snapshot":{"Name":"<snapshotter>"}}}.
+ */
+const exactKeys = (v: unknown, keys: readonly string[]): v is Json =>
+  isObj(v) && Object.keys(v).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(v, k));
+const storageOk = (v: unknown) => exactKeys(v, ["RootFS"]) && exactKeys(v.RootFS, ["Snapshot"]) && exactKeys(v.RootFS.Snapshot, ["Name"]) &&
+  typeof v.RootFS.Snapshot.Name === "string" && /^[a-z0-9_-]{1,32}$/.test(v.RootFS.Snapshot.Name);
 const zero = (v: unknown) => v === 0;
 
 /** --no-healthcheck: Docker records {"Test": ["NONE"]}. */
@@ -127,9 +144,9 @@ export const REQUIRED_FIELDS: readonly (readonly [Where, string, (v: unknown) =>
   ["top", "NetworkSettings", networkSettingsOk, "must contain only the none network, no ports, addresses or unknown keys"],
   ["top", "State", stateOk, "must be a created, never-started container (no error, StartedAt/FinishedAt unset) with no unknown keys"],
   ["top", "ExecIDs", emptyList, "no exec sessions may exist"],
-  ["HostConfig", "Annotations", emptyMap, "must be empty (runtime-specific options are not allowed)"],
-  ["HostConfig", "Init", (v) => v === false || v === null, "must not inject an init binary from the host"],
-  ["HostConfig", "StorageOpt", emptyMap, "must be empty"],
+  // V2.2: Init must be PRESENT and false. Absent (nil) would mean the daemon-wide "init" default applies
+  // (moby daemon/oci_linux.go), so the create argv passes --init=false explicitly.
+  ["HostConfig", "Init", (v) => v === false, "must be false (the create argv passes --init=false; absent would mean the daemon default)"],
   ["HostConfig", "CpuRealtimeRuntime", (v) => v === 0, "must be 0"],
   ["HostConfig", "Isolation", (v) => v === "" || v === "default", "must be default"],
   ["HostConfig", "PortBindings", emptyMap, "must be empty"],
@@ -142,7 +159,6 @@ export const REQUIRED_FIELDS: readonly (readonly [Where, string, (v: unknown) =>
   ["HostConfig", "Binds", emptyList, "must be empty (only the two --mount binds are allowed)"],
   ["HostConfig", "VolumesFrom", emptyList, "must be empty"],
   ["HostConfig", "VolumeDriver", emptyString, "must be empty"],
-  ["HostConfig", "Sysctls", emptyMap, "must be empty"],
   ["HostConfig", "GroupAdd", emptyList, "no supplementary groups may be added"],
   ["HostConfig", "CapAdd", emptyList, "must be empty"],
   ["HostConfig", "Devices", emptyList, "must be empty"],
@@ -162,7 +178,6 @@ export const REQUIRED_FIELDS: readonly (readonly [Where, string, (v: unknown) =>
   // Security labels, process, storage metadata, logging
   ["top", "ProcessLabel", emptyString, "must be empty (SELinux process labels are not supported; refuse rather than guess)"],
   ["top", "MountLabel", emptyString, "must be empty (SELinux mount labels are not supported; refuse rather than guess)"],
-  ["top", "GraphDriver", graphDriverOk, "must have only Name and string Data paths"],
   ["top", "LogPath", emptyString, "must be empty (log driver none)"],
   ["top", "RestartCount", zero, "must be 0"],
   ["top", "Platform", (v) => v === "linux", "must be linux"],
@@ -209,6 +224,11 @@ export const OPTIONAL_FIELDS: readonly (readonly [Where, string, (v: unknown) =>
   ["HostConfig", "IOMaximumIOps", zero, "must be 0"],
   ["HostConfig", "IOMaximumBandwidth", zero, "must be 0"],
   ["HostConfig", "ConsoleSize", (v) => v === null || JSON.stringify(v) === "[0,0]", "must be unset"],
+  // V2.2: map fields tagged `json:",omitempty"` in moby api/types/container/hostconfig.go. Docker 29 omits them
+  // when empty; a nil map has no effect (no daemon-wide default is substituted). Present means it must be empty.
+  ["HostConfig", "Annotations", emptyMap, "must be empty (runtime-specific options are not allowed)"],
+  ["HostConfig", "StorageOpt", emptyMap, "must be empty"],
+  ["HostConfig", "Sysctls", emptyMap, "must be empty"],
   ["Config", "Domainname", emptyString, "must be empty"],
   ["Config", "ExposedPorts", emptyMap, "must be empty"],
   ["Config", "OnBuild", emptyList, "must be empty"],
@@ -236,17 +256,22 @@ export interface InspectCheck {
   readonly violations: readonly string[];
   readonly runtime: string | null;
   readonly containerId: string | null;
+  /**
+   * V2.2: true when ResolvConfPath/HostnamePath/HostsPath were all empty (Docker 29 sets them at start). The
+   * caller must then verify them with validateFinishedInspect and verifyContainerHostFiles after the container ran.
+   */
+  readonly hostFilesPending: boolean;
 }
 
 export function validateInspect(raw: unknown, spec: SandboxSpec, expected: InspectExpectations): InspectCheck {
   const v: string[] = [];
   const container = Array.isArray(raw) && raw.length === 1 ? raw[0] : null;
-  if (!isObj(container)) return { violations: ["inspect output: expected an array with exactly one container object"], runtime: null, containerId: null };
+  if (!isObj(container)) return { violations: ["inspect output: expected an array with exactly one container object"], runtime: null, containerId: null, hostFilesPending: false };
   const host = container.HostConfig;
   const config = container.Config;
   if (!isObj(host)) v.push("HostConfig: missing");
   if (!isObj(config)) v.push("Config: missing");
-  if (!isObj(host) || !isObj(config)) return { violations: v, runtime: null, containerId: null };
+  if (!isObj(host) || !isObj(config)) return { violations: v, runtime: null, containerId: null, hostFilesPending: false };
   const expect = (cond: boolean, msg: string) => { if (!cond) v.push(msg); };
   const run = expected.run;
 
@@ -267,14 +292,31 @@ export function validateInspect(raw: unknown, spec: SandboxSpec, expected: Inspe
     if (Object.prototype.hasOwnProperty.call(obj, key) && !ok(obj[key])) v.push(`${where === "top" ? key : `${where}.${key}`}: ${rule}`);
   }
 
-  // Host files bind-mounted at /etc/hosts, /etc/hostname, /etc/resolv.conf: exact paths for this container id
+  // Host files bind-mounted at /etc/hosts, /etc/hostname, /etc/resolv.conf: exact paths for this container id, or
+  // (V2.2) all three empty on this never-started container (State is required to be "created" above).
   const hostFiles = typeof container.Id === "string" ? expectedContainerHostFiles(spec, container.Id) : null;
+  let hostFilesPending = false;
   if (hostFiles === null) v.push("ResolvConfPath/HostnamePath/HostsPath: dockerDataRoot is not recorded (or the id is invalid), so the host files can't be verified");
-  else for (const [key, path] of Object.entries(hostFiles)) expect(container[key] === path, `${key}: must be ${path}`);
+  else {
+    const entries = Object.entries(hostFiles);
+    hostFilesPending = entries.every(([key]) => container[key] === "");
+    if (!hostFilesPending) for (const [key, path] of entries) expect(container[key] === path, `${key}: must be ${path} (or all three host-file paths empty before the first start)`);
+  }
 
-  // Storage driver, hostname, image manifest descriptor
-  expect(typeof container.Driver === "string" && /^[a-z0-9_-]{1,32}$/.test(container.Driver) && isObj(container.GraphDriver) && container.Driver === container.GraphDriver.Name,
-    "Driver: must be a driver name equal to GraphDriver.Name");
+  // Storage metadata (V2.2): exactly one of GraphDriver (classic) or Storage (containerd snapshotter), named as Driver
+  const hasGraph = Object.prototype.hasOwnProperty.call(container, "GraphDriver");
+  const hasStorage = Object.prototype.hasOwnProperty.call(container, "Storage");
+  const driverOk = typeof container.Driver === "string" && /^[a-z0-9_-]{1,32}$/.test(container.Driver);
+  if (hasGraph === hasStorage) v.push(`GraphDriver/Storage: exactly one must be present (got ${hasGraph ? "both" : "neither"})`);
+  else if (hasGraph) {
+    if (!graphDriverOk(container.GraphDriver)) v.push("GraphDriver: must have only Name and string Data paths");
+    else expect(driverOk && container.Driver === (container.GraphDriver as Json).Name, "Driver: must be a driver name equal to GraphDriver.Name");
+  } else {
+    if (!storageOk(container.Storage)) v.push('Storage: must be exactly {"RootFS":{"Snapshot":{"Name":"<snapshotter>"}}}');
+    else expect(driverOk && container.Driver === ((container.Storage as Json).RootFS as Json & { Snapshot: Json }).Snapshot.Name, "Driver: must be a snapshotter name equal to Storage.RootFS.Snapshot.Name");
+  }
+
+  // Hostname, image manifest descriptor
   expect(config.Hostname === spec.hostname, `Config.Hostname: must be "${spec.hostname}" (set by the create argv)`);
   // V2 (Option B): the container's own image is the locally built canary, so a reported descriptor must carry the
   // canary's recorded manifest digest. The base image's manifest digest must still be recorded (provenance).
@@ -404,7 +446,39 @@ export function validateInspect(raw: unknown, spec: SandboxSpec, expected: Inspe
     }
   }
 
-  return { violations: v, runtime, containerId };
+  return { violations: v, runtime, containerId, hostFilesPending };
+}
+
+/**
+ * V2.2: the re-inspect after the canary ran (before removal). Narrow by design:
+ * the full allowlist was checked before start. It requires the same container
+ * (id, name, image, runtime, network), a clean exit (never restarted, no OOM,
+ * no exec session), and the EXACT host-file paths under the recorded
+ * dockerDataRoot, which Docker 29 sets only at start. Returns violations.
+ */
+export function validateFinishedInspect(raw: unknown, spec: SandboxSpec, expected: { readonly run: RunPaths; readonly purpose: ContainerPurpose; readonly containerId: string; readonly runtime: string }): string[] {
+  const container = Array.isArray(raw) && raw.length === 1 ? raw[0] : null;
+  if (!isObj(container)) return ["inspect after the canary: expected an array with exactly one container object"];
+  const v: string[] = [];
+  const expect = (cond: boolean, msg: string) => { if (!cond) v.push(`inspect after the canary: ${msg}`); };
+  expect(container.Id === expected.containerId, "Id: differs from the container that was checked before start");
+  let name: string | null = null;
+  try { name = containerName(expected.run.runId, expected.purpose); } catch { v.push("inspect after the canary: Name: invalid run id"); }
+  if (name) expect(container.Name === `/${name}`, `Name: must be /${name}`);
+  expect(container.Image === spec.image.id, `Image: must be the recorded image ID ${spec.image.id}`);
+  const host = container.HostConfig;
+  expect(isObj(host) && host.Runtime === expected.runtime, `HostConfig.Runtime: must be ${expected.runtime}`);
+  expect(isObj(host) && host.NetworkMode === spec.network, `HostConfig.NetworkMode: must be "${spec.network}"`);
+  const s = container.State;
+  expect(isObj(s) && Object.keys(s).every((k) => STATE_KEYS.has(k)) && s.Status === "exited" && s.Running === false && s.Paused === false &&
+    s.Restarting === false && s.OOMKilled === false && s.Dead === false && s.Pid === 0 && s.ExitCode === 0 && s.Error === "",
+    "State: must be exited with code 0 (not running, restarting, dead or OOM-killed; no error; no unknown keys)");
+  expect(container.RestartCount === 0, "RestartCount: must be 0");
+  expect(emptyList(container.ExecIDs), "ExecIDs: no exec sessions may exist");
+  const hostFiles = expectedContainerHostFiles(spec, expected.containerId);
+  if (hostFiles === null) v.push("inspect after the canary: dockerDataRoot is not recorded (or the id is invalid), so the host files can't be verified");
+  else for (const [key, path] of Object.entries(hostFiles)) expect(container[key] === path, `${key}: must be ${path}`);
+  return v;
 }
 
 const MOUNT_KEYS = new Set(["Type", "Source", "Destination", "Mode", "RW", "Propagation"]);

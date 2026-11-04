@@ -519,6 +519,7 @@ export function buildCreateArgs(spec: SandboxSpec, run: RunPaths, runtime: strin
     "--user", spec.user,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true",
+    "--init=false",
     "--ipc", spec.ipcMode,
     "--cgroupns", "private",
     "--pids-limit", String(spec.pidsLimit),

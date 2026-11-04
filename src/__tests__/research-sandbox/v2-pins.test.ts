@@ -12,7 +12,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_CANARY_MANIFEST_DIGEST, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION,
-  POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, type FakeEntry,
+  POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, type FakeEntry,
 } from "./fixtures.js";
 
 const EXPECT = { run: RUN, purpose: "canary" as const, command: PROBE_COMMAND };
@@ -235,12 +235,13 @@ describe("preflight with sidecars and the canary manifest digest (fake engine)",
     const calls: string[] = [];
     const existing = new Set<string>();
     const ok: ProcessResult = { exitCode: 0, signal: null, stdout: JSON.stringify(compliantReport()), stderr: "", timedOut: false, truncated: false };
+    let started = false;
     const e: ContainerEngine = {
       target: ENGINE_TARGET,
       async info() { calls.push("info"); return DOCKER_INFO; },
       async create() { calls.push("create"); existing.add(CONTAINER_ID); existing.add("research-sandbox-r1-canary"); return CONTAINER_ID; },
-      async inspect() { calls.push("inspect"); const raw = compliantInspect(); if (descriptorDigest) raw[0].ImageManifestDescriptor = descriptor(descriptorDigest); return raw; },
-      async start() { calls.push("start"); return ok; },
+      async inspect() { calls.push("inspect"); const raw = compliantInspect(); if (descriptorDigest) raw[0].ImageManifestDescriptor = descriptor(descriptorDigest); return started ? finishedInspect(raw) : raw; },
+      async start() { calls.push("start"); started = true; return ok; },
       async remove() { calls.push("remove"); existing.clear(); },
       async exists(ref) { return existing.has(ref); },
     };

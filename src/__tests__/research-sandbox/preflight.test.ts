@@ -11,7 +11,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_CONFIG_DIR, DOCKER_INFO, ENGINE_TARGET, FAKE_DOCKER_SERVER_VERSION, FAKE_IMAGE_ID, FAKE_DATA_ROOT, FAKE_IMAGE_ENV, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_DIGEST, FAKE_ENTRYPOINT, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC,
-  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
+  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, docker29Inspect, CONTAINER_HOST_FILES,
 } from "./fixtures.js";
 
 const NAME = "research-sandbox-r1-canary";
@@ -30,7 +30,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 const wouldBePassing = (): PreflightResult => ({
   rating: "meets-spec", allowsUntrustedInput: true, runtime: "runsc", engine: DOCKER_INFO, violations: [], hostTrust: "operator-attested-only",
   steps: ["spec", "paths", "host-paths", "engine-target", "engine-info", "engine-version", "runtime-binary-verified", "create", "runtime-config-rechecked-after-create", "inspect",
-    "host-paths-recheck", "container-host-files", "canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified"],
+    "host-paths-recheck", "container-host-files", "canary", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified"],
   cleanup: { containerName: NAME, containerId: CONTAINER_ID, attempts: 1, verifiedRemoved: true, detail: "removed and verified" },
   binding: { runId: RUN.runId, inputDir: RUN.inputDir, outputDir: RUN.outputDir, imageRef: imageReference(SPEC), runtime: "runsc",
     securityArgsSha256: securityArgsHash(buildCreateArgs(SPEC, RUN, "runsc", ["node"], "run"), SPEC), gvisorProcVersion: SPEC.gvisorProcVersion!,
@@ -46,6 +46,10 @@ interface FakeOptions {
   /** Answers for successive info() calls (first = before create); falls back to `info` when exhausted. */
   infoSequence?: Array<EngineInfo | Error>;
   inspect?: unknown | Error;
+  /** V2.2: the re-inspect after the canary (default: finishedInspect of the created report). */
+  inspectAfterStart?: unknown;
+  /** V2.2: called when the container starts (e.g. Docker 29 writing the host files). */
+  onStart?: () => void;
   start?: ProcessResult | Error;
   create?: "ok" | Error | "error-after-creating";
   removeFailures?: number; // remove() throws this many times
@@ -59,6 +63,7 @@ function fakeEngine(o: FakeOptions = {}) {
   const existing = new Set<string>(o.leftover ? [NAME] : []);
   let removeFailures = o.removeFailures ?? 0;
   let lastStart: { id: string; timeoutMs: number; maxOutputBytes: number } | null = null;
+  let started = false;
   const engine: ContainerEngine = {
     target: ENGINE_TARGET,
     async info() {
@@ -77,9 +82,16 @@ function fakeEngine(o: FakeOptions = {}) {
       expect(createArgvProblem(args, imageRef)).toBeNull();
       return CONTAINER_ID;
     },
-    async inspect(id) { calls.push(`inspect:${id === CONTAINER_ID ? "id" : id}`); if (o.inspect instanceof Error) throw o.inspect; return o.inspect ?? compliantInspect(); },
+    async inspect(id) {
+      calls.push(`inspect:${id === CONTAINER_ID ? "id" : id}`);
+      if (o.inspect instanceof Error) throw o.inspect;
+      const created = o.inspect ?? compliantInspect();
+      return started ? (o.inspectAfterStart ?? finishedInspect(created)) : created;
+    },
     async start(id, timeoutMs, maxOutputBytes) {
       calls.push(`start:${id === CONTAINER_ID ? "id" : id}`);
+      started = true;
+      o.onStart?.();
       lastStart = { id, timeoutMs, maxOutputBytes };
       if (o.start instanceof Error) throw o.start;
       return o.start ?? okStart;
@@ -115,9 +127,9 @@ describe("success paths and ratings", () => {
     const r = await run(f.engine);
     expect(r).toMatchObject({ rating: "refused", allowsUntrustedInput: false, runtime: "runsc", binding: null, hostTrust: "operator-attested-only" });
     expect(r.violations).toEqual(MEETS_SPEC_BLOCKERS);
-    expect(f.calls).toEqual(["info", `exists:${NAME}`, "create", "info", "inspect:id", "start:id", "remove:id", `exists:${NAME}`, "exists:id", "info"]);
+    expect(f.calls).toEqual(["info", `exists:${NAME}`, "create", "info", "inspect:id", "start:id", "inspect:id", "remove:id", `exists:${NAME}`, "exists:id", "info"]);
     expect(r.steps).toEqual(["spec", "paths", "host-paths", "engine-target", "engine-info", "engine-version", "runtime-binary-verified", "create", "runtime-config-rechecked-after-create",
-      "inspect", "host-paths-recheck", "container-host-files", "canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified", "meets-spec-blocked"]);
+      "inspect", "host-paths-recheck", "container-host-files", "canary", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified", "meets-spec-blocked"]);
     expect(r.cleanup).toEqual({ containerName: NAME, containerId: CONTAINER_ID, attempts: 1, verifiedRemoved: true, detail: "removed and verified" });
     expect(f.lastStart()).toEqual({ id: CONTAINER_ID, timeoutMs: 60_000, maxOutputBytes: 65_536 });
     expect(f.existing.size).toBe(0);
@@ -616,11 +628,11 @@ describe("v5 review finding 1 at the preflight level", () => {
 });
 
 describe("acceptance findings 3 and 4 at the preflight level", () => {
-  it("an omitted required inspect field (Sysctls): refused, never started", async () => {
+  it("an omitted required inspect field (Init; absent would mean the daemon default): refused, never started", async () => {
     const bad = compliantInspect();
-    delete bad[0].HostConfig.Sysctls;
+    delete bad[0].HostConfig.Init;
     const f = fakeEngine({ inspect: bad });
-    expectRefused(await run(f.engine), "HostConfig.Sysctls: missing");
+    expectRefused(await run(f.engine), "HostConfig.Init: missing");
     expect(f.calls.some((c) => c.startsWith("start"))).toBe(false);
   });
 
@@ -688,5 +700,96 @@ describe("Docker server version (M3 groundwork): recorded pin, daemon-reported S
   it("rate() never treats a configuration with an unrecorded or different version as approved", () => {
     expect(rate({ ...DOCKER_INFO, serverVersion: "0.0.1-fake.test" }, "runsc", SPEC, true)).toBe("development-only");
     expect(rate(DOCKER_INFO, "runsc", unpinned(), true)).toBe("development-only");
+  });
+});
+
+describe("V2.2: Docker 29.9.3 (containerd image store) at the preflight level", () => {
+  /** Before the first start Docker 29 has not written the three host files; it writes them at start. */
+  const docker29Host = () => {
+    const layout = compliantHostLayout();
+    const files = Object.fromEntries(CONTAINER_HOST_FILES.map((p) => [p, layout[p]]));
+    for (const p of CONTAINER_HOST_FILES) delete layout[p];
+    return { layout, hostFs: fakeHostFs(layout), writeFiles: () => Object.assign(layout, files) };
+  };
+
+  it("the Docker 29 format passes every check and is still refused only by M1/M3; host files verified after the canary", async () => {
+    const h = docker29Host();
+    const f = fakeEngine({ inspect: docker29Inspect(), onStart: h.writeFiles });
+    const r = await run(f.engine, { hostFs: h.hostFs });
+    expect(r.violations).toEqual(MEETS_SPEC_BLOCKERS);
+    expect(r.rating).toBe("refused");
+    expect(r.allowsUntrustedInput).toBe(false);
+    expect(f.calls).toEqual(["info", `exists:${NAME}`, "create", "info", "inspect:id", "start:id", "inspect:id", "remove:id", `exists:${NAME}`, "exists:id", "info"]);
+    expect(r.steps).toEqual(expect.arrayContaining(["container-host-files-pending", "canary", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "gvisor-verified", "meets-spec-blocked"]));
+    expect(r.steps).not.toContain("container-host-files");
+    expect(() => assertUntrustedInputAllowed(r, { spec: SPEC, run: RUN })).toThrow(IsolationRefusedError);
+  });
+
+  it("a host file that already exists before the first start: refused, never started, cleanup verified", async () => {
+    const h = docker29Host();
+    h.writeFiles();
+    const f = fakeEngine({ inspect: docker29Inspect() });
+    const r = await run(f.engine, { hostFs: h.hostFs });
+    expectRefused(r, "already exists before the container's first start");
+    expect(f.calls.some((c) => c.startsWith("start"))).toBe(false);
+    expect(r.steps).toContain("removed-verified");
+  });
+
+  it("the container folder unsafe before start (group-writable): refused, never started", async () => {
+    const h = docker29Host();
+    h.layout[`${FAKE_DATA_ROOT}/containers/${CONTAINER_ID}`] = { kind: "dir", uid: 0, mode: 0o40770, ino: 43 };
+    const f = fakeEngine({ inspect: docker29Inspect() });
+    expectRefused(await run(f.engine, { hostFs: h.hostFs }), "writable by group or others");
+    expect(f.calls.some((c) => c.startsWith("start"))).toBe(false);
+  });
+
+  it.each([
+    ["the paths still empty after the start", (c: any) => { c[0].HostsPath = ""; c[0].HostnamePath = ""; c[0].ResolvConfPath = ""; }, "inspect after the canary: HostsPath: must be"],
+    ["a host-file path elsewhere", (c: any) => { c[0].ResolvConfPath = "/etc/resolv.conf"; }, "inspect after the canary: ResolvConfPath: must be"],
+    ["another container id", (c: any) => { c[0].Id = "e".repeat(64); }, "inspect after the canary: Id: differs"],
+    ["another runtime", (c: any) => { c[0].HostConfig.Runtime = "runc"; }, "inspect after the canary: HostConfig.Runtime: must be runsc"],
+    ["another image", (c: any) => { c[0].Image = `sha256:${"d".repeat(64)}`; }, "inspect after the canary: Image: must be the recorded image ID"],
+    ["still running", (c: any) => { c[0].State.Status = "running"; c[0].State.Running = true; c[0].State.Pid = 99; }, "inspect after the canary: State: must be exited with code 0"],
+    ["OOM-killed", (c: any) => { c[0].State.OOMKilled = true; }, "inspect after the canary: State: must be exited"],
+    ["restarted", (c: any) => { c[0].RestartCount = 1; }, "inspect after the canary: RestartCount: must be 0"],
+    ["an exec session", (c: any) => { c[0].ExecIDs = ["x"]; }, "inspect after the canary: ExecIDs"],
+  ])("after the canary, %s: refused after the canary, cleanup verified", async (_label, mutate, message) => {
+    const h = docker29Host();
+    const after = finishedInspect(docker29Inspect());
+    mutate(after);
+    const f = fakeEngine({ inspect: docker29Inspect(), onStart: h.writeFiles, inspectAfterStart: after });
+    const r = await run(f.engine, { hostFs: h.hostFs });
+    expectRefused(r, message);
+    expect(r.steps).toContain("inspect-after-canary");
+    expect(r.steps).toContain("removed-verified");
+  });
+
+  it.each([
+    ["never written", (_l: Record<string, any>) => {}, "cannot be checked (ENOENT)"],
+    ["a symbolic link", (l: Record<string, any>) => { l[CONTAINER_HOST_FILES[0]] = { kind: "symlink", uid: 0, mode: 0o120777, ino: 90 }; }, "is a symbolic link"],
+    ["not root-owned", (l: Record<string, any>) => { l[CONTAINER_HOST_FILES[2]] = { kind: "file", uid: 1000, mode: 0o100644, ino: 91 }; }, "not root"],
+    ["world-writable", (l: Record<string, any>) => { l[CONTAINER_HOST_FILES[1]] = { kind: "file", uid: 0, mode: 0o100666, ino: 92 }; }, "writable by group or others"],
+  ])("host files after the canary %s: refused, cleanup verified", async (_label, mutate, message) => {
+    const h = docker29Host();
+    const onStart = () => { if (_label !== "never written") h.writeFiles(); mutate(h.layout); };
+    const f = fakeEngine({ inspect: docker29Inspect(), onStart });
+    const r = await run(f.engine, { hostFs: h.hostFs });
+    expectRefused(r, message);
+    expect(r.steps).toContain("container-host-files-after-canary");
+    expect(r.steps).toContain("removed-verified");
+  });
+
+  it("the classic format (paths set before start) is still verified before start AND re-verified after the canary", async () => {
+    const f = fakeEngine({});
+    const r = await run(f.engine);
+    expect(r.violations).toEqual(MEETS_SPEC_BLOCKERS);
+    expect(r.steps).toEqual(expect.arrayContaining(["container-host-files", "inspect-after-canary", "container-host-files-after-canary"]));
+  });
+
+  it("the create argv passes --init=false exactly once (so HostConfig.Init is reported, never left to the daemon default)", () => {
+    const args = buildCreateArgs(SPEC, RUN, "runsc", ["node"], "canary");
+    expect(args.filter((a) => a === "--init=false")).toHaveLength(1);
+    expect(args.some((a) => a === "--init" || a === "--init=true")).toBe(false);
+    expect(args.indexOf("--init=false")).toBeLessThan(args.indexOf(imageReference(SPEC)));
   });
 });

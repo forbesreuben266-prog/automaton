@@ -24,9 +24,13 @@
  *  5. INSPECT it: every property, the container id and name, and the host
  *     folders re-verified with unchanged identities; the host files behind
  *     /etc/hosts, /etc/hostname and /etc/resolv.conf verified under the
- *     recorded Docker data root (not recorded refuses); on any violation it is
- *     removed without ever being started;
- *  6. START the probe under a timeout and output cap; evaluate its report;
+ *     recorded Docker data root (not recorded refuses; V2.2: Docker 29 creates
+ *     them only at start, so then their folders are verified and the files
+ *     must not exist yet); on any violation it is removed without ever being
+ *     started;
+ *  6. START the probe under a timeout and output cap; RE-INSPECT the exited
+ *     container (same id, image, runtime; exit 0; exact host-file paths) and
+ *     verify the host files (V2.2, both formats); evaluate its report;
  *     for an isolating runtime, require positive gVisor evidence (canary.ts:
  *     the runtime's NAME is never enough; the host's /proc/version is read
  *     here, never supplied by the caller);
@@ -65,7 +69,7 @@ import {
   canonicalRuntimeConfig, readHostProcVersion, runtimeConfigProblems, sameIdentities, sameRuntimeBinary, verifyContainerHostFiles, verifyRuntimeBinary,
   type RuntimeBinaryIdentity, verifyEngineTarget, verifyRunDirectories, type HostFs, type HostPathPolicy,
 } from "./host-paths.js";
-import { validateInspect } from "./inspect.js";
+import { validateFinishedInspect, validateInspect } from "./inspect.js";
 import {
   DOCKER_SERVER_VERSION_PATTERN, SandboxSpecError, buildCreateArgs, containerName, imageReference, securityArgsHash, validateRunPaths,
   type RunPaths, type SandboxSpec,
@@ -340,8 +344,10 @@ async function inspectAndProbe(
   if (after.violations.length > 0) return fail([...after.violations]);
   if (!sameIdentities(identities, after.identities)) return fail(["host folders changed identity between the checks and container creation"]);
   // The host files Docker bind-mounts at /etc/hosts, /etc/hostname, /etc/resolv.conf (exact paths already checked by inspect).
-  const hostFiles = verifyContainerHostFiles(spec, inspected.containerId, options.hostFs);
-  steps.push("container-host-files");
+  // V2.2: Docker 29 reports and writes them only at start; then the folders are checked now, the files after the canary.
+  const pending = inspected.hostFilesPending;
+  const hostFiles = verifyContainerHostFiles(spec, inspected.containerId, options.hostFs, pending ? "pending" : "present");
+  steps.push(pending ? "container-host-files-pending" : "container-host-files");
   if (hostFiles.length > 0) return fail(hostFiles);
 
   const r = await engine.start(id, Math.min(spec.timeoutMs, CANARY_TIMEOUT_CAP_MS), CANARY_OUTPUT_CAP);
@@ -351,6 +357,14 @@ async function inspectAndProbe(
   if (r.exitCode !== 0) return fail([`canary: exited with ${r.exitCode}${r.signal ? ` (${r.signal})` : ""}`]);
   let report: unknown;
   try { report = JSON.parse(r.stdout); } catch { return fail(["canary: output is not JSON"]); }
+  // V2.2: re-inspect the stopped container (always, both formats): same container, clean exit, exact host-file paths;
+  // then the host files themselves, which now exist.
+  const finished = validateFinishedInspect(await engine.inspect(id), spec, { run, purpose: "canary", containerId: inspected.containerId, runtime });
+  steps.push("inspect-after-canary");
+  if (finished.length > 0) return fail(finished);
+  const filesAfter = verifyContainerHostFiles(spec, inspected.containerId, options.hostFs, "present");
+  steps.push("container-host-files-after-canary");
+  if (filesAfter.length > 0) return fail(filesAfter);
   return { violations: evaluateCanary(report, spec), report };
 }
 

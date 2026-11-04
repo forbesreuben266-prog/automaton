@@ -16,7 +16,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_CONFIG_DIR, FAKE_DATA_ROOT, FAKE_DIGEST, FAKE_DOCKER_SERVER_VERSION, FAKE_ENTRYPOINT, FAKE_GVISOR_PROC_VERSION, FAKE_IMAGE_ENV,
-  FAKE_MANIFEST_DIGEST, FAKE_IMAGE_ID, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
+  FAKE_MANIFEST_DIGEST, FAKE_IMAGE_ID, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect,
 } from "./fixtures.js";
 
 const NAME = "research-sandbox-r1-canary";
@@ -44,6 +44,7 @@ const ok = (stdout = ""): ProcessResult => ({ exitCode: 0, signal: null, stdout,
 function fakeDocker(o: { info?: Record<string, unknown>; removeLeaves?: boolean } = {}) {
   const calls: string[][] = [];
   let exists = false;
+  let started = false;
   const info = {
     ServerVersion: FAKE_DOCKER_SERVER_VERSION, SecurityOptions: ["name=apparmor", "name=seccomp,profile=builtin", "name=cgroupns"],
     Runtimes: { runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH } }, ...o.info,
@@ -54,8 +55,8 @@ function fakeDocker(o: { info?: Record<string, unknown>; removeLeaves?: boolean 
     if (sub === "info") return ok(JSON.stringify(info));
     if (sub === "ps") return ok(exists ? `${CONTAINER_ID}\n` : "");
     if (sub === "create") { exists = true; return ok(`${CONTAINER_ID}\n`); }
-    if (sub === "inspect") return ok(JSON.stringify(compliantInspect(info.Runtimes && "runsc" in (info.Runtimes as object) ? "runsc" : "runc")));
-    if (sub === "start") return ok(JSON.stringify(compliantReport()));
+    if (sub === "inspect") { const raw = compliantInspect(info.Runtimes && "runsc" in (info.Runtimes as object) ? "runsc" : "runc"); return ok(JSON.stringify(started ? finishedInspect(raw) : raw)); }
+    if (sub === "start") { started = true; return ok(JSON.stringify(compliantReport())); }
     if (sub === "rm") { if (!o.removeLeaves) exists = false; return ok(); }
     return { exitCode: 1, signal: null, stdout: "", stderr: "unexpected", timedOut: false, truncated: false };
   };
@@ -94,7 +95,7 @@ describe("a complete fake host: every check passes, still refused by M1/M3", () 
     await h.go();
     expect(h.created).toEqual([["/usr/bin/docker", DOCKER_CONFIG_DIR]]);
     const subcommands = h.docker.calls.map((c) => c[5]);
-    expect(subcommands).toEqual(["info", "ps", "create", "info", "inspect", "start", "rm", "ps", "ps", "info"]);
+    expect(subcommands).toEqual(["info", "ps", "create", "info", "inspect", "start", "inspect", "rm", "ps", "ps", "info"]);
     for (const c of h.docker.calls) expect(c.slice(0, 5)).toEqual(["/usr/bin/docker", "--host", "unix:///var/run/docker.sock", "--config", DOCKER_CONFIG_DIR]);
     const create = h.docker.calls.find((c) => c[5] === "create")!;
     expect(create.filter((a) => a === "--pull")).toHaveLength(1);

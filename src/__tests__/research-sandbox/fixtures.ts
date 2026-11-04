@@ -50,6 +50,40 @@ export const POLICY = { operatorUid: OPERATOR_UID, outputOwnerUid: OUTPUT_UID };
 export const DOCKER_CONFIG_DIR = "/srv/research-engine/docker-config";
 export const ENGINE_TARGET = Object.freeze({ host: "unix:///var/run/docker.sock", configDir: DOCKER_CONFIG_DIR });
 
+/**
+ * V2.2: the same container as Docker 29.9.3 with the containerd image store reports it before its first start
+ * (moby docker-v29.9.3): Storage instead of GraphDriver, the omitempty HostConfig maps (Annotations, StorageOpt,
+ * Sysctls) absent, and ResolvConfPath/HostnamePath/HostsPath empty (set only by initializeNetworking at start).
+ */
+export function docker29Inspect(runtime = "runsc"): any {
+  const raw = compliantInspect(runtime);
+  const c = raw[0];
+  delete c.GraphDriver;
+  c.Driver = "overlayfs";
+  c.Storage = { RootFS: { Snapshot: { Name: "overlayfs" } } };
+  for (const k of ["Annotations", "StorageOpt", "Sysctls"]) delete c.HostConfig[k];
+  for (const k of ["ResolvConfPath", "HostnamePath", "HostsPath"]) c[k] = "";
+  return raw;
+}
+
+/** The three host files Docker writes for CONTAINER_ID (absent before a Docker 29 container's first start). */
+export const CONTAINER_HOST_FILES = Object.freeze(["hosts", "hostname", "resolv.conf"].map((f) => `${FAKE_DATA_ROOT}/containers/${CONTAINER_ID}/${f}`));
+
+/**
+ * V2.2: the re-inspect after the canary exited: the created container's report with State exited (code 0) and the
+ * exact host-file paths filled in (Docker 29 sets them at start; older formats already had them).
+ */
+export function finishedInspect(created: any): any {
+  if (!Array.isArray(created) || created.length !== 1 || typeof created[0] !== "object" || created[0] === null) return created;
+  const c = JSON.parse(JSON.stringify(created[0]));
+  c.State = { ...c.State, Status: "exited", Running: false, Pid: 0, ExitCode: 0, Error: "", StartedAt: "2026-11-04T12:00:00.1Z", FinishedAt: "2026-11-04T12:00:01.2Z" };
+  const dir = `${FAKE_DATA_ROOT}/containers/${String(c.Id)}`;
+  if (c.HostsPath === "") c.HostsPath = `${dir}/hosts`;
+  if (c.HostnamePath === "") c.HostnamePath = `${dir}/hostname`;
+  if (c.ResolvConfPath === "") c.ResolvConfPath = `${dir}/resolv.conf`;
+  return [c];
+}
+
 /** A compliant Docker Engine `inspect` result for a created (not started) canary container. */
 export function compliantInspect(runtime = "runsc"): any {
   return [{

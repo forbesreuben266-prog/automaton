@@ -12,7 +12,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_CANARY_MANIFEST_DIGEST, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, HOST_CANARY, HOST_PROC_VERSION, POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD,
-  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
+  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect,
 } from "./fixtures.js";
 
 const OTHER_ID = `sha256:${"9f".repeat(32)}`;
@@ -118,12 +118,13 @@ describe("preflight with a substituted image (fake engine)", () => {
     const calls: string[] = [];
     const existing = new Set<string>();
     const okStart: ProcessResult = { exitCode: 0, signal: null, stdout: JSON.stringify(compliantReport()), stderr: "", timedOut: false, truncated: false };
+    let started = false;
     const e: ContainerEngine = {
       target: ENGINE_TARGET,
       async info() { calls.push("info"); return DOCKER_INFO; },
       async create(args, ref) { calls.push(`create:${ref}`); expect(createArgvProblem(args, ref)).toBeNull(); existing.add(CONTAINER_ID); existing.add("research-sandbox-r1-canary"); return CONTAINER_ID; },
-      async inspect() { calls.push("inspect"); const raw = compliantInspect(); raw[0].Image = inspectImage; return raw; },
-      async start() { calls.push("start"); return okStart; },
+      async inspect() { calls.push("inspect"); const raw = compliantInspect(); raw[0].Image = inspectImage; return started ? finishedInspect(raw) : raw; },
+      async start() { calls.push("start"); started = true; return okStart; },
       async remove() { calls.push("remove"); existing.clear(); },
       async exists(ref) { return existing.has(ref); },
     };

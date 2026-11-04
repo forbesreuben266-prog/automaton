@@ -136,7 +136,7 @@ describe("create argv and binding hash", () => {
   it("is exactly the specified flags, as an argv array", () => {
     expect(buildCreateArgs(SPEC, RUN, "runsc", PROBE_COMMAND, "canary")).toEqual([
       "create", "--name", "research-sandbox-r1-canary", "--pull", "never", "--hostname", "sandbox", "--runtime", "runsc", "--network", "none", "--read-only", "--user", "10001:10001",
-      "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--ipc", "none", "--cgroupns", "private",
+      "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--init=false", "--ipc", "none", "--cgroupns", "private",
       "--pids-limit", "64", "--memory", "536870912", "--memory-swap", "536870912", "--cpus", "0.5",
       "--ulimit", "fsize=52428800:52428800", "--ulimit", "nofile=256:256", "--ulimit", "core=0:0",
       "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=67108864",

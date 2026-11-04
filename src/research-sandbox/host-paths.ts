@@ -305,8 +305,11 @@ export function sameIdentities(before: readonly DirectoryIdentity[], after: read
  * or others, and each file a regular root-owned file (never a symlink) not
  * writable by group or others. This detects misconfiguration; it cannot
  * prove what a dishonest daemon actually mounted (D1/M3 trust root).
+ * With `files: "pending"` (V2.2: Docker 29 writes them only when the container
+ * starts) the directories are checked and the three files must NOT exist yet
+ * (anything but ENOENT refuses); the caller verifies them after the start.
  */
-export function verifyContainerHostFiles(spec: SandboxSpec, containerId: string, hostFs: HostFs): string[] {
+export function verifyContainerHostFiles(spec: SandboxSpec, containerId: string, hostFs: HostFs, files: "present" | "pending" = "present"): string[] {
   const expected = expectedContainerHostFiles(spec, containerId);
   if (expected === null) return ["container host files: dockerDataRoot is not recorded (approved host setup step), so /etc/hosts, /etc/hostname and /etc/resolv.conf can't be verified"];
   const v: string[] = [];
@@ -331,7 +334,16 @@ export function verifyContainerHostFiles(spec: SandboxSpec, containerId: string,
   const parts = dir.split("/").filter(Boolean);
   check("/", "dir");
   for (let i = 1; i <= parts.length; i++) check(`/${parts.slice(0, i).join("/")}`, "dir");
-  for (const file of Object.values(expected)) check(file, "file");
+  for (const file of Object.values(expected)) {
+    if (files === "present") { check(file, "file"); continue; }
+    try {
+      hostFs.lstat(file);
+      v.push(`${file}: already exists before the container's first start (Docker had not reported it; refusing)`);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") v.push(`${file}: cannot be checked (${code ?? "error"})`);
+    }
+  }
   return v;
 }
 
