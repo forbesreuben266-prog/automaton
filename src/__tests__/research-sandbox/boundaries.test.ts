@@ -104,14 +104,26 @@ describe("research sandbox static boundaries", () => {
     for (const f of outside) expect(fs.readFileSync(f, "utf8").includes("research-sandbox"), path.relative(SRC, f)).toBe(false);
   });
 
-  it("no module performs work at import time (no top-level calls outside declarations); the one entry point is preflight-main.ts", () => {
+  it("no module performs work at import time (no top-level calls outside declarations); the entry points are preflight-main.ts and (V2.3) the canary probe's one guard", () => {
     for (const file of files.filter((f) => f !== "preflight-main.ts")) {
       for (const stmt of parse(file).statements) {
+        if (file === "canary-probe.ts" && ts.isIfStatement(stmt) && stmt.getText().startsWith("if (isEntryPoint()) {")) continue; // checked below
         const ok = ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) || ts.isFunctionDeclaration(stmt) ||
           ts.isClassDeclaration(stmt) || ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt) || ts.isVariableStatement(stmt);
         expect(ok, `${file}: top-level ${ts.SyntaxKind[stmt.kind]}`).toBe(true);
       }
     }
+  });
+
+  it("V2.3: canary-probe.ts has exactly one top-level statement that does work: the isEntryPoint() guard calling runProbeMain", () => {
+    const work = parse("canary-probe.ts").statements.filter((st) => ts.isIfStatement(st));
+    expect(work).toHaveLength(1);
+    const text = work[0].getText();
+    expect(text.startsWith("if (isEntryPoint()) {")).toBe(true);
+    expect(text).toContain("runProbeMain(process.argv, {");
+    expect(text).toContain("inside: insideCanaryContainer, probe,");
+    expect(text).not.toMatch(/process\.exit\(/);
+    expect(fs.readFileSync(path.join(PKG, "index.ts"), "utf8")).not.toContain("canary-probe"); // never imported by the host-side package
   });
 
   it("preflight-main.ts (V1A entry point) runs only when executed as the entry script, and only calls main()", () => {

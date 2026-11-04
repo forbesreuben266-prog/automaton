@@ -287,6 +287,9 @@ describe("refusals after create: never started when inspection fails; cleanup al
     ["non-zero exit", { exitCode: 137, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false }, "exited with 137"],
     ["killed by a signal", { exitCode: -1, signal: "SIGTERM", stdout: "", stderr: "", timedOut: false, truncated: false }, "(SIGTERM)"],
     ["non-JSON output", { exitCode: 0, signal: null, stdout: "not json", stderr: "", timedOut: false, truncated: false }, "not JSON"],
+    // V2.3: the VPS failure (the probe printed nothing and exited 0) is reported with byte counts, never content.
+    ["empty output (the V2.2 VPS failure)", { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false }, "canary: output is not JSON (stdout 0 bytes, stderr 0 bytes)"],
+    ["non-JSON output with stderr", { exitCode: 0, signal: null, stdout: "x", stderr: "secret-ish text", timedOut: false, truncated: false }, "canary: output is not JSON (stdout 1 bytes, stderr 15 bytes)"],
     ["a failing canary", { ...okStart, stdout: JSON.stringify({ ...compliantReport(), interfaces: ["lo", "eth0"] }) }, "exactly one interface"],
   ])("canary %s: refused, container force-removed and removal verified", async (_label, start, message) => {
     const f = fakeEngine({ start: start as ProcessResult });

@@ -15,6 +15,10 @@
  *   directories (socket scan) and the host canary path given as an argument
  *   (which must NOT exist inside the sandbox), and writes only small marker
  *   files that it deletes again.
+ * - V2.3: the entry point below runs only when this file is executed directly
+ *   (never on import), and only inside the canary container with an absolute
+ *   host canary path after "--canary"; otherwise it prints nothing on stdout
+ *   and exits 2. The report is the ONLY thing written to stdout.
  */
 
 import fs from "node:fs";
@@ -113,4 +117,48 @@ export async function probe(hostCanaryPath: string): Promise<CanaryReport> {
 /** Entry point guard: never runs outside a container started for the canary. */
 export function insideCanaryContainer(argv: readonly string[] = process.argv): boolean {
   return argv.includes("--canary") && (fs.existsSync("/.dockerenv") || fs.existsSync("/run/.containerenv"));
+}
+
+/** V2.3: what the entry point uses; injectable so tests never probe the real host. */
+export interface ProbeMainDeps {
+  readonly inside: (argv: readonly string[]) => boolean;
+  readonly probe: (hostCanaryPath: string) => Promise<CanaryReport>;
+  readonly stdout: (text: string) => void;
+  readonly stderr: (text: string) => void;
+}
+
+/**
+ * V2.3: the probe's entry point. Exit codes: 0 = one JSON report written to
+ * stdout; 2 = refused (not inside the canary container, or no absolute host
+ * canary path after "--canary"); 1 = the probe failed. Nothing but the report
+ * is ever written to stdout; diagnostics go to stderr.
+ */
+export async function runProbeMain(argv: readonly string[], deps: ProbeMainDeps): Promise<number> {
+  if (!deps.inside(argv)) { deps.stderr("canary-probe: refused: not started with --canary inside a container\n"); return 2; }
+  const at = argv.indexOf("--canary");
+  const hostCanaryPath = argv[at + 1];
+  if (typeof hostCanaryPath !== "string" || !/^(\/[A-Za-z0-9._-]+)+$/.test(hostCanaryPath) || hostCanaryPath.split("/").some((s) => s === "." || s === "..")) {
+    deps.stderr("canary-probe: refused: --canary must be followed by an absolute host canary path (no . or .. segments)\n");
+    return 2;
+  }
+  let report: CanaryReport;
+  try { report = await deps.probe(hostCanaryPath); } catch (err) {
+    deps.stderr(`canary-probe: failed: ${String((err as Error)?.message ?? err).slice(0, 200)}\n`);
+    return 1;
+  }
+  deps.stdout(`${JSON.stringify(report)}\n`);
+  return 0;
+}
+
+/** True only when this module is the script node was asked to run (not when it is imported). */
+export function isEntryPoint(argv1: string | undefined = process.argv[1], moduleUrl: string = import.meta.url): boolean {
+  if (typeof argv1 !== "string" || argv1.length === 0) return false;
+  try { return fs.realpathSync(argv1) === fs.realpathSync(new URL(moduleUrl)); } catch { return false; }
+}
+
+if (isEntryPoint()) {
+  void runProbeMain(process.argv, {
+    inside: insideCanaryContainer, probe,
+    stdout: (t) => { process.stdout.write(t); }, stderr: (t) => { process.stderr.write(t); },
+  }).then((code) => { process.exitCode = code; });
 }

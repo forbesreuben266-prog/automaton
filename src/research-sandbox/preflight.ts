@@ -207,8 +207,8 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   steps.push("spec");
   const pathProblems = validateRunPaths(run, spec);
   const canary = options.hostCanaryPath;
-  if (typeof canary !== "string" || !/^(\/[A-Za-z0-9._-]+)+$/.test(canary) || canary.startsWith(`${spec.runsRoot}/`)) {
-    pathProblems.push("hostCanaryPath: must be an absolute path outside the runs root");
+  if (typeof canary !== "string" || !/^(\/[A-Za-z0-9._-]+)+$/.test(canary) || canary.split("/").some((x) => x === "." || x === "..") || canary.startsWith(`${spec.runsRoot}/`)) {
+    pathProblems.push("hostCanaryPath: must be an absolute path outside the runs root (no . or .. segments; the probe refuses them)");
   }
   if (pathProblems.length > 0) return result({ violations: pathProblems, steps: [...steps, "paths"] });
   steps.push("paths");
@@ -356,7 +356,10 @@ async function inspectAndProbe(
   if (r.truncated) return fail(["canary: output exceeded the cap"]);
   if (r.exitCode !== 0) return fail([`canary: exited with ${r.exitCode}${r.signal ? ` (${r.signal})` : ""}`]);
   let report: unknown;
-  try { report = JSON.parse(r.stdout); } catch { return fail(["canary: output is not JSON"]); }
+  // V2.3: byte counts only (never the content) so a report shows e.g. an empty stdout.
+  try { report = JSON.parse(r.stdout); } catch {
+    return fail([`canary: output is not JSON (stdout ${Buffer.byteLength(r.stdout, "utf8")} bytes, stderr ${Buffer.byteLength(r.stderr, "utf8")} bytes)`]);
+  }
   // V2.2: re-inspect the stopped container (always, both formats): same container, clean exit, exact host-file paths;
   // then the host files themselves, which now exist.
   const finished = validateFinishedInspect(await engine.inspect(id), spec, { run, purpose: "canary", containerId: inspected.containerId, runtime });

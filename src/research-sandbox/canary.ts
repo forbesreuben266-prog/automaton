@@ -165,8 +165,8 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec): string[] {
   expect(intList(r.gids, 4) && r.gids.every((x) => x === gid), `identity: real/effective/saved/fs gid must all be ${gid} (got ${JSON.stringify(r.gids)})`);
   expect(intList(r.groups) && r.groups.every((x) => x === gid), `identity: no supplementary groups other than ${gid} (got ${JSON.stringify(r.groups)})`);
   expect(zeroHex(r.capEff) && zeroHex(r.capPrm) && zeroHex(r.capBnd), "capabilities: effective, permitted and bounding sets must all be empty");
-  expect(r.noNewPrivs === 1, "no_new_privs: must be set");
-  expect(r.seccompMode === 2, "seccomp: a filter must be active (mode 2)");
+  expect(r.noNewPrivs === 1, `no_new_privs: must be set (got ${JSON.stringify(r.noNewPrivs) ?? "undefined"})`);
+  expect(r.seccompMode === 2, `seccomp: a filter must be active (mode 2) (got ${JSON.stringify(r.seccompMode) ?? "undefined"})`);
 
   // Network denial evidence: interfaces and routes. The TCP attempt is supplementary only.
   expect(Array.isArray(r.interfaces) && r.interfaces.length === 1 && r.interfaces[0] === "lo", `network: exactly one interface, lo, must exist (got ${JSON.stringify(r.interfaces)})`);
@@ -206,9 +206,9 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec): string[] {
     }
   }
   expect(typeof r.cgroupMemoryMax === "number" && Number.isSafeInteger(r.cgroupMemoryMax) && r.cgroupMemoryMax > 0 && r.cgroupMemoryMax <= spec.memoryBytes,
-    `limits: cgroup memory.max must be at most ${spec.memoryBytes}`);
+    `limits: cgroup memory.max must be at most ${spec.memoryBytes} (got ${JSON.stringify(r.cgroupMemoryMax) ?? "undefined"})`);
   expect(typeof r.cgroupPidsMax === "number" && Number.isSafeInteger(r.cgroupPidsMax) && r.cgroupPidsMax > 0 && r.cgroupPidsMax <= spec.pidsLimit,
-    `limits: cgroup pids.max must be at most ${spec.pidsLimit}`);
+    `limits: cgroup pids.max must be at most ${spec.pidsLimit} (got ${JSON.stringify(r.cgroupPidsMax) ?? "undefined"})`);
   return v;
 }
 
