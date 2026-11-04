@@ -209,7 +209,7 @@ describe("M1: host-side verification of the approved runtime binary (fakes only)
   it("the recorded binary, configured by docker info, root-owned under root-owned directories, with the recorded hash: verified", () => {
     const r = verify();
     expect(r.violations).toEqual([]);
-    expect(r.identity).toEqual({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, dev: "64769", ino: "53", size: 52_000_000, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000 });
+    expect(r.identity).toEqual({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, dev: "64769", ino: "53", size: 52_000_000, mtimeMs: 1_700_000_000_000, ctimeMs: 1_700_000_000_000, sidecars: [], sidecarListing: [] });
   });
 
   it("no approved binary recorded: refused without touching the host", () => {
@@ -247,7 +247,7 @@ describe("M1: host-side verification of the approved runtime binary (fakes only)
     ["a parent directory is a symlink", (l: any) => { l["/usr/local/bin"].kind = "symlink"; }, "/usr/local/bin: is a symbolic link"],
     ["a parent directory writable by others (binary replaceable by rename)", (l: any) => { l["/usr/local"].mode = 0o40777; }, "/usr/local: writable by group or others"],
     ["a parent directory owned by a non-root user", (l: any) => { l["/usr"].uid = OPERATOR_UID; }, "/usr: owned by uid"],
-    ["the contents differ from the recorded hash", (l: any) => { l[FAKE_RUNSC_PATH].sha256 = "00".repeat(32); }, "SHA-256 does not match the recorded approved binary"],
+    ["the contents differ from the recorded hash", (l: any) => { l[FAKE_RUNSC_PATH].sha256 = "00".repeat(32); }, "SHA-256 does not match the recorded approved file"],
     ["the binary larger than the hashing limit", (l: any) => { l[FAKE_RUNSC_PATH].size = RUNTIME_BINARY_MAX_BYTES + 1; }, "cannot be hashed (EFBIG)"],
   ])("%s: refused", (_label, mutate, message) => {
     const r = verify(mutate);

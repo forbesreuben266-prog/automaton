@@ -48,9 +48,9 @@ export const RUNNER_USAGE = [
   "",
 ].join("\n");
 
-const PIN_KEYS = ["imageDigest", "imageEntrypoint", "imageEnv", "imageManifestDigest", "imageId", "gvisorProcVersion", "dockerDataRoot", "runscBinary", "dockerServerVersion"] as const;
-/** Pins that may be explicitly null: a classic (non-containerd) image store reports no platform manifest digest. */
-const NULLABLE_PINS: readonly string[] = ["imageManifestDigest"];
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "imageEnv", "imageManifestDigest", "imageId", "canaryManifestDigest", "gvisorProcVersion", "dockerDataRoot", "runscBinary", "dockerServerVersion"] as const;
+/** Pins that may be explicitly null: a classic (non-containerd) image store reports no platform manifest digests. */
+const NULLABLE_PINS: readonly string[] = ["imageManifestDigest", "canaryManifestDigest"];
 const CONFIG_KEYS = ["version", "engineBinary", "engineConfigDir", "runId", "hostCanaryPath", "operatorUid", "outputOwnerUid", "pins"];
 
 export class RunnerConfigError extends Error {

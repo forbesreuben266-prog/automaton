@@ -78,6 +78,34 @@ because of the M1/M3 blockers".
 
 Either removal is a reviewed code change.
 
+**M1 sidecar coverage (V2):**
+- `runscBinary` now records every gVisor sidecar file with its SHA-256:
+  files in the `gvisor-bin/` folder next to runsc, and any other executable
+  the runsc package installs in a system binary folder.
+- The preflight verifies each file like runsc itself, before the canary and
+  again after it.
+- It refuses any unrecorded file, symlink or folder in `gvisor-bin/`.
+
+**One-step host setup (V2): `deploy/research-sandbox/host-setup.sh`.**
+- **Default is a dry run:** no Docker call, no write.
+- **`--execute`** does all of the following and stops at the first failure:
+  - checks Docker and runsc;
+  - uses the base image, downloading it only with `--allow-base-pull`
+    (optionally `--expect-base-digest=sha256:...` to refuse any other digest);
+  - records the base pins;
+  - builds the canary offline, with no network and no attestations, and
+    records its image ID and manifest digest;
+  - records gVisor's `/proc/version` from one runsc container;
+  - hashes runsc and its sidecars;
+  - prepares the run folders and the root-only runner configuration;
+  - runs the preflight runner.
+
+  Temporary containers never get a network, mounts, privileges or published
+  ports, and they are always removed. Images, pins and the configuration are
+  kept for review.
+- **Expected result while the blockers stand:** "every preflight check
+  passed; refused only by the M1/M3 blockers".
+
 ## 4. Isolation, permissions, network and limits
 
 These are already enforced by `spec.ts` and the preflight.
@@ -144,9 +172,10 @@ node dist/research-sandbox/preflight-main.js --config /etc/research-sandbox/pref
     "imageEnv": ["PATH=<recorded>", "NODE_VERSION=<recorded>", "YARN_VERSION=<recorded>"],
     "imageManifestDigest": "sha256:<recorded> or null",
     "imageId": "sha256:<recorded at the canary build>",
+    "canaryManifestDigest": "sha256:<recorded at the canary build> or null",
     "gvisorProcVersion": "<recorded>",
     "dockerDataRoot": "/var/lib/docker",
-    "runscBinary": { "path": "/usr/local/bin/runsc", "sha256": "<recorded>", "args": [] },
+    "runscBinary": { "path": "/usr/bin/runsc", "sha256": "<recorded>", "args": [], "sidecars": [{ "path": "/usr/bin/gvisor-bin/<file>", "sha256": "<recorded>" }] },
     "dockerServerVersion": "<recorded>"
   }
 }
@@ -207,18 +236,20 @@ socket access on the host.
    recorded base pins.
 5. Put `imageId` in the runner configuration (section 6).
 
-**Manifest-digest conflict (reported, not bypassed):**
-- On Docker's **containerd image store**, a container reports an
-  `ImageManifestDescriptor` for its **own** image. For the canary that is the
-  canary's manifest, not the base image's manifest recorded at the pull, so
-  every preflight there would refuse. That is fail-closed, and the check has
-  not been changed.
-- The options need a decision and must be verified on the host:
-  - (a) use the classic image store, which reports no descriptor;
-  - (b) a separately approved change that records the canary image's own
-    manifest digest (taken at the build) as the value compared.
-- Neither is chosen here. Which store the pinned Docker version uses by
-  default, and exactly what it reports, are unverified offline.
+**Manifest digest (V2: Option B implemented):**
+- On Docker's containerd image store (the default for fresh Docker 29+
+  installs, as on the IONOS VPS), a container reports an
+  `ImageManifestDescriptor` for its **own** image.
+- V2 records the canary image's own manifest digest as a separate pin,
+  `canaryManifestDigest`. A reported descriptor must equal it.
+- The base image's `imageManifestDigest` stays a required provenance pin
+  whenever a descriptor is reported.
+- A recorded canary digest with no descriptor reported refuses as
+  contradictory, and the canary digest must differ from the base's.
+- `host-setup.sh` records the digest from a container **created, never
+  started** from the canary image ID. That is the same source the preflight
+  compares.
+- Unverified until the host run: exactly what Docker 29.9.3 reports.
 
 **Limitations (unverified offline):**
 - Docker is assumed to accept `docker create sha256:<id>` as an image ID and

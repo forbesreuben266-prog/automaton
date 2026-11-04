@@ -21,7 +21,7 @@ describe("baseline specification", () => {
   });
 
   it("D3: digest and entrypoint are unpinned until an approved pull; the image reference is refused", () => {
-    expect(SANDBOX_SPEC.image).toEqual({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null });
+    expect(SANDBOX_SPEC.image).toEqual({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null, canaryManifestDigest: null });
     const msg = (() => { try { imageReference(SANDBOX_SPEC); return ""; } catch (e) { return (e as Error).message; } })();
     expect(msg).toContain("image digest is not pinned");
     expect(msg).toContain("image entrypoint is not pinned");
@@ -234,7 +234,7 @@ describe("M1: recording the approved runtime binary", () => {
   it("nothing is recorded by default; a valid record (empty args) is frozen", () => {
     expect(SANDBOX_SPEC.runscBinary).toBeNull();
     const s1 = resolveSpec(rb({}));
-    expect(s1.runscBinary).toEqual({ path: "/usr/local/bin/runsc", sha256: FAKE_RUNSC.sha256, args: [] });
+    expect(s1.runscBinary).toEqual({ path: "/usr/local/bin/runsc", sha256: FAKE_RUNSC.sha256, args: [], sidecars: [] });
     expect(Object.isFrozen(s1.runscBinary)).toBe(true);
     expect(Object.isFrozen(s1.runscBinary!.args)).toBe(true);
   });
@@ -253,8 +253,9 @@ describe("M1: recording the approved runtime binary", () => {
     ["duplicate flags", rb({ args: ["--debug", "--debug"] }), "runscBinary.args: must be an empty array"],
     ["a malformed flag", rb({ args: ["network=host"] }), "runscBinary.args: must be an empty array"],
     ["args not an array", rb({ args: "--debug" }), "runscBinary.args"],
-    ["an extra key", rb({ shim: "/usr/bin/containerd-shim" }), "runscBinary: must be { path, sha256, args }"],
-    ["null", { runscBinary: null }, "runscBinary: must be { path, sha256, args }"],
+    ["an extra key", rb({ shim: "/usr/bin/containerd-shim" }), "runscBinary: must be { path, sha256, args, sidecars }"],
+    ["null", { runscBinary: null }, "runscBinary: must be { path, sha256, args, sidecars }"],
+    ["no sidecars key (V2: required, [] for a single-binary release)", { runscBinary: { path: FAKE_RUNSC.path, sha256: FAKE_RUNSC.sha256, args: [] } }, "runscBinary: must be { path, sha256, args, sidecars }"],
   ])("refuses %s", (_label, overrides, message) => {
     expect(() => resolveSpec(overrides)).toThrow(message);
   });

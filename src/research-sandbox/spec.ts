@@ -49,6 +49,17 @@ export interface ImageSpec {
    * differ from the base digest. null = not recorded: preflight refuses.
    */
   readonly id: string | null;
+  /**
+   * V2 (Option B): the platform manifest digest Docker reports in
+   * ImageManifestDescriptor for a container created from the canary image
+   * itself (containerd image store), recorded at the separately approved
+   * canary build. A container that reports a descriptor must carry exactly
+   * this digest. It must differ from the base image's manifestDigest (the
+   * canary is a different image). null = not recorded: a reported descriptor
+   * refuses. When it IS recorded, a container that reports NO descriptor
+   * also refuses (contradictory information).
+   */
+  readonly canaryManifestDigest: string | null;
 }
 
 export interface SandboxSpec {
@@ -130,10 +141,28 @@ export interface RuntimeBinary {
   readonly path: string;
   readonly sha256: string;
   readonly args: readonly string[];
+  /**
+   * V2 (M1): every other gVisor file runsc may execute, recorded at the
+   * approved host setup with its SHA-256 (since 2026-07 gVisor ships sidecar
+   * binaries in a gvisor-bin/ folder next to runsc). Each path is either
+   * inside <runsc folder>/gvisor-bin/ or directly in a RUNTIME_BINARY_DIRS
+   * folder. Required (may be empty only for a single-binary release); the
+   * preflight also refuses any unrecorded file in that gvisor-bin/ folder.
+   */
+  readonly sidecars: readonly RuntimeSidecar[];
 }
 
+export interface RuntimeSidecar {
+  readonly path: string;
+  readonly sha256: string;
+}
+
+/** Name of gVisor's sidecar folder, next to the runsc binary. */
+export const GVISOR_SIDECAR_DIR = "gvisor-bin";
+export const MAX_RUNTIME_SIDECARS = 64;
+
 export const SANDBOX_SPEC: SandboxSpec = Object.freeze({
-  image: Object.freeze({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null }),
+  image: Object.freeze({ repository: "docker.io/library/node", tag: "22.22.0-bookworm-slim", digest: null, entrypoint: null, env: null, manifestDigest: null, id: null, canaryManifestDigest: null }),
   isolatingRuntimes: Object.freeze(["runsc"]),
   developmentRuntimes: Object.freeze(["runc", "crun"]),
   user: "10001:10001",
@@ -196,8 +225,9 @@ export type SpecOverrides = Partial<Record<(typeof NUMERIC_LIMITS)[number], numb
   readonly runscBinary?: RuntimeBinary;
   readonly dockerServerVersion?: string;
   readonly imageId?: string;
+  readonly canaryManifestDigest?: string;
 };
-const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary", "dockerServerVersion", "imageId"];
+const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageEnv", "imageManifestDigest", "dockerDataRoot", "runscBinary", "dockerServerVersion", "imageId", "canaryManifestDigest"];
 /** A Docker server version as `docker info` reports it: MAJOR.MINOR.PATCH, optionally with a short pre-release/build suffix. */
 export const DOCKER_SERVER_VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]{0,63})?$/;
 /** Root-owned system directories the approved runtime binary may live in. */
@@ -205,6 +235,41 @@ export const RUNTIME_BINARY_DIRS = Object.freeze(["/usr/bin", "/usr/sbin", "/usr
 /** A binary file name: no dot-only or hidden names (".", "..", "...", ".x"). */
 const RUNTIME_BINARY_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 const ENV_ENTRY = /^([A-Za-z_][A-Za-z0-9_]*)=([\x20-\x7e]*)$/;
+
+/**
+ * Validates the recorded sidecar list of a runsc binary at `runscPath`;
+ * returns it (sorted by path, frozen) or null after adding violations.
+ */
+function readSidecars(raw: unknown, runscPath: string, violations: string[]): readonly RuntimeSidecar[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_RUNTIME_SIDECARS) {
+    violations.push(`runscBinary.sidecars: must be an array of at most ${MAX_RUNTIME_SIDECARS} { path, sha256 } entries`);
+    return null;
+  }
+  const sidecarRoot = `${runscPath.slice(0, runscPath.lastIndexOf("/"))}/${GVISOR_SIDECAR_DIR}/`;
+  const out: RuntimeSidecar[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < raw.length; i++) {
+    const e = raw[i] as Record<string, unknown>;
+    const plain = typeof e === "object" && e !== null && !Array.isArray(e) && Object.keys(e).length === 2 &&
+      ["path", "sha256"].every((k) => Object.prototype.hasOwnProperty.call(e, k)) &&
+      Object.values(Object.getOwnPropertyDescriptors(e)).every((d) => !d.get && !d.set);
+    if (!plain) { violations.push(`runscBinary.sidecars[${i}]: must be { path, sha256 } with plain values`); return null; }
+    const p = e.path;
+    const inSidecarDir = typeof p === "string" && p.startsWith(sidecarRoot) &&
+      p.slice(sidecarRoot.length).split("/").every((c) => RUNTIME_BINARY_NAME.test(c)) && p.slice(sidecarRoot.length).split("/").length <= 4;
+    const inBinaryDir = typeof p === "string" && RUNTIME_BINARY_DIRS.some((d) => p.startsWith(`${d}/`) && RUNTIME_BINARY_NAME.test(p.slice(d.length + 1)));
+    if (typeof p !== "string" || !(inSidecarDir || inBinaryDir) || p === runscPath) {
+      violations.push(`runscBinary.sidecars[${i}].path: must be inside ${sidecarRoot} (at most 4 levels, plain names) or directly inside ${RUNTIME_BINARY_DIRS.join(", ")}, and not the runsc binary itself`);
+      return null;
+    }
+    if (seen.has(p)) { violations.push(`runscBinary.sidecars[${i}].path: listed twice`); return null; }
+    seen.add(p);
+    if (typeof e.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(e.sha256)) { violations.push(`runscBinary.sidecars[${i}].sha256: must be 64 lowercase hex characters`); return null; }
+    out.push(Object.freeze({ path: p, sha256: e.sha256 }));
+  }
+  out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return Object.freeze(out);
+}
 
 /**
  * Returns the effective spec. Overrides may only lower numeric limits (and
@@ -305,23 +370,34 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
   if ("runscBinary" in values) {
     const b = values.runscBinary as Record<string, unknown> | null;
     const okShape = typeof b === "object" && b !== null && !Array.isArray(b) &&
-      Object.keys(b).every((k) => ["path", "sha256", "args"].includes(k)) &&
+      Object.keys(b).length === 4 && ["path", "sha256", "args", "sidecars"].every((k) => Object.prototype.hasOwnProperty.call(b, k)) &&
       Object.values(Object.getOwnPropertyDescriptors(b)).every((d) => !d.get && !d.set);
     const path = okShape ? b!.path : undefined;
     const args = okShape ? b!.args : undefined;
+    const sidecars = okShape && typeof path === "string" ? readSidecars(b!.sidecars, path, violations) : null;
     if (!okShape) {
-      violations.push("runscBinary: must be { path, sha256, args } with plain values");
+      violations.push("runscBinary: must be { path, sha256, args, sidecars } with plain values (sidecars: the recorded gVisor sidecar files, [] for a single-binary release)");
+    } else if (sidecars === null) {
+      // readSidecars reported the problem
     } else if (typeof path !== "string" || !RUNTIME_BINARY_DIRS.some((d) => path.startsWith(`${d}/`) && RUNTIME_BINARY_NAME.test(path.slice(d.length + 1)))) {
       violations.push(`runscBinary.path: must be a file directly inside ${RUNTIME_BINARY_DIRS.join(", ")} (no dot-only or hidden names)`);
     } else if (typeof b!.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b!.sha256)) {
       violations.push("runscBinary.sha256: must be 64 lowercase hex characters");
     } else if (!Array.isArray(args) || args.length !== 0) {
       violations.push("runscBinary.args: must be an empty array (no runsc runtime flags are approved)");
-    } else if (base.runscBinary !== null && JSON.stringify(base.runscBinary) !== JSON.stringify({ path, sha256: b!.sha256, args })) {
+    } else if (base.runscBinary !== null && JSON.stringify(base.runscBinary) !== JSON.stringify({ path, sha256: b!.sha256, args, sidecars })) {
       violations.push("runscBinary: differs from the already recorded binary");
     } else {
-      next.runscBinary = Object.freeze({ path, sha256: b!.sha256 as string, args: Object.freeze([...(args as string[])]) });
+      next.runscBinary = Object.freeze({ path, sha256: b!.sha256 as string, args: Object.freeze([...(args as string[])]), sidecars });
     }
+  }
+  if ("canaryManifestDigest" in values) {
+    const d = values.canaryManifestDigest;
+    const baseManifest = (next.image as ImageSpec).manifestDigest;
+    if (typeof d !== "string" || !DIGEST_PATTERN.test(d)) violations.push("canaryManifestDigest: must be sha256:<64 lowercase hex>");
+    else if (base.image.canaryManifestDigest !== null && base.image.canaryManifestDigest !== d) violations.push("canaryManifestDigest: differs from the already recorded digest");
+    else if (baseManifest !== null && baseManifest === d) violations.push("canaryManifestDigest: equals the base image's manifest digest; it must be the canary image's own manifest");
+    else next.image = Object.freeze({ ...(next.image as ImageSpec), canaryManifestDigest: d });
   }
   if ("dockerServerVersion" in values) {
     const v = values.dockerServerVersion;

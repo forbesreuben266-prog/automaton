@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { ALLOWED_SECURITY_OPTS, OPTIONAL_FIELDS, REQUIRED_FIELDS, SANDBOX_SPEC, resolveSpec, validateInspect } from "../../research-sandbox/index.js";
-import { CONTAINER_ID, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ENV, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, PROBE_COMMAND, RUN, SPEC, compliantInspect } from "./fixtures.js";
+import { CONTAINER_ID, FAKE_CANARY_MANIFEST_DIGEST, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ENV, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD, compliantInspect } from "./fixtures.js";
 
 const EXPECT = { run: RUN, purpose: "canary" as const, command: PROBE_COMMAND };
 const check = (mutate: (c: any) => void, spec = SPEC) => {
@@ -363,8 +363,8 @@ describe("v5 review: host file paths, attach flags, exact environment, metadata 
     expect(msg).not.toContain("super-secret-value");
   });
 
-  it("a correct ImageManifestDescriptor with the recorded digest is accepted; absent is accepted (classic image store)", () => {
-    expect(check((c) => { c.ImageManifestDescriptor = { mediaType: "application/vnd.oci.image.manifest.v1+json", digest: FAKE_MANIFEST_DIGEST, size: 1234, platform: { architecture: "amd64", os: "linux" } }; })).toBe("");
+  it("a correct ImageManifestDescriptor with the recorded canary digest is accepted (containerd store); absent is accepted when none is recorded (classic store)", () => {
+    expect(check((c) => { c.ImageManifestDescriptor = { mediaType: "application/vnd.oci.image.manifest.v1+json", digest: FAKE_CANARY_MANIFEST_DIGEST, size: 1234, platform: { architecture: "amd64", os: "linux" } }; }, SPEC_CONTAINERD)).toBe("");
     expect(check(() => {})).toBe("");
   });
 

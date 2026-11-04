@@ -11,7 +11,7 @@ import {
   type ContainerEngine, type ProcessResult,
 } from "../../research-sandbox/index.js";
 import {
-  CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, HOST_CANARY, HOST_PROC_VERSION, POLICY, PROBE_COMMAND, RUN, SPEC,
+  CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_CANARY_MANIFEST_DIGEST, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, HOST_CANARY, HOST_PROC_VERSION, POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD,
   compliantHostLayout, compliantInspect, compliantReport, fakeHostFs,
 } from "./fixtures.js";
 
@@ -99,10 +99,11 @@ describe("inspect binds the created container's actual image", () => {
     }
   });
 
-  it("keeps the manifest-descriptor rule unchanged: a reported descriptor must carry the recorded digest", () => {
+  it("a reported descriptor must carry the canary's recorded manifest digest (V2), never the base image's", () => {
     const descriptor = (digest: string) => (c: any) => { c.ImageManifestDescriptor = { mediaType: "application/vnd.oci.image.manifest.v1+json", digest, size: 1, platform: { os: "linux", architecture: "amd64" } }; };
-    expect(inspectViolations(descriptor(FAKE_MANIFEST_DIGEST))).toEqual([]);
-    expect(inspectViolations(descriptor(OTHER_ID)).join("\n")).toContain("ImageManifestDescriptor: must be a linux image manifest descriptor with the recorded digest");
+    expect(inspectViolations(descriptor(FAKE_CANARY_MANIFEST_DIGEST), SPEC_CONTAINERD)).toEqual([]);
+    expect(inspectViolations(descriptor(FAKE_MANIFEST_DIGEST), SPEC_CONTAINERD).join("\n")).toContain("ImageManifestDescriptor: must be a linux image manifest descriptor with the recorded canary manifest digest");
+    expect(inspectViolations(descriptor(OTHER_ID), SPEC_CONTAINERD).join("\n")).toContain("recorded canary manifest digest");
   });
 });
 

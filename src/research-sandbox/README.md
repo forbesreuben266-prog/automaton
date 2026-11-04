@@ -139,6 +139,18 @@ the verified one (canonical comparison); missing, malformed, unreadable or
 changed data refuses. After the canary the binary is verified again and must
 be the identical file.
 
+V2 extends this to gVisor's sidecar files:
+- `runscBinary.sidecars` lists every other gVisor file with its SHA-256:
+  the `gvisor-bin/` folder next to runsc, plus any package executable in a
+  system binary folder.
+- Each file is checked like runsc (root-owned chain, no symlinks, not
+  writable by group or others, no setuid/setgid, hashed through a no-follow
+  descriptor), before create and again after the canary.
+- The `gvisor-bin/` folder must contain exactly the recorded files; any
+  other entry refuses.
+- Not covered: shared libraries, and the containerd shim Docker uses to
+  start a runtime by path.
+
 Limits (why the M1 blocker remains):
 - Re-reads and re-checks only show the state at those moments. The daemon
   starts the runtime by path, between our reads; a reconfiguration or a

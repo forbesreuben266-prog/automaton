@@ -13,12 +13,14 @@ export const FAKE_GVISOR_PROC_VERSION = "Linux version 4.4.0 #1 SMP (fake gVisor
 export const HOST_PROC_VERSION = "Linux version 6.8.0-fake-host (test fixture) #1 SMP";
 export const FAKE_IMAGE_ENV = ["PATH=/usr/local/bin:/usr/bin:/bin", "NODE_VERSION=22.22.0", "YARN_VERSION=1.22.22"];
 export const FAKE_MANIFEST_DIGEST = `sha256:${"ef".repeat(32)}`;
+/** FAKE platform manifest digest of the locally built canary image (V2, Option B; containerd image store). */
+export const FAKE_CANARY_MANIFEST_DIGEST = `sha256:${"c3".repeat(32)}`;
 /** FAKE image ID of the locally built canary image (V1B); the created container's top-level Image. */
 export const FAKE_IMAGE_ID = `sha256:${"cd".repeat(32)}`;
 export const FAKE_DATA_ROOT = "/var/lib/docker";
 export const FAKE_RUNSC_PATH = "/usr/local/bin/runsc";
 export const FAKE_RUNSC_SHA256 = "5e".repeat(32);
-export const FAKE_RUNSC = Object.freeze({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, args: Object.freeze([] as string[]) });
+export const FAKE_RUNSC = Object.freeze({ path: FAKE_RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, args: Object.freeze([] as string[]), sidecars: Object.freeze([] as { path: string; sha256: string }[]) });
 /** FAKE Docker server version for tests (deliberately not a real release). */
 export const FAKE_DOCKER_SERVER_VERSION = "0.0.0-fake.test";
 /** Fully pinned spec (fake values); SANDBOX_SPEC itself has nothing pinned. */
@@ -27,6 +29,8 @@ export const SPEC = resolveSpec({
   imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
   dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID,
 });
+/** The same spec on a containerd-image-store host: the canary's own manifest digest recorded (V2, Option B). */
+export const SPEC_CONTAINERD = resolveSpec({ canaryManifestDigest: FAKE_CANARY_MANIFEST_DIGEST }, SPEC);
 /** `docker info` as parsed by the engine adapter: Docker with runc and runsc, built-in seccomp profile. */
 export const DOCKER_INFO = Object.freeze({
   engine: "docker" as const, rootless: false, runtimes: Object.freeze(["runc", "runsc"]), seccompProfile: "builtin",

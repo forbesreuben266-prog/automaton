@@ -276,15 +276,20 @@ export function validateInspect(raw: unknown, spec: SandboxSpec, expected: Inspe
   expect(typeof container.Driver === "string" && /^[a-z0-9_-]{1,32}$/.test(container.Driver) && isObj(container.GraphDriver) && container.Driver === container.GraphDriver.Name,
     "Driver: must be a driver name equal to GraphDriver.Name");
   expect(config.Hostname === spec.hostname, `Config.Hostname: must be "${spec.hostname}" (set by the create argv)`);
+  // V2 (Option B): the container's own image is the locally built canary, so a reported descriptor must carry the
+  // canary's recorded manifest digest. The base image's manifest digest must still be recorded (provenance).
   const imd = container.ImageManifestDescriptor;
   if (imd !== undefined) {
     const platform = isObj(imd) ? imd.platform : undefined;
     expect(spec.image.manifestDigest !== null, "ImageManifestDescriptor: reported, but no manifest digest has been recorded (approved pull step); refusing rather than guessing");
-    expect(isObj(imd) && Object.keys(imd).every((k) => MANIFEST_DESCRIPTOR_KEYS.has(k)) && imd.digest === spec.image.manifestDigest &&
+    expect(spec.image.canaryManifestDigest !== null, "ImageManifestDescriptor: reported, but no canary manifest digest has been recorded (approved canary build step); refusing rather than guessing");
+    expect(isObj(imd) && Object.keys(imd).every((k) => MANIFEST_DESCRIPTOR_KEYS.has(k)) && spec.image.canaryManifestDigest !== null && imd.digest === spec.image.canaryManifestDigest &&
       typeof imd.mediaType === "string" && MANIFEST_MEDIA_TYPES.has(imd.mediaType) && typeof imd.size === "number" && Number.isSafeInteger(imd.size) && imd.size > 0 &&
       (platform === undefined || (isObj(platform) && Object.keys(platform).every((k) => PLATFORM_KEYS.has(k)) && platform.os === "linux")) &&
       (imd.annotations === undefined || (isObj(imd.annotations) && Object.values(imd.annotations).every((x) => typeof x === "string"))),
-      "ImageManifestDescriptor: must be a linux image manifest descriptor with the recorded digest and only known keys");
+      "ImageManifestDescriptor: must be a linux image manifest descriptor with the recorded canary manifest digest and only known keys");
+  } else {
+    expect(spec.image.canaryManifestDigest === null, "ImageManifestDescriptor: a canary manifest digest is recorded, but the daemon reports no descriptor (contradictory; refusing)");
   }
 
   // Identity of this container

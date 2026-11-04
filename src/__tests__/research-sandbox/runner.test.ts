@@ -31,7 +31,7 @@ const config = (edit: (c: any) => void = () => {}) => {
     version: 1, engineBinary: "/usr/bin/docker", engineConfigDir: DOCKER_CONFIG_DIR, runId: "r1", hostCanaryPath: HOST_CANARY,
     operatorUid: OPERATOR_UID, outputOwnerUid: OUTPUT_UID,
     pins: {
-      imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, imageId: FAKE_IMAGE_ID,
+      imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, imageId: FAKE_IMAGE_ID, canaryManifestDigest: null,
       gvisorProcVersion: FAKE_GVISOR_PROC_VERSION, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] }, dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
     },
   };

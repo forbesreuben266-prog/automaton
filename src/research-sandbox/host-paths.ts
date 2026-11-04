@@ -32,7 +32,7 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { expectedContainerHostFiles, validateRunPaths, type RunPaths, type SandboxSpec } from "./spec.js";
+import { GVISOR_SIDECAR_DIR, expectedContainerHostFiles, validateRunPaths, type RunPaths, type SandboxSpec } from "./spec.js";
 import type { EngineInfo } from "./engine.js";
 
 export interface HostStat {
@@ -375,8 +375,8 @@ export function canonicalRuntimeConfig(info: EngineInfo, runtime: string): strin
   return JSON.stringify(canon(config));
 }
 
-/** What was verified: enough to detect replacement or modification later. */
-export interface RuntimeBinaryIdentity {
+/** One verified file: enough to detect replacement or modification later. */
+export interface RuntimeFileIdentity {
   readonly path: string;
   readonly sha256: string;
   readonly dev: string;
@@ -386,34 +386,50 @@ export interface RuntimeBinaryIdentity {
   readonly ctimeMs: number;
 }
 
+/** What was verified: the runsc binary, every recorded sidecar file, and the exact contents of its gvisor-bin folder. */
+export interface RuntimeBinaryIdentity extends RuntimeFileIdentity {
+  readonly sidecars: readonly RuntimeFileIdentity[];
+  /** Every entry found under <runsc folder>/gvisor-bin (sorted; empty when the folder doesn't exist). */
+  readonly sidecarListing: readonly string[];
+}
+
 export interface RuntimeBinaryCheck {
   readonly violations: readonly string[];
   readonly identity: RuntimeBinaryIdentity | null;
 }
 
+/** Most entries walked under the gvisor-bin folder (bounded; more refuses). */
+export const MAX_SIDECAR_ENTRIES = 256;
+
 /**
- * M1 host-side check of an isolating runtime (fakes-only in S1; not yet run
+ * M1 host-side check of an isolating runtime (fakes-only so far; not yet run
  * on a real host). Fails closed on anything missing or different:
- * 1. the approved binary (path, SHA-256; runtime args must be empty) must be
- *    recorded;
+ * 1. the approved binary (path, SHA-256, sidecars; runtime args must be
+ *    empty) must be recorded;
  * 2. `docker info` must configure the runtime exactly as runtimeConfigProblems
  *    requires (classic { path } form for that path, no runtime flags);
- * 3. "/" and every directory down to the binary: real directories (never
- *    symlinks), resolving to themselves, root-owned, not group/world-writable,
- *    so only root can replace the file;
- * 4. the binary: a regular root-owned file (never a symlink), executable, not
- *    group/world-writable, no setuid/setgid bit, resolving to itself;
+ * 3. "/" and every directory down to each checked file: real directories
+ *    (never symlinks), resolving to themselves, root-owned, not
+ *    group/world-writable, so only root can replace the file;
+ * 4. each file: a regular root-owned file (never a symlink), not
+ *    group/world-writable, no setuid/setgid bit, resolving to itself; runsc
+ *    must also be executable;
  * 5. its SHA-256, read through an O_NOFOLLOW|O_NONBLOCK descriptor (a FIFO
- *    swapped in can't block the open), equals the recorded
- *    value, and the descriptor's inode is the one lstat saw;
- * 6. lstat after hashing shows the same inode, size, mtime and ctime (no
- *    replacement or in-place change while it was read).
+ *    swapped in can't block the open), equals the recorded value, and the
+ *    descriptor's inode is the one lstat saw;
+ * 6. lstat after hashing shows the same inode, size, mtime and ctime;
+ * 7. (V2) every recorded sidecar file passes 3-6 against its own recorded
+ *    SHA-256, and the gvisor-bin folder next to runsc (when it exists)
+ *    contains exactly the recorded sidecars under it: an unrecorded file,
+ *    a symlink or any other entry refuses, as does a recorded sidecar that
+ *    is missing.
  * Limits: the daemon starts the runtime by path later (time-of-check/time-of-
- * use; only root can swap it under rule 3, and the preflight re-checks it
- * after the canary); `docker info` is the daemon's own report, so a dishonest
- * daemon can still run something else; and a matching hash identifies the
- * file, it does not prove the runtime isolates (gVisor flags, platform and
- * kernel still matter). These are why meets-spec stays blocked (M1, M3).
+ * use; only root can swap files under rule 3, and the preflight re-checks
+ * them after the canary); `docker info` is the daemon's own report, so a
+ * dishonest daemon can still run something else; files outside the runsc
+ * package that gVisor or the daemon may load (shared libraries, the
+ * containerd shim) are not covered; and matching hashes identify files, they
+ * don't prove the runtime isolates. These are why meets-spec stays blocked.
  */
 export function verifyRuntimeBinary(info: EngineInfo, runtime: string, spec: SandboxSpec, hostFs: HostFs): RuntimeBinaryCheck {
   const configProblems = runtimeConfigProblems(info, runtime, spec);
@@ -435,54 +451,105 @@ export function verifyRuntimeBinary(info: EngineInfo, runtime: string, spec: San
       v.push(`${path}: cannot be resolved (${(err as NodeJS.ErrnoException).code ?? "error"})`);
     }
   };
-  const parts = approved.path.split("/").filter(Boolean);
-  for (let i = 0; i < parts.length; i++) {
-    const dir = i === 0 ? "/" : `/${parts.slice(0, i).join("/")}`;
+  const checkedDirs = new Set<string>();
+  const checkDir = (dir: string): boolean => {
+    if (checkedDirs.has(dir)) return true;
+    checkedDirs.add(dir);
+    const before = v.length;
     const st = stat(dir);
-    if (!st) continue;
-    if (st.isSymbolicLink()) { v.push(`${dir}: is a symbolic link`); continue; }
-    if (!st.isDirectory()) { v.push(`${dir}: is not a directory`); continue; }
+    if (!st) return false;
+    if (st.isSymbolicLink()) { v.push(`${dir}: is a symbolic link`); return false; }
+    if (!st.isDirectory()) { v.push(`${dir}: is not a directory`); return false; }
     resolvesToItself(dir);
     if (st.uid !== 0) v.push(`${dir}: owned by uid ${st.uid}, not root`);
     if ((st.mode & 0o022) !== 0) v.push(`${dir}: writable by group or others (mode ${(st.mode & 0o777).toString(8)})`);
-  }
-  const before = stat(approved.path);
-  if (!before) return { violations: v, identity: null };
-  if (before.isSymbolicLink()) v.push(`${approved.path}: is a symbolic link`);
-  else if (!before.isFile()) v.push(`${approved.path}: is not a regular file`);
-  else {
-    resolvesToItself(approved.path);
-    if (before.uid !== 0) v.push(`${approved.path}: owned by uid ${before.uid}, not root`);
-    if ((before.mode & 0o022) !== 0) v.push(`${approved.path}: writable by group or others (mode ${(before.mode & 0o777).toString(8)})`);
-    if ((before.mode & 0o111) === 0) v.push(`${approved.path}: is not executable`);
-    if ((before.mode & 0o6000) !== 0) v.push(`${approved.path}: has a setuid or setgid bit`);
-  }
-  if (v.length > 0) return { violations: v, identity: null };
+    return v.length === before;
+  };
+  /** Rules 3-6 for one file; returns its identity or null (violations added). */
+  const checkFile = (path: string, expectedSha: string, requireExecutable: boolean): RuntimeFileIdentity | null => {
+    const start = v.length;
+    const parts = path.split("/").filter(Boolean);
+    for (let i = 0; i < parts.length; i++) checkDir(i === 0 ? "/" : `/${parts.slice(0, i).join("/")}`);
+    const before = stat(path);
+    if (!before) return null;
+    if (before.isSymbolicLink()) v.push(`${path}: is a symbolic link`);
+    else if (!before.isFile()) v.push(`${path}: is not a regular file`);
+    else {
+      resolvesToItself(path);
+      if (before.uid !== 0) v.push(`${path}: owned by uid ${before.uid}, not root`);
+      if ((before.mode & 0o022) !== 0) v.push(`${path}: writable by group or others (mode ${(before.mode & 0o777).toString(8)})`);
+      if (requireExecutable && (before.mode & 0o111) === 0) v.push(`${path}: is not executable`);
+      if ((before.mode & 0o6000) !== 0) v.push(`${path}: has a setuid or setgid bit`);
+    }
+    if (v.length > start) return null;
+    let digest: FileDigest;
+    try {
+      digest = hostFs.sha256File(path, RUNTIME_BINARY_MAX_BYTES);
+    } catch (err) {
+      v.push(`${path}: cannot be hashed (${(err as NodeJS.ErrnoException).code ?? "error"})`);
+      return null;
+    }
+    if (digest.dev !== String(before.dev) || digest.ino !== String(before.ino) || digest.size !== before.size) {
+      v.push(`${path}: the file hashed is not the file checked (replaced during verification)`);
+    }
+    if (digest.sha256 !== expectedSha) v.push(`${path}: SHA-256 does not match the recorded approved file`);
+    const after = stat(path);
+    if (after && (String(after.dev) !== String(before.dev) || String(after.ino) !== String(before.ino) || after.size !== before.size ||
+        after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.isSymbolicLink())) {
+      v.push(`${path}: changed while it was being verified`);
+    }
+    if (v.length > start) return null;
+    return Object.freeze({ path, sha256: digest.sha256, dev: digest.dev, ino: digest.ino, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs });
+  };
 
-  let digest: FileDigest;
-  try {
-    digest = hostFs.sha256File(approved.path, RUNTIME_BINARY_MAX_BYTES);
-  } catch (err) {
-    return { violations: [`${approved.path}: cannot be hashed (${(err as NodeJS.ErrnoException).code ?? "error"})`], identity: null };
+  const main = checkFile(approved.path, approved.sha256, true);
+  const sidecars = approved.sidecars.map((sc) => checkFile(sc.path, sc.sha256, false));
+
+  // Completeness of the gvisor-bin folder next to runsc: exactly the recorded sidecars under it, nothing else.
+  const sidecarDir = `${approved.path.slice(0, approved.path.lastIndexOf("/"))}/${GVISOR_SIDECAR_DIR}`;
+  const listing: string[] = [];
+  let dirExists = true;
+  try { hostFs.lstat(sidecarDir); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") dirExists = false;
+    else v.push(`${sidecarDir}: cannot be checked (${(err as NodeJS.ErrnoException).code ?? "error"})`);
   }
-  if (digest.dev !== String(before.dev) || digest.ino !== String(before.ino) || digest.size !== before.size) {
-    v.push(`${approved.path}: the file hashed is not the file checked (replaced during verification)`);
+  const recordedUnder = new Set(approved.sidecars.map((sc) => sc.path).filter((p) => p.startsWith(`${sidecarDir}/`)));
+  if (dirExists && checkDir(sidecarDir)) {
+    const walk = (dir: string, depth: number) => {
+      let names: string[];
+      try { names = hostFs.readdir(dir); } catch (err) { v.push(`${dir}: cannot be listed (${(err as NodeJS.ErrnoException).code ?? "error"})`); return; }
+      for (const name of [...names].sort()) {
+        const full = `${dir}/${name}`;
+        listing.push(full);
+        if (listing.length > MAX_SIDECAR_ENTRIES) { v.push(`${sidecarDir}: more than ${MAX_SIDECAR_ENTRIES} entries`); return; }
+        let st: HostStat;
+        try { st = hostFs.lstat(full); } catch (err) { v.push(`${full}: cannot be checked (${(err as NodeJS.ErrnoException).code ?? "error"})`); continue; }
+        if (st.isDirectory() && !st.isSymbolicLink()) {
+          if (depth >= 3) { v.push(`${full}: nested deeper than the recorded sidecars allow`); continue; }
+          if (checkDir(full)) walk(full, depth + 1);
+        } else if (!recordedUnder.has(full)) {
+          v.push(`${full}: is in ${sidecarDir} but is not a recorded sidecar file (every file runsc may execute must be recorded)`);
+        }
+      }
+    };
+    walk(sidecarDir, 0);
+  } else if (!dirExists && recordedUnder.size > 0) {
+    v.push(`${sidecarDir}: does not exist, but sidecar files are recorded in it`);
   }
-  if (digest.sha256 !== approved.sha256) v.push(`${approved.path}: SHA-256 does not match the recorded approved binary`);
-  const after = stat(approved.path);
-  if (after && (String(after.dev) !== String(before.dev) || String(after.ino) !== String(before.ino) || after.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.isSymbolicLink())) {
-    v.push(`${approved.path}: changed while it was being verified`);
+  if (v.length > 0 || main === null || sidecars.some((x) => x === null)) {
+    return { violations: v.length > 0 ? v : ["runtime binary: verification incomplete"], identity: null };
   }
-  if (v.length > 0) return { violations: v, identity: null };
   return {
     violations: [],
-    identity: Object.freeze({ path: approved.path, sha256: digest.sha256, dev: digest.dev, ino: digest.ino, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs }),
+    identity: Object.freeze({ ...main, sidecars: Object.freeze(sidecars as RuntimeFileIdentity[]), sidecarListing: Object.freeze(listing) }),
   };
 }
 
-/** True if a later verification found exactly the same file (path, hash, inode, size, times). */
+const sameFile = (a: RuntimeFileIdentity, b: RuntimeFileIdentity): boolean =>
+  a.path === b.path && a.sha256 === b.sha256 && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+
+/** True if a later verification found exactly the same files (runsc and every sidecar: path, hash, inode, size, times) and the same gvisor-bin listing. */
 export function sameRuntimeBinary(a: RuntimeBinaryIdentity, b: RuntimeBinaryIdentity): boolean {
-  return a.path === b.path && a.sha256 === b.sha256 && a.dev === b.dev && a.ino === b.ino && a.size === b.size &&
-    a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+  return sameFile(a, b) && a.sidecars.length === b.sidecars.length && a.sidecars.every((x, i) => sameFile(x, b.sidecars[i])) &&
+    a.sidecarListing.length === b.sidecarListing.length && a.sidecarListing.every((x, i) => x === b.sidecarListing[i]);
 }

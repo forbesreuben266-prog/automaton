@@ -37,8 +37,15 @@ out of the build context.
    `docs/V1-VPS-DEPLOYMENT-PLAN.md` section 7.
 4. **The compiled probe files**: their SHA-256 values, recorded from the
    reviewed build that produced them.
-5. **The platform manifest digest** (`image.manifestDigest`), when the
-   containerd image store reports one.
+5. **The platform manifest digests**, when the containerd image store reports
+   them:
+   - the base image's (`image.manifestDigest`, provenance);
+   - the canary's own (`image.canaryManifestDigest`, V2), which a container's
+     descriptor must match.
+
+`host-setup.sh` (in this folder) performs and records all of the above in
+one step. Its default is a dry run; `--execute` needs approval, and
+`--allow-base-pull` is needed for the one base-image download.
 
 ## Execution restrictions (applied by the preflight, not by this image)
 
