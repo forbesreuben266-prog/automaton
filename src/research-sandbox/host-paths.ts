@@ -32,7 +32,7 @@
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { GVISOR_SIDECAR_DIR, expectedContainerHostFiles, validateRunPaths, type RunPaths, type SandboxSpec } from "./spec.js";
+import { APPROVED_RUNSC_ARGS, GVISOR_SIDECAR_DIR, expectedContainerHostFiles, validateRunPaths, type RunPaths, type SandboxSpec } from "./spec.js";
 import type { EngineInfo } from "./engine.js";
 
 export interface HostStat {
@@ -355,10 +355,11 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v ===
 /**
  * The daemon-reported configuration of an isolating runtime must be exactly
  * the classic form for the recorded binary: { path: <recorded path> }, with
- * runtimeArgs absent or an empty array, and status (if reported) an object
- * of string values. Anything missing, malformed or extra refuses: a
+ * runtimeArgs EXACTLY APPROVED_RUNSC_ARGS (V2.4: ["--oci-seccomp"]; absent,
+ * empty or any other flag refuses), and status (if reported) an object of
+ * string values. Anything missing, malformed or extra refuses: a
  * runtimeType/shim form or options would run something other than the
- * checked binary, and no runsc flag is approved. Returns violations.
+ * checked binary. Returns violations.
  */
 export function runtimeConfigProblems(info: EngineInfo, runtime: string, spec: SandboxSpec): string[] {
   const approved = spec.runscBinary;
@@ -367,10 +368,10 @@ export function runtimeConfigProblems(info: EngineInfo, runtime: string, spec: S
   if (!isPlainObject(config)) return [`runtime binary: docker info reports no configuration for runtime "${runtime}"`];
   const v: string[] = [];
   const unknown = Object.keys(config).filter((k) => !RUNTIME_CONFIG_KEYS.has(k));
-  if (unknown.length > 0) v.push(`runtime binary: unsupported runtime configuration key(s) ${unknown.slice(0, 3).join(", ")} (only path, an empty runtimeArgs and status are verifiable)`);
+  if (unknown.length > 0) v.push(`runtime binary: unsupported runtime configuration key(s) ${unknown.slice(0, 3).join(", ")} (only path, runtimeArgs and status are verifiable)`);
   if (config.path !== approved.path) v.push(`runtime binary: docker info must configure ${runtime} with path ${approved.path} (got ${JSON.stringify(config.path)?.slice(0, 80)})`);
-  if (config.runtimeArgs !== undefined && !(Array.isArray(config.runtimeArgs) && config.runtimeArgs.length === 0)) {
-    v.push("runtime binary: runtimeArgs must be absent or empty (no runsc runtime flags are approved)");
+  if (!Array.isArray(config.runtimeArgs) || JSON.stringify(config.runtimeArgs) !== JSON.stringify(APPROVED_RUNSC_ARGS)) {
+    v.push(`runtime binary: runtimeArgs must be exactly ${JSON.stringify(APPROVED_RUNSC_ARGS)} (got ${JSON.stringify(config.runtimeArgs ?? null)?.slice(0, 80)}); see deploy/research-sandbox/enable-oci-seccomp.sh`);
   }
   if (config.status !== undefined && !(isPlainObject(config.status) && Object.values(config.status).every((x) => typeof x === "string"))) {
     v.push("runtime binary: status, when reported, must be an object of string values");

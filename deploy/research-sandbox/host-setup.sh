@@ -12,7 +12,8 @@
 #
 # --execute, in order, stopping at the first failure:
 #   1. read-only checks: root, repository files, Node 22, Docker rootful,
-#      seccomp builtin, runsc registered by path with no flags, runc default,
+#      seccomp builtin, runsc registered by path with exactly the flag
+#      --oci-seccomp (V2.4; see enable-oci-seccomp.sh), runc default,
 #      no leftover sandbox or setup containers;
 #   2. the pinned base image (pulled only with --allow-base-pull) and its
 #      digest, entrypoint, environment and platform manifest digest;
@@ -81,7 +82,7 @@ ok "Node 22 at $NODE_BIN"
 
 if [ "$EXECUTE" = 0 ]; then
   step "DRY RUN: nothing below has been done (no Docker call, no file written)"
-  plan "check: run as root; Docker CLI at $DOCKER; rootful; seccomp profile builtin; runsc registered by path with no flags; default runtime runc"
+  plan "check: run as root; Docker CLI at $DOCKER; rootful; seccomp profile builtin; runsc registered by path with exactly --oci-seccomp; default runtime runc"
   plan "check: no existing containers named research-sandbox-* or research-setup-*"
   plan "base image $BASE_REF: use if present; download it ONLY with --allow-base-pull"
   plan "record: base digest, entrypoint, environment (only $ENV_ALLOWED), platform manifest digest (one container CREATED, never started, removed)"
@@ -152,12 +153,13 @@ CHECK="$(jin "$INFO" '
   if(i.DefaultRuntime!=="runc") p.push("default runtime is not runc");
   const r=i.Runtimes&&i.Runtimes.runsc;
   if(!r||typeof r!=="object") p.push("runsc is not registered");
-  else { const extra=Object.keys(r).filter(k=>!["path","status"].includes(k)); if(extra.length) p.push("runsc registration has "+extra.join(", "));
+  else { const extra=Object.keys(r).filter(k=>!["path","runtimeArgs","status"].includes(k)); if(extra.length) p.push("runsc registration has "+extra.join(", "));
+         if(JSON.stringify(r.runtimeArgs)!==JSON.stringify(["--oci-seccomp"])) p.push("runsc runtimeArgs must be exactly [\"--oci-seccomp\"] (got "+JSON.stringify(r.runtimeArgs===undefined?null:r.runtimeArgs)+"); run deploy/research-sandbox/enable-oci-seccomp.sh first");
          if(typeof r.path!=="string"||!/^\/usr(\/local)?\/s?bin\/[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(r.path)) p.push("runsc path is not an absolute system binary path"); }
   process.stdout.write(p.join("; "));')" || die "cannot evaluate docker info"
 [ -z "$CHECK" ] || die "$CHECK"
 RUNSC_PATH="$(jin "$INFO" 'process.stdout.write(JSON.parse(process.env.J_IN).Runtimes.runsc.path)')" || die "cannot read the runsc path"
-ok "Docker $SERVER_VERSION, data root $DATA_ROOT, seccomp builtin, rootful, runsc at $RUNSC_PATH with no flags"
+ok "Docker $SERVER_VERSION, data root $DATA_ROOT, seccomp builtin, rootful, runsc at $RUNSC_PATH with exactly --oci-seccomp"
 LEFT="$("$DOCKER" ps -aq --filter name=^/research-sandbox- 2>/dev/null; "$DOCKER" ps -aq --filter name=^/research-setup- 2>/dev/null)" || die "docker ps failed"
 [ -z "$LEFT" ] || die "leftover research-sandbox-* or research-setup-* containers exist; remove them first"
 ok "no leftover sandbox or setup containers"
@@ -314,7 +316,7 @@ CONF_TMP="$(mktemp "$CONF_DIR/.preflight.XXXXXX")" || die "cannot create a tempo
   const cfg={version:1,engineBinary:"/usr/bin/docker",engineConfigDir:engineDir,runId,hostCanaryPath:canaryFile,operatorUid:0,outputOwnerUid:10001,
     pins:{imageDigest:b.digest,imageEntrypoint:b.entrypoint,imageEnv:b.env,imageManifestDigest:baseManifest==="none"?null:baseManifest,
           imageId,canaryManifestDigest:canaryManifest==="none"?null:canaryManifest,gvisorProcVersion:gvisor,dockerDataRoot:dataRoot,
-          runscBinary:{path:runsc,sha256:runscSha,args:[],sidecars:JSON.parse(sidecars)},dockerServerVersion:server}};
+          runscBinary:{path:runsc,sha256:runscSha,args:["--oci-seccomp"],sidecars:JSON.parse(sidecars)},dockerServerVersion:server}};
   process.stdout.write(JSON.stringify(cfg,null,2)+"\n");' \
   "$RUN_ID" "$BASE_FIELDS" "$DATA_ROOT" "$SERVER_VERSION" "$RUNSC_PATH" "$RUNSC_SHA" "$SIDECARS" "$IMAGE_ID" "$CANARY_MANIFEST" "$BASE_MANIFEST" "$GVISOR" "$CANARY_FILE" "$ENGINE_CONFIG_DIR" > "$CONF_TMP" ) \
   && chown root:root "$CONF_TMP" && chmod 600 "$CONF_TMP" && mv -f "$CONF_TMP" "$CONF" && cp "$CONF" "$OUT/preflight-config.json" || { rm -f -- "$CONF_TMP"; die "cannot write $CONF"; }

@@ -368,7 +368,7 @@ async function inspectAndProbe(
   const filesAfter = verifyContainerHostFiles(spec, inspected.containerId, options.hostFs, "present");
   steps.push("container-host-files-after-canary");
   if (filesAfter.length > 0) return fail(filesAfter);
-  return { violations: evaluateCanary(report, spec), report };
+  return { violations: evaluateCanary(report, spec, { isolating: spec.isolatingRuntimes.includes(runtime) }), report };
 }
 
 /**

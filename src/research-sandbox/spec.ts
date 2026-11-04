@@ -234,6 +234,12 @@ export const DOCKER_SERVER_VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4
 /** Root-owned system directories the approved runtime binary may live in. */
 export const RUNTIME_BINARY_DIRS = Object.freeze(["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin"]);
 /**
+ * V2.4: the runsc runtime flags, EXACTLY (required, in this order). --oci-seccomp makes gVisor load the
+ * container's seccomp profile inside the sandbox; without it runsc ignores the profile (runsc/boot/seccomp.go,
+ * flag default false) and the canary sees seccomp mode 0. No other flag is approved.
+ */
+export const APPROVED_RUNSC_ARGS: readonly string[] = Object.freeze(["--oci-seccomp"]);
+/**
  * The one configuration folder a recorded runsc package file may live in
  * (V2.1): the gVisor package ships /etc/containerd/runsc.toml (a dpkg
  * conffile configuring the containerd runsc shim). It is pinned by SHA-256
@@ -394,8 +400,8 @@ export function resolveSpec(overrides: unknown = {}, base: SandboxSpec = SANDBOX
       violations.push(`runscBinary.path: must be a file directly inside ${RUNTIME_BINARY_DIRS.join(", ")} (no dot-only or hidden names)`);
     } else if (typeof b!.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b!.sha256)) {
       violations.push("runscBinary.sha256: must be 64 lowercase hex characters");
-    } else if (!Array.isArray(args) || args.length !== 0) {
-      violations.push("runscBinary.args: must be an empty array (no runsc runtime flags are approved)");
+    } else if (!Array.isArray(args) || JSON.stringify(args) !== JSON.stringify(APPROVED_RUNSC_ARGS)) {
+      violations.push(`runscBinary.args: must be exactly ${JSON.stringify(APPROVED_RUNSC_ARGS)} (the only approved runsc flag)`);
     } else if (base.runscBinary !== null && JSON.stringify(base.runscBinary) !== JSON.stringify({ path, sha256: b!.sha256, args, sidecars })) {
       violations.push("runscBinary: differs from the already recorded binary");
     } else {

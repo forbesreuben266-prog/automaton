@@ -80,6 +80,13 @@ describe("host-setup.sh: static checks", () => {
     expect(TEXT).toContain('*) die "runsc package file $f is outside the recordable folders');
   });
 
+  it("V2.4: requires runsc registered with exactly [\"--oci-seccomp\"] and records exactly that flag", () => {
+    expect(TEXT).toContain('if(JSON.stringify(r.runtimeArgs)!==JSON.stringify(["--oci-seccomp"])) p.push(');
+    expect(TEXT).toContain('Object.keys(r).filter(k=>!["path","runtimeArgs","status"].includes(k))');
+    expect(TEXT).toContain('runscBinary:{path:runsc,sha256:runscSha,args:["--oci-seccomp"],sidecars:JSON.parse(sidecars)}');
+    expect(TEXT).not.toContain("args:[]");
+  });
+
   it("deletes only its own temporary build folder, behind a path guard", () => {
     const removals = LINES.filter((l) => /\brm\s+-[a-z]*r/.test(l));
     expect(removals).toHaveLength(1);

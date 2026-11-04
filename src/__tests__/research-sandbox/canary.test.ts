@@ -81,10 +81,10 @@ describe("canary evaluation", () => {
     // environment and filesystem
     ["proxy variable visible", (r: any) => { r.envNames.push("HTTPS_PROXY"); }, "environment"],
     ["root writable", (r: any) => { r.writes.root = "allowed"; }, "writing to / must fail with EROFS"],
-    ["root denied only by permission (EACCES is not read-only evidence)", (r: any) => { r.writes.root = "EACCES"; }, "writing to / must fail with EROFS (got EACCES)"],
+    ["root denied only by permission on a mount not reported ro (EACCES alone is not read-only evidence)", (r: any) => { r.writes.root = "EACCES"; r.fsMounts["/"] = ["rw,relatime"]; }, "writing to / must fail with EROFS, or EACCES on a mount reported \"ro\" (got EACCES"],
     ["app denied only by permission", (r: any) => { r.writes.app = "EPERM"; }, "/app must fail with EROFS"],
     ["input mount writable", (r: any) => { r.writes.input = "allowed"; }, "input mount must fail with EROFS"],
-    ["input mount denied only by permission", (r: any) => { r.writes.input = "EACCES"; }, "input mount must fail with EROFS (got EACCES)"],
+    ["input mount denied only by permission on a mount not reported ro", (r: any) => { r.writes.input = "EACCES"; r.fsMounts["/in"] = ["rw"]; }, "input mount must fail with EROFS, or EACCES on a mount reported \"ro\" (got EACCES"],
     ["output not writable", (r: any) => { r.writes.output = "EROFS"; }, "output mount must be writable"],
     ["tmp not writable", (r: any) => { r.writes.tmp = "ENOSPC"; }, "/tmp must be writable"],
     ["host canary readable", (r: any) => { r.hostCanaryRead = "readable"; }, "host canary"],

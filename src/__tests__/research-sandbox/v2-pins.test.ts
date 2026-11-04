@@ -78,7 +78,7 @@ const GOFER = `${SIDE}/helpers/runsc-gofer`;
 const SHA_SENTRY = "a1".repeat(32);
 const SHA_GOFER = "b2".repeat(32);
 const SIDECARS = [{ path: SENTRY, sha256: SHA_SENTRY }, { path: GOFER, sha256: SHA_GOFER }];
-const SPEC_SIDE = resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars: SIDECARS } }, resolveSpec({}, { ...SPEC, runscBinary: null }));
+const SPEC_SIDE = resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"], sidecars: SIDECARS } }, resolveSpec({}, { ...SPEC, runscBinary: null }));
 
 /** The compliant layout plus a gvisor-bin folder holding exactly the two recorded sidecars. */
 function sidecarLayout(): Record<string, FakeEntry> {
@@ -97,7 +97,7 @@ const verify = (mutate: (l: Record<string, FakeEntry>) => void = () => {}, spec 
 const msg = (r: ReturnType<typeof verify>) => r.violations.join("\n");
 
 describe("M1 sidecar coverage: recording", () => {
-  const rb = (sidecars: unknown) => ({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars } });
+  const rb = (sidecars: unknown) => ({ runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"], sidecars } });
   it("accepts sidecars inside gvisor-bin (nested) or directly in a system binary folder; stores them sorted and frozen", () => {
     const s = resolveSpec(rb([{ path: GOFER, sha256: SHA_GOFER }, { path: "/usr/bin/containerd-shim-runsc-v1", sha256: SHA_SENTRY }, { path: SENTRY, sha256: SHA_SENTRY }]));
     expect(s.runscBinary!.sidecars.map((x) => x.path)).toEqual(["/usr/bin/containerd-shim-runsc-v1", GOFER, SENTRY]);
@@ -128,8 +128,8 @@ describe("M1 sidecar coverage: recording", () => {
 describe("V2.1: the runsc package's /etc/containerd/runsc.toml is pinned, never ignored", () => {
   const TOML = "/etc/containerd/runsc.toml";
   const SHA_TOML = "ea5ada6422655b972fd3af73f7a23b88cc3385c98767cca2f360b2aa749d114c"; // the shipped release-20261102.0 example file
-  const rb = (sidecars: unknown) => ({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars } });
-  const SPEC_TOML = resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars: [...SIDECARS, { path: TOML, sha256: SHA_TOML }] } }, resolveSpec({}, { ...SPEC, runscBinary: null }));
+  const rb = (sidecars: unknown) => ({ runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"], sidecars } });
+  const SPEC_TOML = resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"], sidecars: [...SIDECARS, { path: TOML, sha256: SHA_TOML }] } }, resolveSpec({}, { ...SPEC, runscBinary: null }));
   const tomlLayout = (mutate: (l: Record<string, FakeEntry>) => void = () => {}) => {
     const l = sidecarLayout();
     l["/etc"] = { kind: "dir", uid: 0, mode: 0o40755, ino: 90 };

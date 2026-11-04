@@ -26,7 +26,7 @@ export const FAKE_DOCKER_SERVER_VERSION = "0.0.0-fake.test";
 /** Fully pinned spec (fake values); SANDBOX_SPEC itself has nothing pinned. */
 export const SPEC = resolveSpec({
   imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: FAKE_GVISOR_PROC_VERSION,
-  imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] },
+  imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"] },
   dockerServerVersion: FAKE_DOCKER_SERVER_VERSION, imageId: FAKE_IMAGE_ID,
 });
 /** The same spec on a containerd-image-store host: the canary's own manifest digest recorded (V2, Option B). */
@@ -34,7 +34,7 @@ export const SPEC_CONTAINERD = resolveSpec({ canaryManifestDigest: FAKE_CANARY_M
 /** `docker info` as parsed by the engine adapter: Docker with runc and runsc, built-in seccomp profile. */
 export const DOCKER_INFO = Object.freeze({
   engine: "docker" as const, rootless: false, runtimes: Object.freeze(["runc", "runsc"]), seccompProfile: "builtin",
-  runtimeConfigs: Object.freeze({ runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH } }),
+  runtimeConfigs: Object.freeze({ runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"] } }),
   serverVersion: FAKE_DOCKER_SERVER_VERSION,
 });
 export const RUN: RunPaths = { inputDir: "/srv/research-runs/r1/in", outputDir: "/srv/research-runs/r1/out", runId: "r1" };
@@ -208,7 +208,7 @@ export function compliantInspect(runtime = "runsc"): any {
 /** A compliant version-4 canary report as the probe would print it inside gVisor. */
 export function compliantReport(): any {
   return {
-    version: 4,
+    version: 5,
     uids: [10001, 10001, 10001, 10001],
     gids: [10001, 10001, 10001, 10001],
     groups: [],
@@ -230,6 +230,9 @@ export function compliantReport(): any {
     cgroupPidsMax: 64,
     procVersion: FAKE_GVISOR_PROC_VERSION,
     etcMounts: { "/etc/hosts": ["ro,nosuid,nodev,relatime"], "/etc/hostname": ["ro,nosuid,nodev,relatime"], "/etc/resolv.conf": ["ro,nosuid,nodev,relatime"] },
+    fsMounts: { "/": ["ro,relatime"], "/in": ["ro,nosuid,nodev,relatime"] },
+    cgroupV1: { memoryLimitInBytes: "", pidsMax: "" },
+    runtimeEnv: { HOSTNAME: null, HOME: null },
   };
 }
 
@@ -295,4 +298,19 @@ export function fakeHostFs(layout: Record<string, FakeEntry>): HostFs & { calls:
       return { sha256: e.sha256 ?? "0".repeat(64), dev: "64769", ino: String(e.ino), size: e.size ?? 4096 };
     },
   };
+}
+
+/** The report gVisor 20261102.0 gives once --oci-seccomp is on (findings 2-6 as observed on the VPS). */
+export function gvisorReport(): any {
+  const r = compliantReport();
+  r.seccompMode = 2;
+  r.envNames = [...r.envNames, "HOME", "HOSTNAME"].sort();
+  r.runtimeEnv = { HOSTNAME: "sandbox", HOME: "/" };
+  r.writes.root = "EACCES";
+  r.writes.input = "EACCES";
+  r.fsMounts = { "/": ["ro"], "/in": ["ro,nosuid,nodev"] };
+  r.cgroupMemoryMax = null;
+  r.cgroupPidsMax = null;
+  r.cgroupV1 = { memoryLimitInBytes: "536870912", pidsMax: "max" };
+  return r;
 }

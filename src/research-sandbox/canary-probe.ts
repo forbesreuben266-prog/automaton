@@ -24,7 +24,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import {
-  PROC_VERSION_MAX, parseCgroupMax, parseMountinfo, parseHasRoute, parseIdList, parseIpv6RouteDevices, parseLimits, parseNetDev, parseProcStatus,
+  FS_MOUNT_TARGETS, PROC_VERSION_MAX, parseCgroupMax, parseMountinfo, parseHasRoute, parseIdList, parseIpv6RouteDevices, parseLimits, parseNetDev, parseProcStatus,
   type CanaryReport, type ConnectResult, type WriteResult,
 } from "./canary.js";
 
@@ -82,14 +82,18 @@ function scanSockets(): { found: string[]; unreadable: string[] } {
   return { found: [...new Set(found)].sort(), unreadable: [...new Set(unreadable)].sort() };
 }
 
+/** V2.4: a short raw value of a cgroup v1 file ("" when absent or unreadable). */
+const cgroupV1Raw = (p: string) => readText(p).trim().slice(0, 32);
+
 export async function probe(hostCanaryPath: string): Promise<CanaryReport> {
   const status = parseProcStatus(readText("/proc/self/status"));
   let hostCanaryRead: CanaryReport["hostCanaryRead"] = "absent";
   try { fs.readFileSync(hostCanaryPath); hostCanaryRead = "readable"; } catch (err) {
     hostCanaryRead = (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "denied";
   }
+  const mountinfo = readText("/proc/self/mountinfo");
   return {
-    version: 4,
+    version: 5,
     uids: parseIdList(status.Uid),
     gids: parseIdList(status.Gid),
     groups: parseIdList(status.Groups),
@@ -110,7 +114,10 @@ export async function probe(hostCanaryPath: string): Promise<CanaryReport> {
     cgroupMemoryMax: parseCgroupMax(readText("/sys/fs/cgroup/memory.max") || "NaN"),
     cgroupPidsMax: parseCgroupMax(readText("/sys/fs/cgroup/pids.max") || "NaN"),
     procVersion: readText("/proc/version").trim().slice(0, PROC_VERSION_MAX + 1),
-    etcMounts: parseMountinfo(readText("/proc/self/mountinfo")),
+    etcMounts: parseMountinfo(mountinfo),
+    fsMounts: parseMountinfo(mountinfo, FS_MOUNT_TARGETS),
+    cgroupV1: { memoryLimitInBytes: cgroupV1Raw("/sys/fs/cgroup/memory/memory.limit_in_bytes"), pidsMax: cgroupV1Raw("/sys/fs/cgroup/pids/pids.max") },
+    runtimeEnv: { HOSTNAME: process.env.HOSTNAME ?? null, HOME: process.env.HOME ?? null },
   };
 }
 

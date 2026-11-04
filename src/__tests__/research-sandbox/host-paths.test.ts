@@ -226,8 +226,8 @@ describe("M1: host-side verification of the approved runtime binary (fakes only)
     ["a bare name resolved through the daemon's PATH", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: "runsc" } } }, "must configure runsc with path"],
     ["the runtimeType (shim) form, which runs a different binary", { ...DOCKER_INFO, runtimeConfigs: { runsc: { runtimeType: "io.containerd.runsc.v1" } } }, "unsupported runtime configuration key(s) runtimeType"],
     ["shim options alongside the path", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, options: { BinaryName: "/tmp/x" } } } }, "unsupported runtime configuration key(s) options"],
-    ["extra runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: ["--network=host"] } } }, "runtimeArgs must be absent or empty"],
-    ["malformed runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: "--debug" } } }, "runtimeArgs must be absent or empty"],
+    ["extra runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: ["--network=host"] } } }, "runtimeArgs must be exactly"],
+    ["malformed runtime args", { ...DOCKER_INFO, runtimeConfigs: { runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: "--debug" } } }, "runtimeArgs must be exactly"],
     ["config not an object", { ...DOCKER_INFO, runtimeConfigs: { runsc: "/usr/local/bin/runsc" } }, 'reports no configuration for runtime "runsc"'],
   ])("docker info with %s: refused", (_label, info, message) => {
     const r = verify(() => {}, info);
@@ -302,26 +302,30 @@ describe("C1, C3, C5: runtime arguments, FIFO hashing and status shape", () => {
   const cfg = (runsc: unknown) => verifyRuntimeBinary({ ...DOCKER_INFO, runtimeConfigs: { runsc } } as any, "runsc", SPEC, fakeHostFs(compliantHostLayout())).violations.join("\n");
 
   it.each([
-    ["absent runtimeArgs", { path: FAKE_RUNSC_PATH }],
-    ["empty runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: [] }],
-    ["an empty status object", { path: FAKE_RUNSC_PATH, status: {} }],
-    ["a status object of strings", { path: FAKE_RUNSC_PATH, status: { "org.opencontainers.runtime-spec.features": "{\"ociVersionMin\":\"1.0.0\"}" } }],
+    ["exactly the approved flag (V2.4)", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"] }],
+    ["an empty status object", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: {} }],
+    ["a status object of strings", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: { "org.opencontainers.runtime-spec.features": "{\"ociVersionMin\":\"1.0.0\"}" } }],
   ])("C1/C5 accepted: %s", (_label, runsc) => {
     expect(cfg(runsc)).toBe("");
   });
 
   it.each([
-    ["C1: one flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--platform=systrap"] }, "runtimeArgs must be absent or empty"],
-    ["C1: a host-path logging flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--debug-log=/etc/cron.d/x"] }, "runtimeArgs must be absent or empty"],
-    ["C1: null runtimeArgs (unexpected format)", { path: FAKE_RUNSC_PATH, runtimeArgs: null }, "runtimeArgs must be absent or empty"],
-    ["C1: string runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: "--rootless" }, "runtimeArgs must be absent or empty"],
-    ["C1: an empty-string arg", { path: FAKE_RUNSC_PATH, runtimeArgs: [""] }, "runtimeArgs must be absent or empty"],
-    ["C5: numeric status", { path: FAKE_RUNSC_PATH, status: 42 }, "status, when reported, must be an object of string values"],
-    ["C5: array status", { path: FAKE_RUNSC_PATH, status: ["a"] }, "status, when reported, must be an object of string values"],
-    ["C5: null status", { path: FAKE_RUNSC_PATH, status: null }, "status, when reported, must be an object of string values"],
-    ["C5: string status", { path: FAKE_RUNSC_PATH, status: "ok" }, "status, when reported, must be an object of string values"],
-    ["C5: non-string value", { path: FAKE_RUNSC_PATH, status: { a: 1 } }, "status, when reported, must be an object of string values"],
-    ["C5: nested object value", { path: FAKE_RUNSC_PATH, status: { a: { b: "c" } } }, "status, when reported, must be an object of string values"],
+    ["V2.4: absent runtimeArgs (in-sandbox seccomp would be off)", { path: FAKE_RUNSC_PATH }, "runtimeArgs must be exactly [\"--oci-seccomp\"]"],
+    ["V2.4: empty runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: [] }, "runtimeArgs must be exactly [\"--oci-seccomp\"]"],
+    ["V2.4: the approved flag twice", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp", "--oci-seccomp"] }, "runtimeArgs must be exactly"],
+    ["V2.4: the approved flag plus another", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp", "--network=host"] }, "runtimeArgs must be exactly"],
+    ["V2.4: the flag with an explicit value", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp=false"] }, "runtimeArgs must be exactly"],
+    ["C1: one flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--platform=systrap"] }, "runtimeArgs must be exactly"],
+    ["C1: a host-path logging flag", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--debug-log=/etc/cron.d/x"] }, "runtimeArgs must be exactly"],
+    ["C1: null runtimeArgs (unexpected format)", { path: FAKE_RUNSC_PATH, runtimeArgs: null }, "runtimeArgs must be exactly"],
+    ["C1: string runtimeArgs", { path: FAKE_RUNSC_PATH, runtimeArgs: "--rootless" }, "runtimeArgs must be exactly"],
+    ["C1: an empty-string arg", { path: FAKE_RUNSC_PATH, runtimeArgs: [""] }, "runtimeArgs must be exactly"],
+    ["C5: numeric status", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: 42 }, "status, when reported, must be an object of string values"],
+    ["C5: array status", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: ["a"] }, "status, when reported, must be an object of string values"],
+    ["C5: null status", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: null }, "status, when reported, must be an object of string values"],
+    ["C5: string status", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: "ok" }, "status, when reported, must be an object of string values"],
+    ["C5: non-string value", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: { a: 1 } }, "status, when reported, must be an object of string values"],
+    ["C5: nested object value", { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"], status: { a: { b: "c" } } }, "status, when reported, must be an object of string values"],
   ])("refused: %s", (_label, runsc, message) => {
     expect(cfg(runsc)).toContain(message);
   });

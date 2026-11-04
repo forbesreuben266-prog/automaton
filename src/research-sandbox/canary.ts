@@ -10,12 +10,17 @@
  *   IPv4 routes / IPv6 route devices              /proc/net/route, /proc/net/ipv6_route
  *   outbound attempt (supplementary only)         TCP connect to 192.0.2.1:9
  *   environment names                             process.env
- *   read-only evidence                            write attempts; must fail with EROFS
+ *   read-only evidence                            write attempts: EROFS, or (V2.4) EACCES
+ *     together with mountinfo showing that mount "ro" (gVisor checks write
+ *     permission before the read-only flag: overlay/filesystem.go)
  *   writable mounts                               write+delete of a marker file
  *   host canary                                   read of an unmounted host path
  *   sockets                                       directory scan for socket files
  *   rlimits (soft and hard)                       /proc/self/limits
- *   cgroup memory / pids                          /sys/fs/cgroup/memory.max, pids.max
+ *   cgroup memory / pids                          /sys/fs/cgroup/memory.max, pids.max (v2), or
+ *     (V2.4, gVisor's default in-sandbox cgroup v1) /sys/fs/cgroup/memory/
+ *     memory.limit_in_bytes and /sys/fs/cgroup/pids/pids.max
+ *   runtime-injected environment (V2.4)          HOSTNAME (Docker) and HOME (the runtime)
  *   kernel identity (gVisor evidence)             /proc/version
  *   /etc/hosts, /etc/hostname, /etc/resolv.conf   /proc/self/mountinfo per-mount options: each
  *     mounted exactly once and read-only ("ro"). A write attempt can't show
@@ -41,8 +46,11 @@ export type ConnectResult = "unreachable" | "refused" | "timeout" | "connected" 
 export type WriteResult = string;
 export interface LimitPair { readonly soft: number | null; readonly hard: number | null }
 
+/** V2.4: raw cgroup v1 values as gVisor reports them (trimmed, at most 32 characters; "" when absent). */
+export interface CgroupV1Observation { readonly memoryLimitInBytes: string; readonly pidsMax: string }
+
 export interface CanaryReport {
-  readonly version: 4;
+  readonly version: 5;
   /** [real, effective, saved, filesystem] */
   readonly uids: readonly number[];
   readonly gids: readonly number[];
@@ -67,21 +75,36 @@ export interface CanaryReport {
   readonly procVersion: string;
   /** Per-mount options of every mountinfo entry for each Docker-managed /etc file. */
   readonly etcMounts: Readonly<Record<EtcMountTarget, readonly string[]>>;
+  /** V2.4: per-mount options of every mountinfo entry for "/" and the input mount. */
+  readonly fsMounts: Readonly<Record<FsMountTarget, readonly string[]>>;
+  /** V2.4: cgroup v1 observations (gVisor's default in-sandbox layout). */
+  readonly cgroupV1: CgroupV1Observation;
+  /** V2.4: values of the two variables Docker and the runtime inject (null when unset). Nothing else's value is ever reported. */
+  readonly runtimeEnv: Readonly<Record<RuntimeEnvName, string | null>>;
 }
+
+/** V2.4: variables added outside the image and create argv: HOSTNAME by Docker (daemon/container/container.go), HOME by the runtime when unset (gVisor fsimpl/user/user.go; runc likewise). */
+export const RUNTIME_ENV_NAMES = ["HOSTNAME", "HOME"] as const;
+export type RuntimeEnvName = (typeof RUNTIME_ENV_NAMES)[number];
+/** V2.4: mounts whose read-only state is evidenced from mountinfo when a write fails with EACCES. */
+export const FS_MOUNT_TARGETS = ["/", "/in"] as const;
+export type FsMountTarget = (typeof FS_MOUNT_TARGETS)[number];
 
 export const ETC_MOUNT_TARGETS = ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"] as const;
 export type EtcMountTarget = (typeof ETC_MOUNT_TARGETS)[number];
 
 /** Per-mount options (field 6) of each /proc/self/mountinfo entry whose mount point (field 5) is a target. */
-export function parseMountinfo(text: string): Record<EtcMountTarget, string[]> {
+export function parseMountinfo(text: string): Record<EtcMountTarget, string[]>;
+export function parseMountinfo<T extends string>(text: string, targets: readonly T[]): Record<T, string[]>;
+export function parseMountinfo(text: string, targets: readonly string[] = ETC_MOUNT_TARGETS): Record<string, string[]> {
   if (typeof text !== "string") throw new TypeError("mountinfo text must be a string");
-  const out = Object.fromEntries(ETC_MOUNT_TARGETS.map((t) => [t, [] as string[]])) as Record<EtcMountTarget, string[]>;
+  const out = Object.fromEntries(targets.map((t) => [t, [] as string[]])) as Record<string, string[]>;
   const unescape = (x: string) => x.replace(/\\([0-7]{3})/g, (_m, o) => String.fromCharCode(parseInt(o, 8)));
   for (const line of text.split("\n")) {
     const fields = line.trim().split(" ");
     if (fields.length < 6) continue;
     const mountPoint = unescape(fields[4]);
-    if ((ETC_MOUNT_TARGETS as readonly string[]).includes(mountPoint)) out[mountPoint as EtcMountTarget].push(fields[5]);
+    if (targets.includes(mountPoint)) out[mountPoint].push(fields[5]);
   }
   return out;
 }
@@ -152,12 +175,29 @@ export function parseCgroupMax(text: string): number | null {
 }
 
 /** Evaluates a report (parsed JSON from the probe). Returns violations; empty means every required observation passed. */
-export function evaluateCanary(raw: unknown, spec: SandboxSpec): string[] {
+export interface CanaryContext {
+  /**
+   * V2.4: true when the container ran under an isolating runtime (gVisor). Only then is a cgroup v1 layout accepted,
+   * and only then may in-sandbox pids.max read "max": gVisor applies the pids limit to the sandbox's HOST cgroup
+   * (runsc/cgroup) and never copies it into its own cgroupfs (fsimpl/cgroupfs/pids.go). The isolating runtime must
+   * still be positively identified afterwards (verifyGvisorEvidence), or the result refuses.
+   */
+  readonly isolating: boolean;
+}
+
+/** Exactly one mountinfo entry for the target, and its options say "ro" (and not "rw"). */
+const mountedReadOnly = (mounts: unknown, target: string) => {
+  const entries = isObj(mounts) ? mounts[target] : undefined;
+  const opts = Array.isArray(entries) && entries.length === 1 && typeof entries[0] === "string" ? entries[0].split(",") : null;
+  return opts !== null && opts.includes("ro") && !opts.includes("rw");
+};
+
+export function evaluateCanary(raw: unknown, spec: SandboxSpec, context: CanaryContext = { isolating: false }): string[] {
   const v: string[] = [];
   if (!isObj(raw)) return ["canary report: must be an object"];
   const r = raw;
   const expect = (cond: boolean, msg: string) => { if (!cond) v.push(msg); };
-  expect(r.version === 4, "canary report: unsupported version");
+  expect(r.version === 5, "canary report: unsupported version");
   expect(procVersionOk(r.procVersion), "kernel: /proc/version must be observed (printable, starting \"Linux version \")");
 
   const [uid, gid] = spec.user.split(":").map(Number);
@@ -175,14 +215,25 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec): string[] {
   expect(r.testNetConnect === "unreachable" || r.testNetConnect === "refused" || r.testNetConnect === "timeout",
     `network: the supplementary outbound attempt must fail (got ${String(r.testNetConnect)})`);
 
-  const allowed = new Set([...spec.envAllowlist, ...spec.imageEnvAllowlist]);
-  expect(Array.isArray(r.envNames) && r.envNames.every((n) => typeof n === "string" && allowed.has(n)), "environment: only allowlisted variable names may be present");
+  // V2.4: HOSTNAME and HOME are injected by Docker and the runtime; allowed only with their exact expected values.
+  const allowed = new Set<string>([...spec.envAllowlist, ...spec.imageEnvAllowlist, ...RUNTIME_ENV_NAMES]);
+  const names = Array.isArray(r.envNames) ? r.envNames : null;
+  const unexpected = names === null ? [] : names.filter((n) => typeof n !== "string" || !allowed.has(n)).map((n) => String(n).replace(/[^A-Za-z0-9_]/g, "?").slice(0, 64));
+  expect(names !== null && unexpected.length === 0, `environment: only allowlisted variable names may be present (unexpected: ${JSON.stringify(unexpected.slice(0, 10))})`);
+  const renv = isObj(r.runtimeEnv) ? r.runtimeEnv : {};
+  const present = (n: string) => names !== null && names.includes(n);
+  expect(Object.keys(renv).length === RUNTIME_ENV_NAMES.length && RUNTIME_ENV_NAMES.every((n) => n in renv), "environment: runtimeEnv must report exactly HOSTNAME and HOME");
+  expect(present("HOSTNAME") ? renv.HOSTNAME === spec.hostname : renv.HOSTNAME === null, `environment: HOSTNAME must be "${spec.hostname}" (set by the create argv)`);
+  expect(present("HOME") ? renv.HOME === "/" : renv.HOME === null, 'environment: HOME, when injected by the runtime, must be "/" (uid without a passwd entry)');
 
-  // Read-only evidence must be EROFS: EACCES only shows lack of permission, not a read-only mount.
+  // Read-only evidence: EROFS, or EACCES PLUS the mount's own "ro" flag. EACCES alone only shows a lack of permission;
+  // gVisor checks permission before the read-only flag, so a non-root write to a root-owned folder gives EACCES there.
   const w = isObj(r.writes) ? r.writes : {};
-  expect(w.root === "EROFS", `filesystem: writing to / must fail with EROFS (got ${String(w.root)})`);
-  expect(w.app === "EROFS", `filesystem: writing to /app must fail with EROFS (got ${String(w.app)})`);
-  expect(w.input === "EROFS", `filesystem: writing to the input mount must fail with EROFS (got ${String(w.input)})`);
+  const readOnly = (got: unknown, target: FsMountTarget) => got === "EROFS" || (got === "EACCES" && mountedReadOnly(r.fsMounts, target));
+  const fsm = isObj(r.fsMounts) ? r.fsMounts : {};
+  expect(readOnly(w.root, "/"), `filesystem: writing to / must fail with EROFS, or EACCES on a mount reported "ro" (got ${String(w.root)}; mount options ${JSON.stringify(fsm["/"])})`);
+  expect(readOnly(w.app, "/"), `filesystem: writing to /app must fail with EROFS, or EACCES on a mount reported "ro" (got ${String(w.app)})`);
+  expect(readOnly(w.input, "/in"), `filesystem: writing to the input mount must fail with EROFS, or EACCES on a mount reported "ro" (got ${String(w.input)}; mount options ${JSON.stringify(fsm["/in"])})`);
   expect(w.output === "allowed", "filesystem: the output mount must be writable");
   expect(w.tmp === "allowed", "filesystem: /tmp must be writable");
   expect(r.hostCanaryRead === "absent" || r.hostCanaryRead === "denied", "filesystem: the unmounted host canary file must not be readable");
@@ -205,10 +256,21 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec): string[] {
       expect(typeof got === "number" && Number.isSafeInteger(got) && got <= max, `limits: ${name} ${kind} limit must be at most ${max} (got ${String(got)})`);
     }
   }
-  expect(typeof r.cgroupMemoryMax === "number" && Number.isSafeInteger(r.cgroupMemoryMax) && r.cgroupMemoryMax > 0 && r.cgroupMemoryMax <= spec.memoryBytes,
-    `limits: cgroup memory.max must be at most ${spec.memoryBytes} (got ${JSON.stringify(r.cgroupMemoryMax) ?? "undefined"})`);
-  expect(typeof r.cgroupPidsMax === "number" && Number.isSafeInteger(r.cgroupPidsMax) && r.cgroupPidsMax > 0 && r.cgroupPidsMax <= spec.pidsLimit,
-    `limits: cgroup pids.max must be at most ${spec.pidsLimit} (got ${JSON.stringify(r.cgroupPidsMax) ?? "undefined"})`);
+  // cgroup v2 values when present; otherwise (gVisor's default in-sandbox cgroup v1, isolating runtime only) the v1 files.
+  const bounded = (x: unknown, max: number) => typeof x === "number" && Number.isSafeInteger(x) && x > 0 && x <= max;
+  const v1 = isObj(r.cgroupV1) ? r.cgroupV1 : {};
+  const v1Ok = Object.keys(v1).length === 2 && typeof v1.memoryLimitInBytes === "string" && typeof v1.pidsMax === "string";
+  const v1Num = (x: unknown) => (typeof x === "string" && /^\d{1,19}$/.test(x) ? Number(x) : Number.NaN);
+  const v2Absent = (x: unknown) => x === null || x === undefined;
+  expect(v1Ok, "limits: cgroupV1 must report memoryLimitInBytes and pidsMax as strings");
+  const memV1 = context.isolating && v2Absent(r.cgroupMemoryMax) && v1Ok && bounded(v1Num(v1.memoryLimitInBytes), spec.memoryBytes);
+  expect(bounded(r.cgroupMemoryMax, spec.memoryBytes) || memV1,
+    `limits: cgroup memory.max (v2) or, under gVisor, memory/memory.limit_in_bytes (v1) must be at most ${spec.memoryBytes} (got v2 ${JSON.stringify(r.cgroupMemoryMax) ?? "undefined"}, v1 ${JSON.stringify(v1.memoryLimitInBytes) ?? "undefined"})`);
+  // pids: an in-sandbox v1 "max" is accepted ONLY together with the v1 memory evidence above (the same runsc cgroup
+  // setup that applies the host-side pids limit); HostConfig.PidsLimit is checked by inspect. A numeric v1 value must be in range.
+  const pidsV1 = context.isolating && v2Absent(r.cgroupPidsMax) && v1Ok && memV1 && (v1.pidsMax === "max" || bounded(v1Num(v1.pidsMax), spec.pidsLimit));
+  expect(bounded(r.cgroupPidsMax, spec.pidsLimit) || pidsV1,
+    `limits: cgroup pids.max (v2) must be at most ${spec.pidsLimit}, or under gVisor the v1 layout with the memory limit observed (got v2 ${JSON.stringify(r.cgroupPidsMax) ?? "undefined"}, v1 ${JSON.stringify(v1.pidsMax) ?? "undefined"})`);
   return v;
 }
 

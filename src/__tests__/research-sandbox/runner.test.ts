@@ -32,7 +32,7 @@ const config = (edit: (c: any) => void = () => {}) => {
     operatorUid: OPERATOR_UID, outputOwnerUid: OUTPUT_UID,
     pins: {
       imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST, imageId: FAKE_IMAGE_ID, canaryManifestDigest: null,
-      gvisorProcVersion: FAKE_GVISOR_PROC_VERSION, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: [] }, dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
+      gvisorProcVersion: FAKE_GVISOR_PROC_VERSION, dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { ...FAKE_RUNSC, args: ["--oci-seccomp"] }, dockerServerVersion: FAKE_DOCKER_SERVER_VERSION,
     },
   };
   edit(c);
@@ -47,7 +47,7 @@ function fakeDocker(o: { info?: Record<string, unknown>; removeLeaves?: boolean 
   let started = false;
   const info = {
     ServerVersion: FAKE_DOCKER_SERVER_VERSION, SecurityOptions: ["name=apparmor", "name=seccomp,profile=builtin", "name=cgroupns"],
-    Runtimes: { runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH } }, ...o.info,
+    Runtimes: { runc: { path: "runc" }, runsc: { path: FAKE_RUNSC_PATH, runtimeArgs: ["--oci-seccomp"] } }, ...o.info,
   };
   const runner: ProcessRunner = async (file, args) => {
     calls.push([file, ...args]);
@@ -179,7 +179,7 @@ describe("fail closed before any engine call", () => {
     ["an unrecorded pin", config((c) => { c.pins.gvisorProcVersion = null; }), "pins.gvisorProcVersion: is not recorded (null); the preflight can't run without it"],
     ["an unknown pin", config((c) => { c.pins.seccompProfile = "unconfined"; }), "pins.seccompProfile: is not a recognised pin"],
     ["a malformed digest (refused by resolveSpec)", config((c) => { c.pins.imageDigest = "sha256:abc"; }), "imageDigest: must be sha256:<64 lowercase hex>"],
-    ["runtime flags on runsc (refused by resolveSpec)", config((c) => { c.pins.runscBinary.args = ["--platform=ptrace"]; }), "runscBinary.args: must be an empty array (no runsc runtime flags are approved)"],
+    ["runtime flags on runsc (refused by resolveSpec)", config((c) => { c.pins.runscBinary.args = ["--platform=ptrace"]; }), 'runscBinary.args: must be exactly ["--oci-seccomp"]'],
     ["a non-allowlisted engine binary (refused by createCliEngine)", config((c) => { c.engineBinary = "/tmp/docker"; }), "engine binary must be one of /usr/bin/docker"],
     ["a bad run id", config((c) => { c.runId = "../x"; }), "runId: must be lower-case letters, digits and hyphens"],
     ["another version", config((c) => { c.version = 2; }), "version: must be 1"],

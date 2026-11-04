@@ -115,8 +115,8 @@ describe("V2.3: canary violations carry the observed value (diagnostics only; th
   it.each([
     ["seccompMode", 0, "seccomp: a filter must be active (mode 2) (got 0)"],
     ["noNewPrivs", 0, "no_new_privs: must be set (got 0)"],
-    ["cgroupMemoryMax", Number.NaN, "limits: cgroup memory.max must be at most 536870912 (got null)"],
-    ["cgroupPidsMax", 4096, "limits: cgroup pids.max must be at most 64 (got 4096)"],
+    ["cgroupMemoryMax", Number.NaN, 'limits: cgroup memory.max (v2) or, under gVisor, memory/memory.limit_in_bytes (v1) must be at most 536870912 (got v2 null, v1 "")'],
+    ["cgroupPidsMax", 4096, 'limits: cgroup pids.max (v2) must be at most 64, or under gVisor the v1 layout with the memory limit observed (got v2 4096, v1 "")'],
   ])("%s", (key, value, message) => {
     const report = { ...compliantReport(), [key]: value };
     expect(evaluateCanary(report, SPEC)).toContain(message);

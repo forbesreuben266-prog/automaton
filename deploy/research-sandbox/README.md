@@ -47,6 +47,15 @@ out of the build context.
 one step. Its default is a dry run; `--execute` needs approval, and
 `--allow-base-pull` is needed for the one base-image download.
 
+**V2.4 prerequisite: in-sandbox seccomp under gVisor.** runsc ignores the
+container's seccomp profile unless it runs with `--oci-seccomp` (gVisor
+`runsc/boot/seccomp.go`), so the canary would see seccomp mode 0. The
+preflight and `host-setup.sh` therefore require runsc to be registered with
+exactly `"runtimeArgs": ["--oci-seccomp"]`. `enable-oci-seccomp.sh` (this
+folder) makes that one change in `/etc/docker/daemon.json`: dry run by
+default; `--execute` (root, approval needed) writes a backup, reloads Docker
+(no restart) and verifies `docker info`.
+
 ## Execution restrictions (applied by the preflight, not by this image)
 
 User `10001:10001`, `--read-only`, `--network none`, `--cap-drop ALL`,
