@@ -24,7 +24,9 @@
  *     daemon/runtime-attested), which stays blocked.
  */
 
+import childProcess from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { APPROVED_RUNSC_ARGS, MEETS_SPEC_BLOCKERS, evaluateCanary, parseMountinfo } from "../../research-sandbox/index.js";
@@ -72,8 +74,9 @@ describe("V2.4 finding 2: runtime-injected HOSTNAME and HOME, exact values only"
     ["HOME pointing elsewhere", (r: any) => { r.runtimeEnv.HOME = "/root"; }, 'HOME, when injected by the runtime, must be "/"'],
     ["HOME listed but its value not reported", (r: any) => { r.runtimeEnv.HOME = null; }, "HOME, when injected"],
     ["a value reported for an unset name", (r: any) => { r.envNames = r.envNames.filter((n: string) => n !== "HOME"); }, "HOME, when injected"],
-    ["runtimeEnv missing", (r: any) => { delete r.runtimeEnv; }, "runtimeEnv must report exactly HOSTNAME and HOME"],
-    ["runtimeEnv with another variable", (r: any) => { r.runtimeEnv.PWD = "/app"; }, "runtimeEnv must report exactly HOSTNAME and HOME"],
+    ["runtimeEnv missing", (r: any) => { delete r.runtimeEnv; }, "runtimeEnv must report exactly HOSTNAME, HOME and PWD"],
+    ["runtimeEnv with another variable", (r: any) => { r.runtimeEnv.OLDPWD = "/"; }, "runtimeEnv must report exactly HOSTNAME, HOME and PWD"],
+    ["runtimeEnv without PWD (an older probe)", (r: any) => { delete r.runtimeEnv.PWD; }, "runtimeEnv must report exactly HOSTNAME, HOME and PWD"],
     ["another unexpected name, listed", (r: any) => { r.envNames.push("HTTPS_PROXY", "TERM"); }, 'unexpected: ["HTTPS_PROXY","TERM"]'],
     ["a name with odd characters is sanitised in the message", (r: any) => { r.envNames.push("A=B\n"); }, 'unexpected: ["A?B?"]'],
   ])("%s: refused", (_l, mutate, message) => {
@@ -145,12 +148,60 @@ describe("V2.4 keeps M1/M3 blocked and the probe reports the new observations", 
     expect(MEETS_SPEC_BLOCKERS.map((b) => b.slice(0, 3))).toEqual(["M1:", "M3:"]);
   });
 
-  it("the probe collects fsMounts, cgroupV1 and runtimeEnv (only HOSTNAME and HOME values) and reports version 5", () => {
+  it("the probe collects fsMounts, cgroupV1 and runtimeEnv (only HOSTNAME, HOME and PWD values) and reports version 6", () => {
     const src = fs.readFileSync(path.resolve(__dirname, "../../research-sandbox/canary-probe.ts"), "utf8");
-    expect(src).toContain("version: 5,");
+    expect(src).toContain("version: 6,");
     expect(src).toContain("fsMounts: parseMountinfo(mountinfo, FS_MOUNT_TARGETS),");
     expect(src).toContain('cgroupV1: { memoryLimitInBytes: cgroupV1Raw("/sys/fs/cgroup/memory/memory.limit_in_bytes"), pidsMax: cgroupV1Raw("/sys/fs/cgroup/pids/pids.max") },');
-    expect(src).toContain("runtimeEnv: { HOSTNAME: process.env.HOSTNAME ?? null, HOME: process.env.HOME ?? null },");
-    expect(src.match(/process\.env\.[A-Z]/g)).toEqual(["process.env.H", "process.env.H"]); // no other variable's value is read
+    expect(src).toContain("runtimeEnv: { HOSTNAME: process.env.HOSTNAME ?? null, HOME: process.env.HOME ?? null, PWD: process.env.PWD ?? null },");
+    expect(src.match(/process\.env\.[A-Z]+/g)).toEqual(["process.env.HOSTNAME", "process.env.HOME", "process.env.PWD"]); // no other variable's value is read
+  });
+});
+
+/**
+ * V2.4.2: PWD. Source: the pinned base image's entrypoint, docker-entrypoint.sh (#!/bin/sh; /bin/sh is dash on
+ * Debian), which ends in `exec "$@"`; dash exports PWD (the working directory) to the program it execs. Neither
+ * Docker (no "PWD" in moby daemon/) nor runsc's container path sets it. Allowed with exactly the value /app.
+ */
+describe("V2.4.2: PWD exported by the entrypoint shell, exact value only", () => {
+  it("the gVisor report as now observed (PWD=/app) is accepted", () => {
+    expect(evaluateCanary(gvisorReport(), SPEC, G)).toEqual([]);
+  });
+
+  it("the VPS failure is reproduced by the V2.4.1 rules' input: PWD listed but no value reported refuses", () => {
+    expect(ev((r) => { r.runtimeEnv.PWD = null; })).toContain('PWD, when exported by the entrypoint shell, must be "/app"');
+  });
+
+  it.each([
+    ["another directory", "/"], ["a host path", "/var/lib/docker"], ["a trailing slash", "/app/"], ["a relative path", "app"], ["empty", ""],
+  ])("PWD as %s: refused", (_l, value) => {
+    expect(ev((r) => { r.runtimeEnv.PWD = value; })).toContain('PWD, when exported by the entrypoint shell, must be "/app"');
+  });
+
+  it("a PWD value reported while PWD is not in the environment: refused", () => {
+    expect(ev((r) => { r.envNames = r.envNames.filter((n: string) => n !== "PWD"); })).toContain("PWD, when exported");
+  });
+
+  it("without PWD (an entrypoint that exports nothing) it must be reported as null, and that passes", () => {
+    expect(ev((r) => { r.envNames = r.envNames.filter((n: string) => n !== "PWD"); r.runtimeEnv.PWD = null; })).toBe("");
+  });
+
+  it("only PWD was added: OLDPWD, SHLVL, _ and other shell variables are still refused, and listed", () => {
+    expect(ev((r) => { r.envNames.push("OLDPWD", "SHLVL", "_"); })).toContain('unexpected: ["OLDPWD","SHLVL","_"]');
+  });
+
+  it("the mechanism: /bin/sh running a script that ends in exec hands PWD (the working directory) to the next program", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pwd-"));
+    try {
+      const out = childProcess.execFileSync("/bin/sh", ["-c", 'set -e; exec /usr/bin/env'], { cwd: dir, env: {}, encoding: "utf8" });
+      const names = out.split("\n").filter(Boolean).map((l) => l.split("=")[0]);
+      expect(names).toContain("PWD");
+      expect(out).toContain(`PWD=${fs.realpathSync(dir)}`);
+      expect(names.filter((n) => n !== "PWD" && n !== "SHLVL" && n !== "_")).toEqual([]); // nothing else (bash may add SHLVL/_; dash adds neither)
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("a version 5 report (probe without PWD) is refused", () => {
+    expect(ev((r) => { r.version = 5; })).toContain("canary report: unsupported version");
   });
 });

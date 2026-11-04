@@ -50,7 +50,7 @@ export interface LimitPair { readonly soft: number | null; readonly hard: number
 export interface CgroupV1Observation { readonly memoryLimitInBytes: string; readonly pidsMax: string }
 
 export interface CanaryReport {
-  readonly version: 5;
+  readonly version: 6;
   /** [real, effective, saved, filesystem] */
   readonly uids: readonly number[];
   readonly gids: readonly number[];
@@ -83,8 +83,15 @@ export interface CanaryReport {
   readonly runtimeEnv: Readonly<Record<RuntimeEnvName, string | null>>;
 }
 
-/** V2.4: variables added outside the image and create argv: HOSTNAME by Docker (daemon/container/container.go), HOME by the runtime when unset (gVisor fsimpl/user/user.go; runc likewise). */
-export const RUNTIME_ENV_NAMES = ["HOSTNAME", "HOME"] as const;
+/**
+ * Variables added outside the image config and the create argv, each allowed ONLY with its exact value:
+ * HOSTNAME by Docker (daemon/container/container.go); HOME by the runtime when unset (gVisor fsimpl/user/user.go;
+ * runc likewise); V2.4.2: PWD by the pinned image's entrypoint (docker-entrypoint.sh runs under /bin/sh = dash,
+ * which exports PWD, the working directory /app, to the program it execs).
+ */
+export const RUNTIME_ENV_NAMES = ["HOSTNAME", "HOME", "PWD"] as const;
+/** V2.4.2: the container's working directory (inspect requires Config.WorkingDir to be exactly this). */
+export const SANDBOX_WORKDIR = "/app";
 export type RuntimeEnvName = (typeof RUNTIME_ENV_NAMES)[number];
 /** V2.4: mounts whose read-only state is evidenced from mountinfo when a write fails with EACCES. */
 export const FS_MOUNT_TARGETS = ["/", "/in"] as const;
@@ -197,7 +204,7 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec, context: CanaryC
   if (!isObj(raw)) return ["canary report: must be an object"];
   const r = raw;
   const expect = (cond: boolean, msg: string) => { if (!cond) v.push(msg); };
-  expect(r.version === 5, "canary report: unsupported version");
+  expect(r.version === 6, "canary report: unsupported version");
   expect(procVersionOk(r.procVersion), "kernel: /proc/version must be observed (printable, starting \"Linux version \")");
 
   const [uid, gid] = spec.user.split(":").map(Number);
@@ -215,16 +222,17 @@ export function evaluateCanary(raw: unknown, spec: SandboxSpec, context: CanaryC
   expect(r.testNetConnect === "unreachable" || r.testNetConnect === "refused" || r.testNetConnect === "timeout",
     `network: the supplementary outbound attempt must fail (got ${String(r.testNetConnect)})`);
 
-  // V2.4: HOSTNAME and HOME are injected by Docker and the runtime; allowed only with their exact expected values.
+  // HOSTNAME, HOME and PWD are injected outside the image config and create argv; allowed only with their exact values.
   const allowed = new Set<string>([...spec.envAllowlist, ...spec.imageEnvAllowlist, ...RUNTIME_ENV_NAMES]);
   const names = Array.isArray(r.envNames) ? r.envNames : null;
   const unexpected = names === null ? [] : names.filter((n) => typeof n !== "string" || !allowed.has(n)).map((n) => String(n).replace(/[^A-Za-z0-9_]/g, "?").slice(0, 64));
   expect(names !== null && unexpected.length === 0, `environment: only allowlisted variable names may be present (unexpected: ${JSON.stringify(unexpected.slice(0, 10))})`);
   const renv = isObj(r.runtimeEnv) ? r.runtimeEnv : {};
   const present = (n: string) => names !== null && names.includes(n);
-  expect(Object.keys(renv).length === RUNTIME_ENV_NAMES.length && RUNTIME_ENV_NAMES.every((n) => n in renv), "environment: runtimeEnv must report exactly HOSTNAME and HOME");
+  expect(Object.keys(renv).length === RUNTIME_ENV_NAMES.length && RUNTIME_ENV_NAMES.every((n) => n in renv), "environment: runtimeEnv must report exactly HOSTNAME, HOME and PWD");
   expect(present("HOSTNAME") ? renv.HOSTNAME === spec.hostname : renv.HOSTNAME === null, `environment: HOSTNAME must be "${spec.hostname}" (set by the create argv)`);
   expect(present("HOME") ? renv.HOME === "/" : renv.HOME === null, 'environment: HOME, when injected by the runtime, must be "/" (uid without a passwd entry)');
+  expect(present("PWD") ? renv.PWD === SANDBOX_WORKDIR : renv.PWD === null, `environment: PWD, when exported by the entrypoint shell, must be "${SANDBOX_WORKDIR}" (the working directory)`);
 
   // Read-only evidence: EROFS, or EACCES PLUS the mount's own "ro" flag. EACCES alone only shows a lack of permission;
   // gVisor checks permission before the read-only flag, so a non-root write to a root-owned folder gives EACCES there.

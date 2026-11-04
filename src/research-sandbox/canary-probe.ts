@@ -93,7 +93,7 @@ export async function probe(hostCanaryPath: string): Promise<CanaryReport> {
   }
   const mountinfo = readText("/proc/self/mountinfo");
   return {
-    version: 5,
+    version: 6,
     uids: parseIdList(status.Uid),
     gids: parseIdList(status.Gid),
     groups: parseIdList(status.Groups),
@@ -117,7 +117,7 @@ export async function probe(hostCanaryPath: string): Promise<CanaryReport> {
     etcMounts: parseMountinfo(mountinfo),
     fsMounts: parseMountinfo(mountinfo, FS_MOUNT_TARGETS),
     cgroupV1: { memoryLimitInBytes: cgroupV1Raw("/sys/fs/cgroup/memory/memory.limit_in_bytes"), pidsMax: cgroupV1Raw("/sys/fs/cgroup/pids/pids.max") },
-    runtimeEnv: { HOSTNAME: process.env.HOSTNAME ?? null, HOME: process.env.HOME ?? null },
+    runtimeEnv: { HOSTNAME: process.env.HOSTNAME ?? null, HOME: process.env.HOME ?? null, PWD: process.env.PWD ?? null },
   };
 }
 

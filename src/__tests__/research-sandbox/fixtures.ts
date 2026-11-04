@@ -208,7 +208,7 @@ export function compliantInspect(runtime = "runsc"): any {
 /** A compliant version-4 canary report as the probe would print it inside gVisor. */
 export function compliantReport(): any {
   return {
-    version: 5,
+    version: 6,
     uids: [10001, 10001, 10001, 10001],
     gids: [10001, 10001, 10001, 10001],
     groups: [],
@@ -232,7 +232,7 @@ export function compliantReport(): any {
     etcMounts: { "/etc/hosts": ["ro,nosuid,nodev,relatime"], "/etc/hostname": ["ro,nosuid,nodev,relatime"], "/etc/resolv.conf": ["ro,nosuid,nodev,relatime"] },
     fsMounts: { "/": ["ro,relatime"], "/in": ["ro,nosuid,nodev,relatime"] },
     cgroupV1: { memoryLimitInBytes: "", pidsMax: "" },
-    runtimeEnv: { HOSTNAME: null, HOME: null },
+    runtimeEnv: { HOSTNAME: null, HOME: null, PWD: null },
   };
 }
 
@@ -304,8 +304,8 @@ export function fakeHostFs(layout: Record<string, FakeEntry>): HostFs & { calls:
 export function gvisorReport(): any {
   const r = compliantReport();
   r.seccompMode = 2;
-  r.envNames = [...r.envNames, "HOME", "HOSTNAME"].sort();
-  r.runtimeEnv = { HOSTNAME: "sandbox", HOME: "/" };
+  r.envNames = [...r.envNames, "HOME", "HOSTNAME", "PWD"].sort();
+  r.runtimeEnv = { HOSTNAME: "sandbox", HOME: "/", PWD: "/app" };
   r.writes.root = "EACCES";
   r.writes.input = "EACCES";
   r.fsMounts = { "/": ["ro"], "/in": ["ro,nosuid,nodev"] };
