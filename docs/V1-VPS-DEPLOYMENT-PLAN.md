@@ -37,11 +37,13 @@ it.
 - **gVisor binary:** `runsc` must be a root-owned, non-setuid regular file
   in `/usr/bin` or `/usr/local/bin`, not writable by group or others. Every
   directory above it must be root-owned with no symlinks.
-- **gVisor registration:** classic form only,
-  `"runtimes": {"runsc": {"path": "/usr/local/bin/runsc"}}`, with **no**
-  `runtimeArgs`, `runtimeType` or options. Check `daemon.json` by hand after
-  any install helper runs.
-- **Unverified until tested on the host:** gVisor's seccomp compatibility.
+- **gVisor registration:** classic form only, with exactly one runtime flag
+  (V2.4): `"runtimes": {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs":
+  ["--oci-seccomp"]}}`, and **no** `runtimeType` or options. Without
+  `--oci-seccomp`, runsc ignores the seccomp profile (canary mode 0); see
+  `deploy/research-sandbox/enable-oci-seccomp.sh`. Verified on the host:
+  `docs/V2-SANDBOX-PREFLIGHT-VERIFIED.md`.
+- **Tested on the host (V2.4, now passing with `--oci-seccomp`):** gVisor's seccomp compatibility.
   - The canary requires `Seccomp: 2` in `/proc/self/status` inside the
     container.
   - Whether runsc applies the daemon's built-in profile, and how gVisor
@@ -59,7 +61,7 @@ the runner configuration.
 |---|---|
 | `dockerServerVersion` | `docker info` -> `ServerVersion` |
 | `dockerDataRoot` | `docker info` -> `DockerRootDir` |
-| `runscBinary` | Path, plus the SHA-256 computed on the host; `args: []` |
+| `runscBinary` | Path, plus the SHA-256 computed on the host; `args: ["--oci-seccomp"]` (V2.4) |
 | `imageDigest`, `imageEntrypoint`, `imageEnv`, `imageManifestDigest` | Recorded at the one approved base-image pull (`imageManifestDigest` may be `null` on a classic image store; see the manifest conflict in section 7) |
 | `imageId` | The full ID (`sha256:<64 hex>`) of the locally built canary image, recorded at the approved build (section 7) |
 | `gvisorProcVersion` | `/proc/version` inside one container started under `runsc` from the pinned image. It must differ from the host's. This is a trust-on-first-use fingerprint and needs its own approval (one Docker run) |

@@ -38,7 +38,7 @@ supplied with them.
 | Gap | Why it matters | Repository rule it affects |
 |---|---|---|
 | gVisor not **positively identified** | A runtime *named* `runsc` proves nothing. The echo test would also succeed under runc. No `/proc/version` comparison was made | gVisor evidence (`gvisorProcVersion`); M1 |
-| Exact runtime configuration | It's unknown whether the apt package's automatic configuration added `runtimeArgs`, `runtimeType` or options | `runtimeConfigProblems`; spec requires `args: []` |
+| Exact runtime configuration | It's unknown whether the apt package's automatic configuration added `runtimeArgs`, `runtimeType` or options | `runtimeConfigProblems`; spec requires `args: []` (since V2.4: exactly `["--oci-seccomp"]`) |
 | Binary identity | No SHA-256 of `/usr/bin/runsc`, and no inventory or hashes of the new `gvisor-bin/` sidecar binaries | `runscBinary` pin; **M1 gap**: the repository verifies only `runsc` |
 | Seccomp profile value | "seccomp listed" isn't the same as `name=seccomp,profile=builtin` | Preflight requires `builtin`; M3 |
 | `Seccomp: 2` under gVisor | Untested | Canary requirement; M3 |
