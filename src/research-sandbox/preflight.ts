@@ -69,6 +69,7 @@ import {
   canonicalRuntimeConfig, readHostProcVersion, runtimeConfigProblems, sameIdentities, sameRuntimeBinary, verifyContainerHostFiles, verifyRuntimeBinary,
   type RuntimeBinaryIdentity, verifyEngineTarget, verifyRunDirectories, type HostFs, type HostPathPolicy,
 } from "./host-paths.js";
+import { hostProcessViolations, summarizeHostProcesses, type HostProcessEvidence, type HostProcessObserver } from "./host-processes.js";
 import { validateFinishedInspect, validateInspect } from "./inspect.js";
 import {
   DOCKER_SERVER_VERSION_PATTERN, SandboxSpecError, buildCreateArgs, containerName, imageReference, securityArgsHash, validateRunPaths,
@@ -112,6 +113,8 @@ export interface PreflightResult {
   readonly binding: RunBinding | null;
   /** Present whenever a container may have been created. */
   readonly cleanup: CleanupOutcome | null;
+  /** Step A3: which host processes ran the canary (host /proc), when observed. */
+  readonly hostProcessEvidence: HostProcessEvidence | null;
 }
 
 export interface PreflightOptions {
@@ -124,6 +127,11 @@ export interface PreflightOptions {
   readonly hostPolicy: HostPathPolicy;
   /** Command inside the image that runs the probe (S3 image). */
   readonly probeCommand?: readonly string[];
+  /**
+   * Step A3: samples host /proc while the canary runs. REQUIRED for an isolating runtime (refused before create
+   * without it); optional otherwise, where it is only recorded.
+   */
+  readonly hostProcesses?: HostProcessObserver;
 }
 
 /**
@@ -143,7 +151,7 @@ const PROBE_CANARY_FLAG = "--canary";
 function result(fields: Partial<PreflightResult> & { violations: string[]; steps: string[] }): PreflightResult {
   return Object.freeze({
     rating: "refused" as IsolationRating, allowsUntrustedInput: false, runtime: null, engine: null,
-    hostTrust: "operator-attested-only" as const, binding: null, cleanup: null,
+    hostTrust: "operator-attested-only" as const, binding: null, cleanup: null, hostProcessEvidence: null,
     ...fields,
     violations: Object.freeze([...fields.violations]),
     steps: Object.freeze([...fields.steps]),
@@ -249,6 +257,9 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     }
     binary = check.identity;
     steps.push("runtime-binary-verified");
+    if (options.hostProcesses === undefined) {
+      return result({ violations: ["host processes: no host process observer was provided (required to show that gVisor, not a shared-kernel runtime, runs the canary)"], steps: [...steps, "host-process-observer-missing"], engine: info, runtime });
+    }
   }
   const name = containerName(run.runId, "canary");
   try {
@@ -270,6 +281,8 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   let id: string | null = null;
   let violations: string[] = [];
   let report: unknown;
+  let hostProcessEvidence: HostProcessEvidence | null = null;
+  const runtimeExecutables = binary === null ? [] : [binary.path, ...binary.sidecars.map((s) => s.path)];
   try {
     id = await engine.create(args, imageRef);
     steps.push("create");
@@ -279,7 +292,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
       violations = fresh;
     } else {
       if (runtimeConfig !== null) steps.push("runtime-config-rechecked-after-create");
-      ({ violations, report } = await inspectAndProbe(options, id, runtime, command, before.identities, steps));
+      ({ violations, report, hostProcessEvidence } = await inspectAndProbe(options, id, runtime, command, before.identities, steps, runtimeExecutables));
     }
   } catch (err) {
     violations = [`preflight error: ${(err as Error).message}`];
@@ -289,17 +302,17 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   const cleanup = await removeAndVerify(engine, id, name);
   steps.push(cleanup.verifiedRemoved ? "removed-verified" : "remove-unverified");
   if (!cleanup.verifiedRemoved) violations = [...violations, `cleanup: ${cleanup.detail} (container ${cleanup.containerId ?? cleanup.containerName}; manual cleanup required)`];
-  if (violations.length > 0) return result({ violations, steps, engine: info, runtime, cleanup });
+  if (violations.length > 0) return result({ violations, steps, engine: info, runtime, cleanup, hostProcessEvidence });
 
   // M1: the same runtime configuration and the same binary must still be in place after the canary ran.
   if (binary !== null && runtimeConfig !== null) {
     const fresh = await recheckRuntimeConfig(engine, runtime, spec, runtimeConfig, "after the canary");
-    if (fresh.length > 0) return result({ violations: fresh, steps: [...steps, "runtime-config-changed"], engine: info, runtime, cleanup });
+    if (fresh.length > 0) return result({ violations: fresh, steps: [...steps, "runtime-config-changed"], engine: info, runtime, cleanup, hostProcessEvidence });
     steps.push("runtime-config-rechecked-after-canary");
     const again = verifyRuntimeBinary(info, runtime, spec, options.hostFs);
     if (again.violations.length > 0 || again.identity === null || !sameRuntimeBinary(binary, again.identity)) {
       return result({ violations: again.violations.length > 0 ? [...again.violations] : ["runtime binary: changed between the check before create and the re-check after the canary"],
-        steps: [...steps, "runtime-binary-changed"], engine: info, runtime, cleanup });
+        steps: [...steps, "runtime-binary-changed"], engine: info, runtime, cleanup, hostProcessEvidence });
     }
     steps.push("runtime-binary-rechecked");
   }
@@ -308,16 +321,16 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   let gvisorVerified = false;
   if (spec.isolatingRuntimes.includes(runtime)) {
     const gvisor = verifyGvisorEvidence(report, spec, readHostProcVersion());
-    if (gvisor.length > 0) return result({ violations: gvisor, steps: [...steps, "gvisor-unverified"], engine: info, runtime, cleanup });
+    if (gvisor.length > 0) return result({ violations: gvisor, steps: [...steps, "gvisor-unverified"], engine: info, runtime, cleanup, hostProcessEvidence });
     steps.push("gvisor-verified");
     gvisorVerified = true;
   }
   const rating = rate(info, runtime, spec, gvisorVerified);
   if (rating === "refused") {
-    return result({ violations: [...MEETS_SPEC_BLOCKERS], steps: [...steps, "meets-spec-blocked"], engine: info, runtime, cleanup });
+    return result({ violations: [...MEETS_SPEC_BLOCKERS], steps: [...steps, "meets-spec-blocked"], engine: info, runtime, cleanup, hostProcessEvidence });
   }
   return result({
-    rating, allowsUntrustedInput: rating === "meets-spec", runtime, engine: info, violations: [], steps, cleanup,
+    rating, allowsUntrustedInput: rating === "meets-spec", runtime, engine: info, violations: [], steps, cleanup, hostProcessEvidence,
     binding: Object.freeze({
       runId: run.runId, inputDir: run.inputDir, outputDir: run.outputDir, imageRef, runtime,
       securityArgsSha256: securityArgsHash(args, spec),
@@ -330,9 +343,10 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
 
 async function inspectAndProbe(
   options: PreflightOptions, id: string, runtime: string, command: readonly string[],
-  identities: Parameters<typeof sameIdentities>[0], steps: string[],
-): Promise<{ violations: string[]; report: unknown }> {
-  const fail = (violations: string[]) => ({ violations, report: undefined });
+  identities: Parameters<typeof sameIdentities>[0], steps: string[], runtimeExecutables: readonly string[],
+): Promise<{ violations: string[]; report: unknown; hostProcessEvidence: HostProcessEvidence | null }> {
+  let hostProcessEvidence: HostProcessEvidence | null = null;
+  const fail = (violations: string[]) => ({ violations, report: undefined, hostProcessEvidence });
   const { engine, spec, run } = options;
   const inspected = validateInspect(await engine.inspect(id), spec, { run, purpose: "canary", command });
   steps.push("inspect");
@@ -350,7 +364,15 @@ async function inspectAndProbe(
   steps.push(pending ? "container-host-files-pending" : "container-host-files");
   if (hostFiles.length > 0) return fail(hostFiles);
 
-  const r = await engine.start(id, Math.min(spec.timeoutMs, CANARY_TIMEOUT_CAP_MS), CANARY_OUTPUT_CAP);
+  // Step A3: sample host /proc for the whole time the canary runs (always stopped, even if start throws).
+  const watch = options.hostProcesses?.start(inspected.containerId);
+  let r: Awaited<ReturnType<typeof engine.start>>;
+  try {
+    r = await engine.start(id, Math.min(spec.timeoutMs, CANARY_TIMEOUT_CAP_MS), CANARY_OUTPUT_CAP);
+  } finally {
+    const observed = watch?.stop();
+    hostProcessEvidence = observed === undefined ? null : summarizeHostProcesses(observed, runtimeExecutables);
+  }
   steps.push("canary");
   if (r.timedOut) return fail(["canary: timed out (the engine CLI was killed; the container is force-removed and removal verified next)"]);
   if (r.truncated) return fail(["canary: output exceeded the cap"]);
@@ -360,6 +382,12 @@ async function inspectAndProbe(
   try { report = JSON.parse(r.stdout); } catch {
     return fail([`canary: output is not JSON (stdout ${Buffer.byteLength(r.stdout, "utf8")} bytes, stderr ${Buffer.byteLength(r.stderr, "utf8")} bytes)`]);
   }
+  // Step A3: under an isolating runtime, gVisor (not a shared-kernel runtime) must be seen running the canary.
+  if (spec.isolatingRuntimes.includes(runtime)) {
+    const hv = hostProcessEvidence === null ? ["host processes: no observation was made"] : hostProcessViolations(hostProcessEvidence);
+    steps.push("host-process-evidence");
+    if (hv.length > 0) return fail(hv);
+  }
   // V2.2: re-inspect the stopped container (always, both formats): same container, clean exit, exact host-file paths;
   // then the host files themselves, which now exist.
   const finished = validateFinishedInspect(await engine.inspect(id), spec, { run, purpose: "canary", containerId: inspected.containerId, runtime });
@@ -368,7 +396,7 @@ async function inspectAndProbe(
   const filesAfter = verifyContainerHostFiles(spec, inspected.containerId, options.hostFs, "present");
   steps.push("container-host-files-after-canary");
   if (filesAfter.length > 0) return fail(filesAfter);
-  return { violations: evaluateCanary(report, spec, { isolating: spec.isolatingRuntimes.includes(runtime) }), report };
+  return { violations: evaluateCanary(report, spec, { isolating: spec.isolatingRuntimes.includes(runtime) }), report, hostProcessEvidence };
 }
 
 /**

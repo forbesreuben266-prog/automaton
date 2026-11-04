@@ -132,7 +132,12 @@ export interface ProbeMainDeps {
   readonly probe: (hostCanaryPath: string) => Promise<CanaryReport>;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  /** Step A3: waits after the report is written, so the host can observe which processes run the canary. */
+  readonly hold?: () => Promise<void>;
 }
+
+/** Step A3: how long the probe stays alive after writing its report (host /proc sampling window). */
+export const PROBE_HOLD_MS = 1500;
 
 /**
  * V2.3: the probe's entry point. Exit codes: 0 = one JSON report written to
@@ -154,6 +159,7 @@ export async function runProbeMain(argv: readonly string[], deps: ProbeMainDeps)
     return 1;
   }
   deps.stdout(`${JSON.stringify(report)}\n`);
+  await deps.hold?.();
   return 0;
 }
 
@@ -167,5 +173,6 @@ if (isEntryPoint()) {
   void runProbeMain(process.argv, {
     inside: insideCanaryContainer, probe,
     stdout: (t) => { process.stdout.write(t); }, stderr: (t) => { process.stderr.write(t); },
+    hold: () => new Promise((resolve) => { setTimeout(resolve, PROBE_HOLD_MS); }),
   }).then((code) => { process.exitCode = code; });
 }

@@ -12,7 +12,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_CANARY_MANIFEST_DIGEST, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION,
-  POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, type FakeEntry,
+  POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, fakeHostProcesses, type FakeEntry,
 } from "./fixtures.js";
 
 const EXPECT = { run: RUN, purpose: "canary" as const, command: PROBE_COMMAND };
@@ -248,7 +248,7 @@ describe("preflight with sidecars and the canary manifest digest (fake engine)",
     return { e, calls };
   }
   const go = (e: ContainerEngine, hostFs: HostFs = fakeHostFs(sidecarLayout()), spec = SPEC_ALL) =>
-    runPreflight({ engine: e, spec, run: RUN, hostCanaryPath: HOST_CANARY, hostFs, hostPolicy: POLICY });
+    runPreflight({ engine: e, spec, run: RUN, hostCanaryPath: HOST_CANARY, hostFs, hostPolicy: POLICY, hostProcesses: fakeHostProcesses() });
 
   it("every check passes, including sidecars and the canary's descriptor: still refused only by M1/M3", async () => {
     const r = await go(engine(FAKE_CANARY_MANIFEST_DIGEST).e);

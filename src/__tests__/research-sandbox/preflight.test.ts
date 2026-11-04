@@ -11,7 +11,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_CONFIG_DIR, DOCKER_INFO, ENGINE_TARGET, FAKE_DOCKER_SERVER_VERSION, FAKE_IMAGE_ID, FAKE_DATA_ROOT, FAKE_IMAGE_ENV, FAKE_MANIFEST_DIGEST, FAKE_RUNSC, FAKE_DIGEST, FAKE_ENTRYPOINT, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC,
-  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, docker29Inspect, CONTAINER_HOST_FILES, gvisorReport,
+  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, docker29Inspect, CONTAINER_HOST_FILES, gvisorReport, fakeHostProcesses,
 } from "./fixtures.js";
 
 const NAME = "research-sandbox-r1-canary";
@@ -28,7 +28,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 /** A result shaped exactly like a passing meets-spec result (built by hand; preflight can't produce one while blocked). */
 const wouldBePassing = (): PreflightResult => ({
-  rating: "meets-spec", allowsUntrustedInput: true, runtime: "runsc", engine: DOCKER_INFO, violations: [], hostTrust: "operator-attested-only",
+  rating: "meets-spec", allowsUntrustedInput: true, runtime: "runsc", engine: DOCKER_INFO, violations: [], hostTrust: "operator-attested-only", hostProcessEvidence: null,
   steps: ["spec", "paths", "host-paths", "engine-target", "engine-info", "engine-version", "runtime-binary-verified", "create", "runtime-config-rechecked-after-create", "inspect",
     "host-paths-recheck", "container-host-files", "canary", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified"],
   cleanup: { containerName: NAME, containerId: CONTAINER_ID, attempts: 1, verifiedRemoved: true, detail: "removed and verified" },
@@ -111,7 +111,7 @@ function fakeEngine(o: FakeOptions = {}) {
 }
 
 const run = (engine: ContainerEngine, extra: Record<string, unknown> = {}) =>
-  runPreflight({ engine, spec: SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY, ...extra } as any);
+  runPreflight({ engine, spec: SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY, hostProcesses: fakeHostProcesses(), ...extra } as any);
 
 const expectRefused = (r: PreflightResult, message: string) => {
   expect(r.rating).toBe("refused");
@@ -129,7 +129,7 @@ describe("success paths and ratings", () => {
     expect(r.violations).toEqual(MEETS_SPEC_BLOCKERS);
     expect(f.calls).toEqual(["info", `exists:${NAME}`, "create", "info", "inspect:id", "start:id", "inspect:id", "remove:id", `exists:${NAME}`, "exists:id", "info"]);
     expect(r.steps).toEqual(["spec", "paths", "host-paths", "engine-target", "engine-info", "engine-version", "runtime-binary-verified", "create", "runtime-config-rechecked-after-create",
-      "inspect", "host-paths-recheck", "container-host-files", "canary", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified", "meets-spec-blocked"]);
+      "inspect", "host-paths-recheck", "container-host-files", "canary", "host-process-evidence", "inspect-after-canary", "container-host-files-after-canary", "removed-verified", "runtime-config-rechecked-after-canary", "runtime-binary-rechecked", "gvisor-verified", "meets-spec-blocked"]);
     expect(r.cleanup).toEqual({ containerName: NAME, containerId: CONTAINER_ID, attempts: 1, verifiedRemoved: true, detail: "removed and verified" });
     expect(f.lastStart()).toEqual({ id: CONTAINER_ID, timeoutMs: 60_000, maxOutputBytes: 65_536 });
     expect(f.existing.size).toBe(0);
@@ -145,7 +145,7 @@ describe("success paths and ratings", () => {
 
   it("the canary timeout never exceeds the spec timeout", async () => {
     const f = fakeEngine();
-    await runPreflight({ engine: f.engine, spec: resolveSpec({ timeoutMs: 5_000 }, SPEC), run: RUN, hostCanaryPath: HOST_CANARY, hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY });
+    await runPreflight({ engine: f.engine, spec: resolveSpec({ timeoutMs: 5_000 }, SPEC), run: RUN, hostCanaryPath: HOST_CANARY, hostProcesses: fakeHostProcesses(), hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY });
     expect(f.lastStart()!.timeoutMs).toBe(5_000);
   });
 
@@ -196,7 +196,7 @@ describe("refusals before any container exists", () => {
   it("unpinned digest/entrypoint (D3): no host or engine access", async () => {
     const f = fakeEngine();
     const hostFs = fakeHostFs(compliantHostLayout());
-    expectRefused(await runPreflight({ engine: f.engine, spec: SANDBOX_SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs, hostPolicy: POLICY }), "not pinned");
+    expectRefused(await runPreflight({ engine: f.engine, spec: SANDBOX_SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs, hostPolicy: POLICY, hostProcesses: fakeHostProcesses() }), "not pinned");
     expect(f.calls).toEqual([]);
     expect(hostFs.calls).toEqual({});
   });

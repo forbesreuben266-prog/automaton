@@ -314,3 +314,26 @@ export function gvisorReport(): any {
   r.cgroupV1 = { memoryLimitInBytes: "536870912", pidsMax: "max" };
   return r;
 }
+
+/**
+ * Step A3: a fake host /proc observer. "gvisor": the host shows a runsc process (the recorded binary) naming the
+ * container and never the canary; "runc": the canary's node process is an ordinary host process.
+ */
+export function fakeHostProcesses(kind: "gvisor" | "runc" | "none" = "gvisor", polls = 20): import("../../research-sandbox/host-processes.js").HostProcessObserver & { started: string[] } {
+  const started: string[] = [];
+  return {
+    started,
+    start(containerId: string) {
+      started.push(containerId);
+      return {
+        stop: () => ({
+          polls, unreadable: 0, overflow: false,
+          samples: kind === "gvisor" ? [{ pid: 4242, exe: FAKE_RUNSC_PATH, argv0: "runsc-sandbox", mentionsContainer: true, runsCanaryScript: false, role: "boot" as const }]
+            : kind === "runc" ? [{ pid: 4343, exe: "/usr/local/bin/node", argv0: "node", mentionsContainer: false, runsCanaryScript: true, role: "other" as const },
+              { pid: 4300, exe: "/usr/bin/containerd-shim-runc-v2", argv0: "containerd-shim-runc-v2", mentionsContainer: true, runsCanaryScript: false, role: "other" as const }]
+            : [],
+        }),
+      };
+    },
+  };
+}

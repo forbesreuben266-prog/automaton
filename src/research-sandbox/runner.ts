@@ -27,6 +27,7 @@
 
 import type { ContainerEngine } from "./engine.js";
 import type { HostFs } from "./host-paths.js";
+import type { HostProcessEvidence, HostProcessObserver } from "./host-processes.js";
 import { MEETS_SPEC_BLOCKERS, runPreflight, type PreflightOptions, type PreflightResult } from "./preflight.js";
 import { containerName, expectedRunPaths, resolveSpec, SandboxSpecError, type RunPaths } from "./spec.js";
 
@@ -145,6 +146,8 @@ export interface RunnerDeps {
   readonly err: (text: string) => void;
   /** The preflight; tests may substitute it. Defaults to the existing runPreflight. */
   readonly preflight?: (options: PreflightOptions) => Promise<PreflightResult>;
+  /** Step A3: host /proc observer (the entry point passes the real one; required by the preflight for runsc). */
+  readonly hostProcesses?: HostProcessObserver;
 }
 
 /** Replaces anything but printable ASCII so daemon- or file-sourced text can't control the terminal. */
@@ -164,6 +167,8 @@ export interface RunnerReport {
   readonly engine: { readonly serverVersion: string | null; readonly seccompProfile: string | null; readonly rootless: boolean; readonly runtimes: readonly string[] } | null;
   readonly cleanup: PreflightResult["cleanup"];
   readonly hostTrust: "operator-attested-only";
+  /** Step A3: which host processes ran the canary. */
+  readonly hostProcessEvidence: HostProcessEvidence | null;
 }
 
 export function toReport(r: PreflightResult, runId: string): RunnerReport {
@@ -173,7 +178,7 @@ export function toReport(r: PreflightResult, runId: string): RunnerReport {
     runner: "research-sandbox-preflight" as const, runId, rating: r.rating, allowsUntrustedInput: r.allowsUntrustedInput, blockedOnlyByMeetsSpecBlockers: blockedOnly,
     blockers: [...MEETS_SPEC_BLOCKERS], violations: [...r.violations], steps: [...r.steps], runtime: r.runtime,
     engine: r.engine === null ? null : { serverVersion: r.engine.serverVersion, seccompProfile: r.engine.seccompProfile, rootless: r.engine.rootless, runtimes: [...r.engine.runtimes] },
-    cleanup: r.cleanup, hostTrust: r.hostTrust,
+    cleanup: r.cleanup, hostTrust: r.hostTrust, hostProcessEvidence: r.hostProcessEvidence ?? null,
   });
 }
 
@@ -190,6 +195,10 @@ export function renderRunnerReport(rep: RunnerReport): string {
   lines.push("", `Steps completed: ${rep.steps.map(printable).join(" -> ") || "(none)"}`);
   if (rep.engine) {
     lines.push(`Engine: Docker server ${printable(String(rep.engine.serverVersion))}; seccomp ${printable(String(rep.engine.seccompProfile))}; rootless ${rep.engine.rootless ? "yes" : "no"}; runtimes ${rep.engine.runtimes.map(printable).join(", ") || "(none)"}; chosen ${printable(String(rep.runtime))}`);
+  }
+  if (rep.hostProcessEvidence) {
+    const h = rep.hostProcessEvidence;
+    lines.push(`Host processes while the canary ran: ${h.polls} samples; ${h.sandboxProcesses} gVisor process(es) naming the container; ${h.canaryOnHost} canary process(es) on the host; executables ${h.executables.map(printable).join(", ") || "(none)"}`);
   }
   if (rep.cleanup) {
     lines.push(rep.cleanup.verifiedRemoved
@@ -244,6 +253,7 @@ export async function runPreflightCommand(argv: readonly string[], deps: RunnerD
       result = await (deps.preflight ?? runPreflight)({
         engine, spec, run, hostCanaryPath: config.hostCanaryPath, hostFs: deps.hostFs,
         hostPolicy: { operatorUid: config.operatorUid, outputOwnerUid: config.outputOwnerUid },
+        ...(deps.hostProcesses ? { hostProcesses: deps.hostProcesses } : {}),
       });
     } catch (err) {
       deps.err(`Internal error during the preflight: ${printable(String((err as Error)?.message ?? err)).slice(0, 300)}\n` +

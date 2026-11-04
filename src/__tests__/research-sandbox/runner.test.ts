@@ -16,7 +16,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_CONFIG_DIR, FAKE_DATA_ROOT, FAKE_DIGEST, FAKE_DOCKER_SERVER_VERSION, FAKE_ENTRYPOINT, FAKE_GVISOR_PROC_VERSION, FAKE_IMAGE_ENV,
-  FAKE_MANIFEST_DIGEST, FAKE_IMAGE_ID, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect,
+  FAKE_MANIFEST_DIGEST, FAKE_IMAGE_ID, FAKE_RUNSC, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, OPERATOR_UID, OUTPUT_UID, compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, fakeHostProcesses,
 } from "./fixtures.js";
 
 const NAME = "research-sandbox-r1-canary";
@@ -71,6 +71,7 @@ function harness(text: string | Error = config(), docker = fakeDocker(), extra: 
     readConfig: () => { if (text instanceof Error) throw text; return text; },
     createEngine: (b, c) => { created.push([b, c]); return createCliEngine(b, c, docker.runner); },
     hostFs: fakeHostFs(compliantHostLayout()),
+    hostProcesses: fakeHostProcesses(),
     out: (t) => out.push(t), err: (t) => err.push(t), ...extra,
   };
   const go = (...argv: string[]) => runPreflightCommand(argv.length > 0 ? argv : ["--config", "/etc/research/preflight.json", CONFIRM_FLAG], deps);
@@ -210,7 +211,7 @@ describe("internal errors and inconsistencies (exit 3)", () => {
 
   it("a result claiming meets-spec (or untrusted input) while M1/M3 exist is never reported as success", async () => {
     const fake = (over: Partial<PreflightResult>) => async (): Promise<PreflightResult> => ({
-      rating: "refused", allowsUntrustedInput: false, runtime: "runsc", engine: null, violations: [], hostTrust: "operator-attested-only", steps: [], binding: null, cleanup: null, ...over,
+      rating: "refused", allowsUntrustedInput: false, runtime: "runsc", engine: null, violations: [], hostTrust: "operator-attested-only", steps: [], binding: null, cleanup: null, hostProcessEvidence: null, ...over,
     });
     for (const over of [{ rating: "meets-spec" as const, allowsUntrustedInput: true }, { allowsUntrustedInput: true }, { rating: "meets-spec" as const }]) {
       const h = harness(config(), fakeDocker(), { preflight: fake(over) });

@@ -19,6 +19,7 @@
 import fs from "node:fs";
 import { createCliEngine, nodeProcessRunner } from "./engine.js";
 import { nodeHostFs } from "./host-paths.js";
+import { procHostProcessObserver } from "./host-processes.js";
 import { MAX_RUNNER_CONFIG_BYTES, RunnerConfigError, runPreflightCommand } from "./runner.js";
 
 /** Reads the runner configuration file; throws RunnerConfigError. Exported for tests. */
@@ -61,6 +62,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     readConfig: (p) => readRunnerConfigFile(p, euid),
     createEngine: (binary, configDir) => createCliEngine(binary, configDir, nodeProcessRunner),
     hostFs: nodeHostFs,
+    hostProcesses: procHostProcessObserver(),
     out: (t) => process.stdout.write(t),
     err: (t) => process.stderr.write(t),
   });

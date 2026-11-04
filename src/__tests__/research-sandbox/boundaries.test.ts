@@ -21,7 +21,12 @@ const ALLOWED_EXTERNAL: Record<string, readonly string[]> = {
   "host-paths.ts": ["node:crypto", "node:fs"],
   "spec.ts": ["node:crypto"],
   "preflight-main.ts": ["node:fs"],
+  "host-processes.ts": ["node:fs"],
+  "trust-evidence.ts": ["node:crypto"],
+  "trust-evidence-main.ts": ["node:fs"],
 };
+/** Process entry points (each runs only behind one argv[1] guard); Step A adds two. */
+const ENTRY_POINTS = ["preflight-main.ts", "trust-evidence-main.ts", "negative-controls-main.ts"];
 
 function imports(file: string): string[] {
   const out: string[] = [];
@@ -47,7 +52,8 @@ function stringLiterals(file: string): string[] {
 
 describe("research sandbox static boundaries", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "host-paths.ts", "index.ts", "inspect.ts", "preflight-main.ts", "preflight.ts", "runner.ts", "spec.ts"]);
+    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "host-paths.ts", "host-processes.ts", "index.ts", "inspect.ts", "negative-controls-main.ts", "negative-controls.ts",
+      "preflight-main.ts", "preflight.ts", "runner.ts", "spec.ts", "trust-evidence-main.ts", "trust-evidence.ts"]);
   });
 
   it("each file imports only siblings and its allowlisted Node modules; no dynamic import/require", () => {
@@ -105,7 +111,7 @@ describe("research sandbox static boundaries", () => {
   });
 
   it("no module performs work at import time (no top-level calls outside declarations); the entry points are preflight-main.ts and (V2.3) the canary probe's one guard", () => {
-    for (const file of files.filter((f) => f !== "preflight-main.ts")) {
+    for (const file of files.filter((f) => !ENTRY_POINTS.includes(f))) {
       for (const stmt of parse(file).statements) {
         if (file === "canary-probe.ts" && ts.isIfStatement(stmt) && stmt.getText().startsWith("if (isEntryPoint()) {")) continue; // checked below
         const ok = ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) || ts.isFunctionDeclaration(stmt) ||
@@ -124,6 +130,16 @@ describe("research sandbox static boundaries", () => {
     expect(text).toContain("inside: insideCanaryContainer, probe,");
     expect(text).not.toMatch(/process\.exit\(/);
     expect(fs.readFileSync(path.join(PKG, "index.ts"), "utf8")).not.toContain("canary-probe"); // never imported by the host-side package
+  });
+
+  it.each(["trust-evidence-main.ts", "negative-controls-main.ts"])("Step A: %s runs only when executed as the entry script, and only calls main(); index.ts never imports it", (file) => {
+    const extra = parse(file).statements.filter((st) => !(ts.isImportDeclaration(st) || ts.isFunctionDeclaration(st) || ts.isVariableStatement(st)));
+    expect(extra).toHaveLength(1);
+    expect(ts.isIfStatement(extra[0])).toBe(true);
+    const text = extra[0].getText();
+    expect(text.startsWith(`if (process.argv[1]?.endsWith("/research-sandbox/${file.replace(/\.ts$/, ".js")}")) {`)).toBe(true);
+    expect(text).toContain("main(process.argv.slice(2))");
+    expect(fs.readFileSync(path.join(PKG, "index.ts"), "utf8")).not.toContain(file.replace(/\.ts$/, ""));
   });
 
   it("preflight-main.ts (V1A entry point) runs only when executed as the entry script, and only calls main()", () => {

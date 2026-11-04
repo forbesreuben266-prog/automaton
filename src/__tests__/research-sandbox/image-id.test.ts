@@ -12,7 +12,7 @@ import {
 } from "../../research-sandbox/index.js";
 import {
   CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_CANARY_MANIFEST_DIGEST, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, HOST_CANARY, HOST_PROC_VERSION, POLICY, PROBE_COMMAND, RUN, SPEC, SPEC_CONTAINERD,
-  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect,
+  compliantHostLayout, compliantInspect, compliantReport, fakeHostFs, finishedInspect, fakeHostProcesses,
 } from "./fixtures.js";
 
 const OTHER_ID = `sha256:${"9f".repeat(32)}`;
@@ -130,7 +130,7 @@ describe("preflight with a substituted image (fake engine)", () => {
     };
     return { e, calls };
   }
-  const go = (e: ContainerEngine) => runPreflight({ engine: e, spec: SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY });
+  const go = (e: ContainerEngine) => runPreflight({ engine: e, spec: SPEC, run: RUN, hostCanaryPath: HOST_CANARY, hostFs: fakeHostFs(compliantHostLayout()), hostPolicy: POLICY, hostProcesses: fakeHostProcesses() });
 
   it("the matching image reaches the blockers; a substituted one is refused at inspect, never started, and removed", async () => {
     const good = engine(FAKE_IMAGE_ID);
