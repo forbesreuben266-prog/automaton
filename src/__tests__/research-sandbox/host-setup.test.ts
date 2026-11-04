@@ -72,6 +72,14 @@ describe("host-setup.sh: static checks", () => {
     }
   });
 
+  it("V2.1: requires dpkg --verify runsc to report nothing, and records /etc/containerd/*.toml instead of ignoring it", () => {
+    const joined = TEXT.replace(/\\\n\s*/g, " ");
+    expect(joined).toMatch(/VERIFY="\$\(dpkg --verify runsc 2>&1\)" && \[ -z "\$VERIFY" \]\s+\|\| die /);
+    expect(TEXT).toContain("RUNTIME_CONFIG_DIR=/etc/containerd");
+    expect(joined).toMatch(/"\$RUNTIME_CONFIG_DIR"\/\*\.toml\)\s+\[ "\$\(dirname "\$f"\)" = "\$RUNTIME_CONFIG_DIR" \] \|\| die/);
+    expect(TEXT).toContain('*) die "runsc package file $f is outside the recordable folders');
+  });
+
   it("deletes only its own temporary build folder, behind a path guard", () => {
     const removals = LINES.filter((l) => /\brm\s+-[a-z]*r/.test(l));
     expect(removals).toHaveLength(1);

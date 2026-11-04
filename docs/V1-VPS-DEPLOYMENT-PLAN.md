@@ -85,6 +85,13 @@ Either removal is a reviewed code change.
 - The preflight verifies each file like runsc itself, before the canary and
   again after it.
 - It refuses any unrecorded file, symlink or folder in `gvisor-bin/`.
+- **V2.1:** the runsc package also ships `/etc/containerd/runsc.toml`, a dpkg
+  conffile configuring the containerd runsc shim. The approved Docker route
+  doesn't use that shim, but the file is root-controlled runtime
+  configuration, so it is **pinned** by SHA-256 like the other files, never
+  ignored.
+- `host-setup.sh` also requires `dpkg --verify runsc` to report no changed
+  package file.
 
 **One-step host setup (V2): `deploy/research-sandbox/host-setup.sh`.**
 - **Default is a dry run:** no Docker call, no write.

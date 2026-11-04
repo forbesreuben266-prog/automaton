@@ -43,6 +43,7 @@ CONF_DIR=/etc/research-sandbox
 CONF="$CONF_DIR/preflight.json"
 STATE_ROOT=/var/lib/research-sandbox-setup
 SANDBOX_UID=10001
+RUNTIME_CONFIG_DIR=/etc/containerd   # the gVisor package's runsc.toml lives here (pinned, never ignored)
 ENV_ALLOWED="PATH NODE_VERSION YARN_VERSION"
 
 EXECUTE=0; ALLOW_PULL=0; EXPECT_DIGEST=""
@@ -87,7 +88,7 @@ if [ "$EXECUTE" = 0 ]; then
   plan "build canary: $DOCKER build --pull=false --network none --provenance=false --sbom=false --build-arg NODE_BASE_DIGEST=<digest> --iidfile <file> -f deploy/research-sandbox/Dockerfile.canary <temporary context>"
   plan "record: canary image ID and its own manifest digest (one container CREATED, never started, removed)"
   plan "record: gVisor /proc/version from ONE container: --rm --pull never --runtime runsc --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --user $SANDBOX_UID:$SANDBOX_UID"
-  plan "record: Docker server version and data root; runsc path and SHA-256; SHA-256 of every file in its gvisor-bin folder"
+  plan "record: Docker server version and data root; runsc path and SHA-256; SHA-256 of every file in its gvisor-bin folder and of every other runsc package file (after dpkg --verify)"
   plan "create: $RUNS_ROOT/setup-<time>/in (root, 755), .../out (uid $SANDBOX_UID, 700, empty), $CANARY_FILE (root, 644), $ENGINE_CONFIG_DIR (root, 700, empty)"
   plan "write: $CONF (root, 600); logs and pins under $STATE_ROOT/setup-<time>/"
   plan "run: node dist/research-sandbox/preflight-main.js --config $CONF --confirm-docker-access --output json"
@@ -252,8 +253,12 @@ if [ -e "$SIDECAR_DIR" ] || [ -L "$SIDECAR_DIR" ]; then
     const lines=require("fs").readFileSync(0,"utf8").trim().split("\n").filter(Boolean);
     process.stdout.write(JSON.stringify(lines.map(l=>({path:l.slice(66),sha256:l.slice(0,64)}))));')" || die "cannot hash $SIDECAR_DIR"
 fi
-# Cross-check with the package manager: every executable file the runsc package installs must be recorded.
+# Cross-check with the package manager: every file the runsc package installs must be unmodified (dpkg --verify)
+# and recorded by SHA-256: binaries, gvisor-bin sidecars and its /etc/containerd/*.toml configuration.
 if PKG_FILES="$(dpkg -L runsc 2>/dev/null)"; then
+  VERIFY="$(dpkg --verify runsc 2>&1)" && [ -z "$VERIFY" ] \
+    || die "dpkg --verify runsc reports runsc package files that differ from the package (review before continuing): $(printf '%s' "$VERIFY" | tr '\n' ';' | cut -c1-400)"
+  ok "dpkg --verify: every runsc package file is as installed"
   EXTRA="$(printf '%s\n' "$PKG_FILES" | while read -r f; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     case "$f" in "$RUNSC_PATH"|"$SIDECAR_DIR"/*|/usr/share/*) continue ;; esac
@@ -266,10 +271,16 @@ if PKG_FILES="$(dpkg -L runsc 2>/dev/null)"; then
       FSHA="$(sha256sum "$f" | cut -d' ' -f1)" && [[ "$FSHA" =~ ^[0-9a-f]{64}$ ]] || die "cannot hash $f"
       SIDECARS="$(j 'const a=JSON.parse(process.argv[1]); const [p,h]=[process.argv[2],process.argv[3]]; a.push({path:p,sha256:h}); process.stdout.write(JSON.stringify(a))' \
         "$SIDECARS" "$f" "$FSHA")" || die "cannot record $f" ;;
+    "$RUNTIME_CONFIG_DIR"/*.toml)
+      [ "$(dirname "$f")" = "$RUNTIME_CONFIG_DIR" ] || die "runsc package file $f is nested inside $RUNTIME_CONFIG_DIR; it can't be recorded"
+      FSHA="$(sha256sum "$f" | cut -d' ' -f1)" && [[ "$FSHA" =~ ^[0-9a-f]{64}$ ]] || die "cannot hash $f"
+      SIDECARS="$(j 'const a=JSON.parse(process.argv[1]); const [p,h]=[process.argv[2],process.argv[3]]; a.push({path:p,sha256:h}); process.stdout.write(JSON.stringify(a))' \
+        "$SIDECARS" "$f" "$FSHA")" || die "cannot record $f"
+      say "  note  recorded runsc package configuration $f (sha256 $FSHA)" ;;
     *) die "runsc package file $f is outside the recordable folders (review it before continuing)" ;;
     esac
   done <<< "$EXTRA"
-  ok "dpkg cross-check: every runsc package executable is recorded"
+  ok "dpkg cross-check: every runsc package file is recorded"
 else
   say "  note  runsc is not managed by dpkg; only $SIDECAR_DIR was inventoried"
 fi

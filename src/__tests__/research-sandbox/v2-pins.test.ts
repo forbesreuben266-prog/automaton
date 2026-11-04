@@ -125,6 +125,52 @@ describe("M1 sidecar coverage: recording", () => {
   });
 });
 
+describe("V2.1: the runsc package's /etc/containerd/runsc.toml is pinned, never ignored", () => {
+  const TOML = "/etc/containerd/runsc.toml";
+  const SHA_TOML = "ea5ada6422655b972fd3af73f7a23b88cc3385c98767cca2f360b2aa749d114c"; // the shipped release-20261102.0 example file
+  const rb = (sidecars: unknown) => ({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars } });
+  const SPEC_TOML = resolveSpec({ runscBinary: { ...FAKE_RUNSC, args: [], sidecars: [...SIDECARS, { path: TOML, sha256: SHA_TOML }] } }, resolveSpec({}, { ...SPEC, runscBinary: null }));
+  const tomlLayout = (mutate: (l: Record<string, FakeEntry>) => void = () => {}) => {
+    const l = sidecarLayout();
+    l["/etc"] = { kind: "dir", uid: 0, mode: 0o40755, ino: 90 };
+    l["/etc/containerd"] = { kind: "dir", uid: 0, mode: 0o40755, ino: 91 };
+    l[TOML] = { kind: "file", uid: 0, mode: 0o100644, ino: 92, size: 297, sha256: SHA_TOML };
+    mutate(l);
+    return verifyRuntimeBinary(DOCKER_INFO, "runsc", SPEC_TOML, fakeHostFs(l));
+  };
+
+  it("accepts a plain *.toml file directly in /etc/containerd as a recorded file", () => {
+    expect(SPEC_TOML.runscBinary!.sidecars.map((s) => s.path)).toContain(TOML);
+  });
+
+  it.each([
+    ["a nested path", "/etc/containerd/sub/runsc.toml"], ["another /etc folder", "/etc/runsc.toml"], ["Docker's configuration", "/etc/docker/daemon.json"],
+    ["a non-toml name", "/etc/containerd/runsc.conf"], ["a hidden name", "/etc/containerd/.runsc.toml"], ["containerd's own config is .toml but traversal", "/etc/containerd/../shadow.toml"],
+  ])("refuses %s", (_label, path) => {
+    expect(() => resolveSpec(rb([{ path, sha256: SHA_TOML }]))).toThrow("runscBinary.sidecars[0].path: must be inside");
+  });
+
+  it("verifies it like every recorded file: present, root-owned chain, not writable by others, exact SHA-256", () => {
+    const ok = tomlLayout();
+    expect(ok.violations).toEqual([]);
+    expect(ok.identity!.sidecars.find((s) => s.path === TOML)!.sha256).toBe(SHA_TOML);
+  });
+
+  it.each([
+    ["edited after recording", (l: any) => { l[TOML].sha256 = "11".repeat(32); }, `${TOML}: SHA-256 does not match the recorded approved file`],
+    ["missing", (l: any) => { delete l[TOML]; }, `${TOML}: cannot be checked (ENOENT)`],
+    ["replaced by a symlink", (l: any) => { l[TOML] = { kind: "symlink", uid: 0, mode: 0o120777, ino: 92, realpath: "/tmp/x.toml" }; }, `${TOML}: is a symbolic link`],
+    ["world-writable", (l: any) => { l[TOML].mode = 0o100646; }, `${TOML}: writable by group or others`],
+    ["owned by another user", (l: any) => { l[TOML].uid = 1000; }, `${TOML}: owned by uid 1000, not root`],
+    ["in a group-writable /etc/containerd", (l: any) => { l["/etc/containerd"].mode = 0o40775; }, "/etc/containerd: writable by group or others"],
+    ["in a /etc/containerd that is a symlink", (l: any) => { l["/etc/containerd"] = { kind: "symlink", uid: 0, mode: 0o120777, ino: 91, realpath: "/tmp" }; }, "/etc/containerd: is a symbolic link"],
+  ])("refuses the file when %s", (_label, mutate, message) => {
+    const r = tomlLayout(mutate as never);
+    expect(r.violations.join("\n")).toContain(message);
+    expect(r.identity).toBeNull();
+  });
+});
+
 describe("M1 sidecar coverage: verification on the host (fakes)", () => {
   it("runsc and every recorded sidecar verified; the gvisor-bin listing is recorded", () => {
     const r = verify();

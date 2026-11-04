@@ -148,6 +148,8 @@ V2 extends this to gVisor's sidecar files:
   descriptor), before create and again after the canary.
 - The `gvisor-bin/` folder must contain exactly the recorded files; any
   other entry refuses.
+- V2.1: a `*.toml` file directly in `/etc/containerd` (the package's
+  `runsc.toml` conffile) may be recorded too, and is verified the same way.
 - Not covered: shared libraries, and the containerd shim Docker uses to
   start a runtime by path.
 

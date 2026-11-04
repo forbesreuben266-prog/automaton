@@ -142,11 +142,12 @@ export interface RuntimeBinary {
   readonly sha256: string;
   readonly args: readonly string[];
   /**
-   * V2 (M1): every other gVisor file runsc may execute, recorded at the
-   * approved host setup with its SHA-256 (since 2026-07 gVisor ships sidecar
-   * binaries in a gvisor-bin/ folder next to runsc). Each path is either
-   * inside <runsc folder>/gvisor-bin/ or directly in a RUNTIME_BINARY_DIRS
-   * folder. Required (may be empty only for a single-binary release); the
+   * V2 (M1): every other file of the gVisor package that runsc may execute
+   * or read, recorded at the approved host setup with its SHA-256 (since
+   * 2026-07 gVisor ships sidecar binaries in a gvisor-bin/ folder next to
+   * runsc). Each path is inside <runsc folder>/gvisor-bin/, directly in a
+   * RUNTIME_BINARY_DIRS folder, or (V2.1) a *.toml file directly in
+   * RUNTIME_CONFIG_DIR (the package's /etc/containerd/runsc.toml). Required (may be empty only for a single-binary release); the
    * preflight also refuses any unrecorded file in that gvisor-bin/ folder.
    */
   readonly sidecars: readonly RuntimeSidecar[];
@@ -232,6 +233,15 @@ const PIN_KEYS = ["imageDigest", "imageEntrypoint", "gvisorProcVersion", "imageE
 export const DOCKER_SERVER_VERSION_PATTERN = /^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]{0,63})?$/;
 /** Root-owned system directories the approved runtime binary may live in. */
 export const RUNTIME_BINARY_DIRS = Object.freeze(["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin"]);
+/**
+ * The one configuration folder a recorded runsc package file may live in
+ * (V2.1): the gVisor package ships /etc/containerd/runsc.toml (a dpkg
+ * conffile configuring the containerd runsc shim). It is pinned by SHA-256
+ * like every other recorded file, never ignored. Only plain *.toml names
+ * directly inside it are accepted.
+ */
+export const RUNTIME_CONFIG_DIR = "/etc/containerd";
+const RUNTIME_CONFIG_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,58}\.toml$/;
 /** A binary file name: no dot-only or hidden names (".", "..", "...", ".x"). */
 const RUNTIME_BINARY_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 const ENV_ENTRY = /^([A-Za-z_][A-Za-z0-9_]*)=([\x20-\x7e]*)$/;
@@ -258,8 +268,9 @@ function readSidecars(raw: unknown, runscPath: string, violations: string[]): re
     const inSidecarDir = typeof p === "string" && p.startsWith(sidecarRoot) &&
       p.slice(sidecarRoot.length).split("/").every((c) => RUNTIME_BINARY_NAME.test(c)) && p.slice(sidecarRoot.length).split("/").length <= 4;
     const inBinaryDir = typeof p === "string" && RUNTIME_BINARY_DIRS.some((d) => p.startsWith(`${d}/`) && RUNTIME_BINARY_NAME.test(p.slice(d.length + 1)));
-    if (typeof p !== "string" || !(inSidecarDir || inBinaryDir) || p === runscPath) {
-      violations.push(`runscBinary.sidecars[${i}].path: must be inside ${sidecarRoot} (at most 4 levels, plain names) or directly inside ${RUNTIME_BINARY_DIRS.join(", ")}, and not the runsc binary itself`);
+    const inConfigDir = typeof p === "string" && p.startsWith(`${RUNTIME_CONFIG_DIR}/`) && RUNTIME_CONFIG_NAME.test(p.slice(RUNTIME_CONFIG_DIR.length + 1));
+    if (typeof p !== "string" || !(inSidecarDir || inBinaryDir || inConfigDir) || p === runscPath) {
+      violations.push(`runscBinary.sidecars[${i}].path: must be inside ${sidecarRoot} (at most 4 levels, plain names), directly inside ${RUNTIME_BINARY_DIRS.join(", ")}, or a plain *.toml file directly inside ${RUNTIME_CONFIG_DIR}, and not the runsc binary itself`);
       return null;
     }
     if (seen.has(p)) { violations.push(`runscBinary.sidecars[${i}].path: listed twice`); return null; }
