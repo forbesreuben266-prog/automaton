@@ -43,8 +43,8 @@ export interface HostProcessObservation {
   readonly unreadable: number;
 }
 export interface HostProcessObserver {
-  /** Starts sampling for processes mentioning containerId or the canary script; stop() ends it. */
-  start(containerId: string): { stop(): HostProcessObservation };
+  /** Starts sampling for processes mentioning containerId or the given script (default: the canary); stop() ends it. */
+  start(containerId: string, script?: string): { stop(): HostProcessObservation };
 }
 export interface HostProcessEvidence {
   readonly polls: number;
@@ -70,14 +70,14 @@ export const nodeProcFs: ProcFs = {
 };
 
 /** One pass over /proc: the matching processes. Exported for tests. */
-export function sampleOnce(proc: ProcFs, containerId: string): { samples: HostProcessSample[]; unreadable: number } {
+export function sampleOnce(proc: ProcFs, containerId: string, script: string = CANARY_SCRIPT): { samples: HostProcessSample[]; unreadable: number } {
   const samples: HostProcessSample[] = [];
   let unreadable = 0;
   for (const pid of proc.listPids()) {
     let argv: string[];
     try { argv = proc.cmdline(pid).toString("utf8").split("\0").filter((a) => a.length > 0); } catch { unreadable += 1; continue; }
     const mentionsContainer = argv.some((a) => a.includes(containerId));
-    const runsCanaryScript = argv.some((a) => a === CANARY_SCRIPT || a.endsWith(CANARY_SCRIPT));
+    const runsCanaryScript = argv.some((a) => a === script || a.endsWith(script));
     if (!mentionsContainer && !runsCanaryScript) continue;
     let exe: string | null = null;
     try { exe = proc.exe(pid); } catch { exe = null; }
@@ -92,14 +92,14 @@ export function sampleOnce(proc: ProcFs, containerId: string): { samples: HostPr
 /** The real observer: samples /proc every 20 ms until stopped. */
 export function procHostProcessObserver(proc: ProcFs = nodeProcFs): HostProcessObserver {
   return {
-    start(containerId: string) {
+    start(containerId: string, script: string = CANARY_SCRIPT) {
       let polls = 0;
       let unreadable = 0;
       let overflow = false;
       const kept = new Map<string, HostProcessSample>();
       const poll = () => {
         try {
-          const r = sampleOnce(proc, containerId);
+          const r = sampleOnce(proc, containerId, script);
           polls += 1;
           unreadable += r.unreadable;
           for (const s of r.samples) {

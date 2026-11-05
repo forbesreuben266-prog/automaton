@@ -10,6 +10,10 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const SRC = path.resolve(__dirname, "../..");
+// E1 exception (reviewed): src/research-sandbox/research-image.ts lists the research CLI's compiled files as paths inside the
+// sandbox image, so it names this module; it must contain no import, re-export or require, so it can never be a code route.
+const IMAGE_LIST = path.join(SRC, "research-sandbox", "research-image.ts");
+const imageListIsInert = () => !/\bimport\b|\bexport\s+[^;]*\bfrom\b|\brequire\s*\(/.test(fs.readFileSync(IMAGE_LIST, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""));
 const DIR = path.join(SRC, "research-cli");
 const parse = (file: string) => ts.createSourceFile(file, fs.readFileSync(path.join(DIR, file), "utf8"), ts.ScriptTarget.ES2022, true);
 function specifiers(file: string): string[] {
@@ -78,6 +82,9 @@ describe("research CLI boundaries", () => {
     const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
     const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(DIR + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`));
     expect(outside.length).toBeGreaterThan(50);
-    for (const file of outside) expect(fs.readFileSync(file, "utf8").includes("research-cli"), path.relative(SRC, file)).toBe(false);
+    for (const file of outside) {
+      if (file === IMAGE_LIST) { expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true); continue; }
+      expect(fs.readFileSync(file, "utf8").includes("research-cli"), path.relative(SRC, file)).toBe(false);
+    }
   });
 });

@@ -24,9 +24,10 @@ const ALLOWED_EXTERNAL: Record<string, readonly string[]> = {
   "host-processes.ts": ["node:fs"],
   "trust-evidence.ts": ["node:crypto"],
   "trust-evidence-main.ts": ["node:fs"],
+  "executor.ts": ["node:crypto"],
 };
 /** Process entry points (each runs only behind one argv[1] guard); Step A adds two. */
-const ENTRY_POINTS = ["preflight-main.ts", "trust-evidence-main.ts", "negative-controls-main.ts"];
+const ENTRY_POINTS = ["preflight-main.ts", "trust-evidence-main.ts", "negative-controls-main.ts", "executor-main.ts"];
 
 function imports(file: string): string[] {
   const out: string[] = [];
@@ -52,8 +53,8 @@ function stringLiterals(file: string): string[] {
 
 describe("research sandbox static boundaries", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "host-paths.ts", "host-processes.ts", "index.ts", "inspect.ts", "negative-controls-main.ts", "negative-controls.ts",
-      "preflight-main.ts", "preflight.ts", "runner.ts", "spec.ts", "trust-evidence-main.ts", "trust-evidence.ts"]);
+    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "executor-main.ts", "executor.ts", "host-paths.ts", "host-processes.ts", "index.ts", "inspect.ts", "negative-controls-main.ts", "negative-controls.ts",
+      "preflight-main.ts", "preflight.ts", "research-image.ts", "runner.ts", "spec.ts", "trust-evidence-main.ts", "trust-evidence.ts"]);
   });
 
   it("each file imports only siblings and its allowlisted Node modules; no dynamic import/require", () => {
@@ -97,7 +98,9 @@ describe("research sandbox static boundaries", () => {
     for (const file of files) {
       const code = fs.readFileSync(path.join(PKG, file), "utf8");
       expect(/(agent|inference|conway|wallet|identity|divisions|spend|budget)\//.test(imports(file).join(" ")), `${file} imports protected code`).toBe(false);
-      expect(code.toLowerCase().includes("business-research"), `${file} references the research division`).toBe(false);
+      // E1: research-image.ts lists the research CLI's compiled files (including the division's) as image paths; it imports nothing.
+      if (file === "research-image.ts") expect(imports(file)).toEqual([]);
+      else expect(code.toLowerCase().includes("business-research"), `${file} references the research division`).toBe(false);
     }
   });
 
@@ -132,7 +135,7 @@ describe("research sandbox static boundaries", () => {
     expect(fs.readFileSync(path.join(PKG, "index.ts"), "utf8")).not.toContain("canary-probe"); // never imported by the host-side package
   });
 
-  it.each(["trust-evidence-main.ts", "negative-controls-main.ts"])("Step A: %s runs only when executed as the entry script, and only calls main(); index.ts never imports it", (file) => {
+  it.each(["trust-evidence-main.ts", "negative-controls-main.ts", "executor-main.ts"])("Step A: %s runs only when executed as the entry script, and only calls main(); index.ts never imports it", (file) => {
     const extra = parse(file).statements.filter((st) => !(ts.isImportDeclaration(st) || ts.isFunctionDeclaration(st) || ts.isVariableStatement(st)));
     expect(extra).toHaveLength(1);
     expect(ts.isIfStatement(extra[0])).toBe(true);

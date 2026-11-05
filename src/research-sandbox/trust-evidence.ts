@@ -52,7 +52,8 @@ export const REVIEWED_DOCKERD_ARGV: readonly (readonly string[])[] = Object.free
 const DAEMON_JSON = "/etc/docker/daemon.json";
 const DAEMON_JSON_REVIEWED_KEYS = new Set(["runtimes", "features"]);
 const HASHED_BINARIES = Object.freeze(["/usr/bin/dockerd", "/usr/bin/docker", "/usr/bin/containerd", "/usr/bin/containerd-shim-runc-v2", "/usr/bin/runc"]);
-const INFO_FIELDS = Object.freeze(["ServerVersion", "SecurityOptions", "DefaultRuntime", "CgroupDriver", "CgroupVersion", "Driver", "DockerRootDir", "KernelVersion", "OperatingSystem", "OSType", "Architecture"]);
+// No KernelVersion or OperatingSystem: exact host patch levels are not needed for M3 and should not reach a public repository.
+const INFO_FIELDS = Object.freeze(["ServerVersion", "SecurityOptions", "DefaultRuntime", "CgroupDriver", "CgroupVersion", "Driver", "DockerRootDir", "OSType", "Architecture"]);
 
 export type FindingKind = "origin" | "signature" | "integrity" | "configuration" | "daemon";
 export interface Finding { readonly severity: "blocking" | "review"; readonly kind: FindingKind; readonly message: string }

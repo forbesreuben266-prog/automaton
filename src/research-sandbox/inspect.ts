@@ -456,7 +456,11 @@ export function validateInspect(raw: unknown, spec: SandboxSpec, expected: Inspe
  * no exec session), and the EXACT host-file paths under the recorded
  * dockerDataRoot, which Docker 29 sets only at start. Returns violations.
  */
-export function validateFinishedInspect(raw: unknown, spec: SandboxSpec, expected: { readonly run: RunPaths; readonly purpose: ContainerPurpose; readonly containerId: string; readonly runtime: string }): string[] {
+export function validateFinishedInspect(raw: unknown, spec: SandboxSpec, expected: {
+  readonly run: RunPaths; readonly purpose: ContainerPurpose; readonly containerId: string; readonly runtime: string;
+  /** E1: exit codes accepted as a clean finish (default [0]; the research CLI also exits 1 when it refuses its input). */
+  readonly allowedExitCodes?: readonly number[];
+}): string[] {
   const container = Array.isArray(raw) && raw.length === 1 ? raw[0] : null;
   if (!isObj(container)) return ["inspect after the canary: expected an array with exactly one container object"];
   const v: string[] = [];
@@ -471,8 +475,8 @@ export function validateFinishedInspect(raw: unknown, spec: SandboxSpec, expecte
   expect(isObj(host) && host.NetworkMode === spec.network, `HostConfig.NetworkMode: must be "${spec.network}"`);
   const s = container.State;
   expect(isObj(s) && Object.keys(s).every((k) => STATE_KEYS.has(k)) && s.Status === "exited" && s.Running === false && s.Paused === false &&
-    s.Restarting === false && s.OOMKilled === false && s.Dead === false && s.Pid === 0 && s.ExitCode === 0 && s.Error === "",
-    "State: must be exited with code 0 (not running, restarting, dead or OOM-killed; no error; no unknown keys)");
+    s.Restarting === false && s.OOMKilled === false && s.Dead === false && s.Pid === 0 && (expected.allowedExitCodes ?? [0]).includes(s.ExitCode as number) && s.Error === "",
+    `State: must be exited with code ${(expected.allowedExitCodes ?? [0]).join(" or ")} (not running, restarting, dead or OOM-killed; no error; no unknown keys)`);
   expect(container.RestartCount === 0, "RestartCount: must be 0");
   expect(emptyList(container.ExecIDs), "ExecIDs: no exec sessions may exist");
   const hostFiles = expectedContainerHostFiles(spec, expected.containerId);

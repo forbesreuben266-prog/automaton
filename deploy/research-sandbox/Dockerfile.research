@@ -1,0 +1,20 @@
+# Research sandbox image (E1). NOT BUILT YET: building it is a separately
+# approved host step (E1b). It holds the canary probe AND the offline research
+# CLI (src/research-sandbox/research-image.ts lists every file), so the
+# preflight's canary and a research job run from the same pinned image ID.
+#
+# Same constraints as Dockerfile.canary (the preflight's inspect checks):
+# no ENV, ARG after FROM, ENTRYPOINT, USER, VOLUME, LABEL, HEALTHCHECK or
+# EXPOSE; WORKDIR /app; nothing installed; files root-owned and read-only
+# (0555 so that directories stay traversable; the root filesystem is mounted
+# read-only anyway). Only Node built-ins are used.
+
+# The base image MUST be pinned by digest; there is deliberately no default.
+ARG NODE_BASE_DIGEST
+FROM docker.io/library/node:22.22.0-bookworm-slim@${NODE_BASE_DIGEST}
+
+WORKDIR /app
+
+# The prepared build context's app/ folder: package.json (ES modules) and the
+# compiled files listed in research-image.ts, at the same relative paths.
+COPY --chown=0:0 --chmod=0555 app/ /app/

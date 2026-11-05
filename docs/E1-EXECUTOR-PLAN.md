@@ -1,6 +1,14 @@
-# E1: sandbox executor for research input (PLAN; not implemented)
+# E1: sandbox executor for research input
 
-**Status: plan only.** Nothing here runs untrusted input. E1 is designed to
+**Status: E1a implemented offline (not deployed).** `src/research-sandbox/executor.ts`
+and `executor-main.ts` run one operator job (research CLI `trading validate` or
+`trading backtest` on files staged in the run's input folder) after a fresh
+preflight and the `assertUntrustedInputAllowed` gate. While M1/M3 exist the
+gate always refuses and no research container is created. The research image
+(`deploy/research-sandbox/Dockerfile.research`, file list in
+`src/research-sandbox/research-image.ts`) holds the canary and the research CLI,
+so the preflight and the job use one pinned image ID. Not built yet (E1b).
+Nothing here runs untrusted input. E1 is designed to
 stay refused while either M1/M3 blocker exists; it is built and tested
 offline first, and each host step needs its own approval.
 

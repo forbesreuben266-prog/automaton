@@ -1,0 +1,6 @@
+{
+  "name": "research-sandbox-research-image",
+  "private": true,
+  "type": "module",
+  "description": "Marks the compiled canary probe and offline research CLI files as ES modules inside the (not yet built) research image. No dependencies."
+}

@@ -17,6 +17,10 @@ import { datasetSha256, parseDatasetText, riskReward, summarizeDataset } from ".
 import { fxDataset, text, ukDataset, usDataset } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
+// E1 exception (reviewed): src/research-sandbox/research-image.ts lists the research CLI's compiled files as paths inside the
+// sandbox image, so it names this module; it must contain no import, re-export or require, so it can never be a code route.
+const IMAGE_LIST = path.join(SRC, "research-sandbox", "research-image.ts");
+const imageListIsInert = () => !/\bimport\b|\bexport\s+[^;]*\bfrom\b|\brequire\s*\(/.test(fs.readFileSync(IMAGE_LIST, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""));
 const MODULE = path.join(SRC, "trading-research");
 const FILES = ["backtest.ts", "dataset.ts", "execution.ts", "index.ts", "instruments.ts", "metrics.ts", "paper.ts", "prices.ts", "report.ts", "strategy.ts", "validation.ts"];
 const parse = (file: string) => ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.ES2022, true);
@@ -84,7 +88,10 @@ describe("trading research boundaries (static)", () => {
     expect(coordinatorSpecs).toEqual(["../trading-research/index.js"]);
     const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`) && f !== COORDINATOR);
     expect(outside.length).toBeGreaterThan(50);
-    for (const file of outside) expect(fs.readFileSync(file, "utf8").includes("trading-research"), path.relative(SRC, file)).toBe(false);
+    for (const file of outside) {
+      if (file === IMAGE_LIST) { expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true); continue; }
+      expect(fs.readFileSync(file, "utf8").includes("trading-research"), path.relative(SRC, file)).toBe(false);
+    }
   });
 
   it("no trading division was added under src/divisions (the completed Phase 0 boundary still holds)", () => {

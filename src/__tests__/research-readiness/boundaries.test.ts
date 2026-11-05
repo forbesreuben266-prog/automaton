@@ -22,6 +22,10 @@ import { usDataset } from "../trading-research/fixtures.js";
 import { businessBundle, marketRecord } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
+// E1 exception (reviewed): src/research-sandbox/research-image.ts lists the research CLI's compiled files as paths inside the
+// sandbox image, so it names this module; it must contain no import, re-export or require, so it can never be a code route.
+const IMAGE_LIST = path.join(SRC, "research-sandbox", "research-image.ts");
+const imageListIsInert = () => !/\bimport\b|\bexport\s+[^;]*\bfrom\b|\brequire\s*\(/.test(fs.readFileSync(IMAGE_LIST, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""));
 const MODULE = path.join(SRC, "research-readiness");
 const FILES = ["business.ts", "index.ts", "market-data.ts", "provenance.ts", "quarantine.ts", "readiness.ts", "validation.ts"];
 const FORBIDDEN_IDENTIFIERS = new Set([
@@ -77,7 +81,10 @@ describe("readiness module boundaries (static)", () => {
     expect(coordinatorSpecs).toEqual(["../research-readiness/index.js"]);
     const outside = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(MODULE + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`) && f !== COORDINATOR);
     expect(outside.length).toBeGreaterThan(50);
-    for (const file of outside) expect(fs.readFileSync(file, "utf8").includes("research-readiness"), path.relative(SRC, file)).toBe(false);
+    for (const file of outside) {
+      if (file === IMAGE_LIST) { expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true); continue; }
+      expect(fs.readFileSync(file, "utf8").includes("research-readiness"), path.relative(SRC, file)).toBe(false);
+    }
   });
 
   it("the module names none of the existing research modules (their own boundary rules stay intact)", () => {

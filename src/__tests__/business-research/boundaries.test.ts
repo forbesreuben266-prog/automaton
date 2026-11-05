@@ -30,6 +30,10 @@ import * as division from "../../divisions/business-research/index.js";
 import { EXPERIMENTS, validReport } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
+// E1 exception (reviewed): src/research-sandbox/research-image.ts lists the research CLI's compiled files as paths inside the
+// sandbox image, so it names this module; it must contain no import, re-export or require, so it can never be a code route.
+const IMAGE_LIST = path.join(SRC, "research-sandbox", "research-image.ts");
+const imageListIsInert = () => !/\bimport\b|\bexport\s+[^;]*\bfrom\b|\brequire\s*\(/.test(fs.readFileSync(IMAGE_LIST, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""));
 const DIVISION = path.join(SRC, "divisions", "business-research");
 /** Approved Phase 1A exception (decision B): the one adapter outside the division that may import it, and the one specifier it may use. */
 const ADAPTER = path.join(SRC, "research-pipeline", "division.ts");
@@ -434,6 +438,7 @@ describe("division boundaries (static, syntax tree)", () => {
         for (const spec of intoDivision) expect(spec, `${rel} may import only the division's public index`).toBe(ADAPTER_SPECIFIER);
         continue;
       }
+      if (file === IMAGE_LIST) { expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true); continue; }
       expect(fs.readFileSync(file, "utf8").includes("business-research"), `${rel} mentions the division`).toBe(false);
       for (const spec of allSpecifiers(file)) {
         if (!spec.startsWith(".")) continue;

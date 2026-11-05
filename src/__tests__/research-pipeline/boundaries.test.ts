@@ -21,6 +21,10 @@ import { checkRunInputs, parseOpportunityText, parseWorkbookText } from "../../r
 import { validManifest, validOpportunity, validWorkbook } from "./fixtures.js";
 
 const SRC = path.resolve(__dirname, "../..");
+// E1 exception (reviewed): src/research-sandbox/research-image.ts lists the research CLI's compiled files as paths inside the
+// sandbox image, so it names this module; it must contain no import, re-export or require, so it can never be a code route.
+const IMAGE_LIST = path.join(SRC, "research-sandbox", "research-image.ts");
+const imageListIsInert = () => !/\bimport\b|\bexport\s+[^;]*\bfrom\b|\brequire\s*\(/.test(fs.readFileSync(IMAGE_LIST, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""));
 const PIPELINE = path.join(SRC, "research-pipeline");
 const ADAPTER = path.join(PIPELINE, "division.ts");
 const DIVISION_INDEX_SPECIFIER = "../divisions/business-research/index.js";
@@ -112,6 +116,7 @@ describe("research pipeline boundaries (step 1: adapter only)", () => {
     expect(outside.length).toBeGreaterThan(50);
     for (const file of outside) {
       const rel = path.relative(SRC, file);
+      if (file === IMAGE_LIST) { expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true); continue; }
       expect(fs.readFileSync(file, "utf8").includes("research-pipeline"), `${rel} mentions the pipeline`).toBe(false);
       for (const spec of specifiers(file)) {
         if (!spec.startsWith(".")) continue;
@@ -124,7 +129,8 @@ describe("research pipeline boundaries (step 1: adapter only)", () => {
     const division_ = path.join(SRC, "divisions", "business-research");
     const naming = walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(division_ + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`))
       .filter((f) => fs.readFileSync(f, "utf8").includes("business-research"));
-    expect(naming).toEqual([ADAPTER]);
+    expect(imageListIsInert(), "research-image.ts must stay inert").toBe(true);
+    expect(naming.filter((f) => f !== IMAGE_LIST)).toEqual([ADAPTER]);
   });
 });
 
