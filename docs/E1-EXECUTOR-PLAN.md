@@ -7,7 +7,16 @@ preflight and the `assertUntrustedInputAllowed` gate. While M1/M3 exist the
 gate always refuses and no research container is created. The research image
 (`deploy/research-sandbox/Dockerfile.research`, file list in
 `src/research-sandbox/research-image.ts`) holds the canary and the research CLI,
-so the preflight and the job use one pinned image ID. Not built yet (E1b).
+so the preflight and the job use one pinned image ID.
+
+**E1b (offline, ready for one host run):** `host-setup.sh` now builds the
+research image (build context generated from `RESEARCH_IMAGE_LAYOUT`), and
+`deploy/research-sandbox/e1b-verify.sh --execute` then collects, in one pass:
+the preflight report, read-only trust evidence (no kernel or OS versions),
+negative controls, and an executor dry run with the committed synthetic sample
+(`deploy/research-sandbox/e1b-sample/`, the documented fictional demo data),
+which must be refused by the M1/M3 gate with no research container created.
+It prints the four evidence files as numbered pieces for transfer.
 Nothing here runs untrusted input. E1 is designed to
 stay refused while either M1/M3 blocker exists; it is built and tested
 offline first, and each host step needs its own approval.

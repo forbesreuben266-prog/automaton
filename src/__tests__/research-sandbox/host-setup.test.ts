@@ -26,8 +26,8 @@ beforeEach(() => {
   bin = path.join(dir, "fakebin");
   fs.mkdirSync(bin);
   // A minimal "repository": the files the script requires (contents irrelevant to these tests).
-  for (const f of ["deploy/research-sandbox/Dockerfile.canary", "deploy/research-sandbox/package.json", "dist/research-sandbox/preflight-main.js",
-    "dist/research-sandbox/canary-probe.js", "dist/research-sandbox/canary.js"]) {
+  for (const f of ["deploy/research-sandbox/Dockerfile.research", "deploy/research-sandbox/package-research.json", "dist/research-sandbox/research-image.js",
+    "dist/research-sandbox/preflight-main.js", "dist/research-sandbox/canary-probe.js", "dist/research-sandbox/canary.js", "dist/research-cli/main.js"]) {
     fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
     fs.writeFileSync(path.join(dir, f), "x\n");
   }
@@ -87,6 +87,15 @@ describe("host-setup.sh: static checks", () => {
     expect(TEXT).not.toContain("args:[]");
   });
 
+  it("E1b: builds the research image from the compiled layout, never from caller paths", () => {
+    const joined = TEXT.replace(/\\\n\s*/g, " ");
+    expect(joined).toContain("-f deploy/research-sandbox/Dockerfile.research \"$BUILD_CTX\"");
+    expect(TEXT).not.toContain("Dockerfile.canary");
+    expect(TEXT).toContain('import(process.argv[1]).then((m)=>{for(const [a,b] of m.RESEARCH_IMAGE_LAYOUT)');
+    expect(TEXT).toContain('[[ "$IMG" =~ ^[a-z0-9][a-z0-9/_-]*\\.js$ ]] && [[ "$SRC" =~ ^[a-z0-9][a-z0-9/_-]*\\.js$ ]] && [[ "$IMG$SRC" != *..* ]] || die');
+    expect(TEXT).toContain('cp -- deploy/research-sandbox/package-research.json "$BUILD_CTX/app/package.json"');
+  });
+
   it("deletes only its own temporary build folder, behind a path guard", () => {
     const removals = LINES.filter((l) => /\brm\s+-[a-z]*r/.test(l));
     expect(removals).toHaveLength(1);
@@ -138,7 +147,7 @@ describe("host-setup.sh: dry run", () => {
     fs.rmSync(path.join(dir, "dist"), { recursive: true });
     const r = run([]);
     expect(r.status).toBe(1);
-    expect(r.stdout).toContain("STOP  missing dist/research-sandbox/preflight-main.js");
+    expect(r.stdout).toContain("STOP  missing dist/research-sandbox/research-image.js");
   });
 
   it("stops when Node is not version 22", () => {

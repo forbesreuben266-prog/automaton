@@ -69,8 +69,8 @@ plan() { say "  plan  $*"; }
 
 # ---------------------------------------------------------------- local checks (both modes; read-only, no Docker)
 step "Local checks (read-only)"
-for f in deploy/research-sandbox/Dockerfile.canary deploy/research-sandbox/package.json \
-         dist/research-sandbox/preflight-main.js dist/research-sandbox/canary-probe.js dist/research-sandbox/canary.js; do
+for f in deploy/research-sandbox/Dockerfile.research deploy/research-sandbox/package-research.json dist/research-sandbox/research-image.js \
+         dist/research-sandbox/preflight-main.js dist/research-sandbox/canary-probe.js dist/research-sandbox/canary.js dist/research-cli/main.js; do
   [ -f "$f" ] && [ ! -L "$f" ] || die "missing $f (run from the repository root after building with ./node_modules/.bin/tsc)"
 done
 ok "repository files present"
@@ -86,8 +86,8 @@ if [ "$EXECUTE" = 0 ]; then
   plan "check: no existing containers named research-sandbox-* or research-setup-*"
   plan "base image $BASE_REF: use if present; download it ONLY with --allow-base-pull"
   plan "record: base digest, entrypoint, environment (only $ENV_ALLOWED), platform manifest digest (one container CREATED, never started, removed)"
-  plan "build canary: $DOCKER build --pull=false --network none --provenance=false --sbom=false --build-arg NODE_BASE_DIGEST=<digest> --iidfile <file> -f deploy/research-sandbox/Dockerfile.canary <temporary context>"
-  plan "record: canary image ID and its own manifest digest (one container CREATED, never started, removed)"
+  plan "build research image (E1b: the canary probe plus the offline research CLI, files listed in research-image.ts): $DOCKER build --pull=false --network none --provenance=false --sbom=false --build-arg NODE_BASE_DIGEST=<digest> --iidfile <file> -f deploy/research-sandbox/Dockerfile.research <temporary context>"
+  plan "record: research image ID and its own manifest digest (one container CREATED, never started, removed)"
   plan "record: gVisor /proc/version from ONE container: --rm --pull never --runtime runsc --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --user $SANDBOX_UID:$SANDBOX_UID"
   plan "record: Docker server version and data root; runsc path and SHA-256; SHA-256 of every file in its gvisor-bin folder and of every other runsc package file (after dpkg --verify)"
   plan "create: $RUNS_ROOT/setup-<time>/in (root, 755), .../out (uid $SANDBOX_UID, 700, empty), $CANARY_FILE (root, 644), $ENGINE_CONFIG_DIR (root, 700, empty)"
@@ -208,12 +208,24 @@ BASE_MANIFEST="${BASE_M%% *}"
 valid_manifest "$BASE_MANIFEST" || die "malformed base manifest result: $BASE_M"
 ok "base platform manifest digest: $BASE_MANIFEST"
 
-step "3. Canary image (offline build, recorded by image ID)"
+step "3. Research image (canary probe + offline research CLI; offline build, recorded by image ID)"
 BUILD_CTX="$(mktemp -d "$OUT/build.XXXXXX")" || die "cannot create a build context"
-cp -- deploy/research-sandbox/package.json dist/research-sandbox/canary-probe.js dist/research-sandbox/canary.js "$BUILD_CTX/" || die "cannot prepare the build context"
-chmod 644 "$BUILD_CTX"/* && (cd "$BUILD_CTX" && sha256sum package.json canary-probe.js canary.js) > "$OUT/canary-files.sha256" || die "cannot hash the build context"
+# E1b: one image holds the canary probe and the research CLI, so the preflight and a research job use the same image ID.
+# The file list comes from the compiled research-image.ts: "<path under /app> <path under dist/>" per line.
+LAYOUT="$(j 'import(process.argv[1]).then((m)=>{for(const [a,b] of m.RESEARCH_IMAGE_LAYOUT)process.stdout.write(a+" "+b+"\n");},()=>process.exit(1))' "$PWD/dist/research-sandbox/research-image.js")" || die "cannot read the research image layout"
+mkdir "$BUILD_CTX/app" && cp -- deploy/research-sandbox/package-research.json "$BUILD_CTX/app/package.json" || die "cannot prepare the build context"
+COUNT=0
+while read -r IMG SRC; do
+  [[ "$IMG" =~ ^[a-z0-9][a-z0-9/_-]*\.js$ ]] && [[ "$SRC" =~ ^[a-z0-9][a-z0-9/_-]*\.js$ ]] && [[ "$IMG$SRC" != *..* ]] || die "unexpected research image path: $IMG $SRC"
+  [ -f "dist/$SRC" ] && [ ! -L "dist/$SRC" ] || die "missing dist/$SRC (build first)"
+  mkdir -p "$BUILD_CTX/app/$(dirname "$IMG")" && cp -- "dist/$SRC" "$BUILD_CTX/app/$IMG" || die "cannot copy dist/$SRC"
+  COUNT=$((COUNT+1))
+done <<< "$LAYOUT"
+[ "$COUNT" -ge 3 ] || die "the research image layout lists only $COUNT files"
+find "$BUILD_CTX/app" -type f -exec chmod 644 {} + && (cd "$BUILD_CTX/app" && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$OUT/image-files.sha256" || die "cannot hash the build context"
+ok "build context: package.json and $COUNT compiled files (hashes in $OUT/image-files.sha256)"
 "$DOCKER" build --pull=false --network none --provenance=false --sbom=false --build-arg "NODE_BASE_DIGEST=$BASE_DIGEST" \
-  --iidfile "$OUT/canary.iid" -f deploy/research-sandbox/Dockerfile.canary "$BUILD_CTX" >> "$LOG" 2>&1 || die "canary build failed (see $LOG)"
+  --iidfile "$OUT/canary.iid" -f deploy/research-sandbox/Dockerfile.research "$BUILD_CTX" >> "$LOG" 2>&1 || die "research image build failed (see $LOG)"
 IMAGE_ID="$(cat "$OUT/canary.iid" 2>/dev/null)"
 [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "the build did not produce a full image ID"
 [ "$IMAGE_ID" != "$BASE_DIGEST" ] || die "the canary image ID equals the base digest"
@@ -331,6 +343,6 @@ say ""
 case "$VERDICT" in
   EXPECTED) [ "$RC" = 1 ] || die "unexpected runner exit code $RC"
     say "RESULT: every preflight check passed on this host; refused only by the M1/M3 blockers (as expected)."
-    say "Send me: $OUT/preflight-report.json, $OUT/preflight-config.json, $OUT/canary-files.sha256 and $LOG" ;;
+    say "Send me: $OUT/preflight-report.json, $OUT/preflight-config.json, $OUT/image-files.sha256 and $LOG" ;;
   *) die "preflight did not reach the expected result (exit $RC): $VERDICT. Send me $OUT/preflight-report.json and $LOG" ;;
 esac

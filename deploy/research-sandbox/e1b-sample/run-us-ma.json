@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "strategy": {
+    "kind": "ma_crossover",
+    "fast": 3,
+    "slow": 8
+  },
+  "execution": "next_bar_open",
+  "initialCash": {
+    "currency": "USD",
+    "amount": "10000.00"
+  },
+  "sizing": {
+    "mode": "fixed_units",
+    "units": 50
+  },
+  "slippageBps": "2"
+}

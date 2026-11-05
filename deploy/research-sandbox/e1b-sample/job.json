@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "command": "trading-backtest",
+  "dataset": "fict-us-trend.json",
+  "config": "run-us-ma.json"
+}
