@@ -1,0 +1,80 @@
+{
+  "runner": "research-sandbox-negative-controls",
+  "runId": "setup-20261105-104439-807351351",
+  "allPassed": true,
+  "expected": 8,
+  "outcomes": [
+    {
+      "name": "baseline",
+      "change": "none (the approved pins)",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "meets-spec-blocked",
+      "firstViolation": "M1: host-side runtime binary and configuration verification is implemented against fakes only and has not been reviewed or exercised on a real host; a matching binary hash, unchanged daemon-reported configuration and the in-container /proc/"
+    },
+    {
+      "name": "docker-server-version",
+      "change": "dockerServerVersion -> 29.9.4",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "engine-version",
+      "firstViolation": "Docker server version: the daemon reports 29.9.3; the approved version is 29.9.4"
+    },
+    {
+      "name": "runsc-sha256",
+      "change": "runscBinary.sha256 -> one hex digit changed",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "runtime-binary-unverified",
+      "firstViolation": "/usr/bin/runsc: SHA-256 does not match the recorded approved file"
+    },
+    {
+      "name": "sidecar-sha256",
+      "change": "sidecar /etc/containerd/runsc.toml sha256 -> one hex digit changed",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "runtime-binary-unverified",
+      "firstViolation": "/etc/containerd/runsc.toml: SHA-256 does not match the recorded approved file"
+    },
+    {
+      "name": "image-id",
+      "change": "imageId -> one hex digit changed (an image that does not exist)",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "removed-verified",
+      "firstViolation": "preflight error: create: exited with 1"
+    },
+    {
+      "name": "canary-manifest-digest",
+      "change": "canaryManifestDigest -> one hex digit changed",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "removed-verified",
+      "firstViolation": "ImageManifestDescriptor: must be a linux image manifest descriptor with the recorded canary manifest digest and only known keys"
+    },
+    {
+      "name": "gvisor-fingerprint",
+      "change": "gvisorProcVersion -> one character added",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "refused",
+      "lastStep": "gvisor-unverified",
+      "firstViolation": "gVisor evidence: the container /proc/version does not match the recorded gVisor reference"
+    },
+    {
+      "name": "runc-instead-of-gvisor",
+      "change": "isolating runtimes removed (Docker's default runc runs the canary)",
+      "passed": true,
+      "detail": "as expected",
+      "rating": "development-only",
+      "lastStep": "removed-verified",
+      "firstViolation": null
+    }
+  ]
+}

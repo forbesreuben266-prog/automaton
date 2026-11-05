@@ -1,0 +1,184 @@
+{
+  "kind": "research-sandbox-trust-evidence",
+  "verdict": "needs-review",
+  "evidence": {
+    "version": 1,
+    "collectedAt": "2026-11-05T10:44:44.919Z",
+    "packages": {
+      "docker-ce": {
+        "installed": "5:29.9.3-1~ubuntu.24.04~noble",
+        "status": "ii",
+        "verify": [],
+        "sources": [
+          "https://download.docker.com/linux/ubuntu",
+          "/var/lib/dpkg/status"
+        ]
+      },
+      "docker-ce-cli": {
+        "installed": "5:29.9.3-1~ubuntu.24.04~noble",
+        "status": "ii",
+        "verify": [],
+        "sources": [
+          "https://download.docker.com/linux/ubuntu",
+          "/var/lib/dpkg/status"
+        ]
+      },
+      "containerd.io": {
+        "installed": "2.4.2-3~ubuntu.24.04~noble",
+        "status": "ii",
+        "verify": [],
+        "sources": [
+          "https://download.docker.com/linux/ubuntu",
+          "/var/lib/dpkg/status"
+        ]
+      },
+      "runsc": {
+        "installed": "20261102.0",
+        "status": "ii",
+        "verify": [],
+        "sources": [
+          "https://storage.googleapis.com/gvisor/releases",
+          "/var/lib/dpkg/status"
+        ]
+      }
+    },
+    "aptSources": [
+      {
+        "file": "/etc/apt/sources.list.d/docker.sources",
+        "uris": [
+          "https://download.docker.com/linux/ubuntu"
+        ],
+        "signedBy": "/etc/apt/keyrings/docker.asc",
+        "signedByInline": false,
+        "trusted": false,
+        "keyringSha256": "1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570",
+        "keyringOwnerUid": 0,
+        "keyringMode": "644",
+        "fingerprints": [
+          "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+        ]
+      },
+      {
+        "file": "/etc/apt/sources.list.d/gvisor.list",
+        "uris": [
+          "https://storage.googleapis.com/gvisor/releases"
+        ],
+        "signedBy": "/usr/share/keyrings/gvisor-archive-keyring.gpg",
+        "signedByInline": false,
+        "trusted": false,
+        "keyringSha256": "6980344d5d10b0fe4dea6b0a8a3f12a50ff1b2f3f81c40fed43dd942eace0184",
+        "keyringOwnerUid": 0,
+        "keyringMode": "644",
+        "fingerprints": [
+          "6F1DF85E3A71C24918E727D56FC6D554E32BD943"
+        ]
+      }
+    ],
+    "dockerd": {
+      "argv": [
+        "/usr/bin/dockerd",
+        "-H",
+        "fd://",
+        "--containerd=/run/containerd/containerd.sock"
+      ],
+      "dropIns": []
+    },
+    "daemonJson": {
+      "present": true,
+      "sha256": "2a35d833a5f8b7712711f26aae439d668fd5ca7620b99a4f8455a50a8c911da3",
+      "keys": [
+        "runtimes"
+      ],
+      "duplicateKey": null,
+      "valid": true,
+      "runscRuntime": {
+        "keys": [
+          "path",
+          "runtimeArgs"
+        ],
+        "path": "/usr/bin/runsc",
+        "runtimeArgs": [
+          "--oci-seccomp"
+        ]
+      },
+      "otherRuntimes": [],
+      "defaultRuntime": null,
+      "features": null
+    },
+    "dockerInfo": {
+      "ServerVersion": "29.9.3",
+      "SecurityOptions": [
+        "name=apparmor,profile=default",
+        "name=seccomp,profile=builtin",
+        "name=cgroupns"
+      ],
+      "DefaultRuntime": "runc",
+      "CgroupDriver": "systemd",
+      "CgroupVersion": "2",
+      "Driver": "overlayfs",
+      "DockerRootDir": "/var/lib/docker",
+      "OSType": "linux",
+      "Architecture": "x86_64"
+    },
+    "runscRuntime": {
+      "path": "/usr/bin/runsc",
+      "runtimeArgs": [
+        "--oci-seccomp"
+      ]
+    },
+    "dockerVersion": {
+      "server": "29.9.3",
+      "client": "29.9.3",
+      "components": [
+        {
+          "name": "Engine",
+          "version": "29.9.3",
+          "gitCommit": "70efc0e"
+        },
+        {
+          "name": "containerd",
+          "version": "v2.4.2",
+          "gitCommit": "b7a25261e029d68978bbf290df0a62fc819b3c51"
+        },
+        {
+          "name": "runc",
+          "version": "1.5.2",
+          "gitCommit": "v1.5.2-0-g29dd3dc2"
+        },
+        {
+          "name": "docker-init",
+          "version": "0.19.0",
+          "gitCommit": "de40ad0"
+        }
+      ]
+    },
+    "binaries": {
+      "/usr/bin/dockerd": "1a1128e84fea111e7560147380b69833d13d1f1009044d0061206037f1657a5b",
+      "/usr/bin/docker": "4965a5e468369284e157b20ef9d9da2c7c1cd772d41d56ed822fb48d3898f382",
+      "/usr/bin/containerd": "fc185d75979d92a4f8de99b76293dca7fe81142e9c5fd01d7da59f786f0fc8d1",
+      "/usr/bin/containerd-shim-runc-v2": "ca4c4b5919655332666dda634338b826d73a12cdd3b6633627e95d1ab4bc138a",
+      "/usr/bin/runc": "1248fee8f9a0dc5382f888990d669e2bd225045869b9246f848a1681161abc96"
+    },
+    "kernel": {
+      "lsm": "lockdown,capability,landlock,yama,apparmor",
+      "apparmor": "Y"
+    }
+  },
+  "findings": [
+    {
+      "severity": "review",
+      "kind": "signature",
+      "message": "apt source /etc/apt/sources.list.d/gvisor.list (storage.googleapis.com): gVisor signing key fingerprint(s) 6F1DF85E3A71C24918E727D56FC6D554E32BD943: compare with https://gvisor.dev/docs/user_guide/install/ in the decision record"
+    }
+  ],
+  "blocking": 0,
+  "review": 1,
+  "limits": {
+    "origin": "apt-cache policy shows the installed VERSION is offered by the repository; it does not prove these installed bytes were downloaded from it.",
+    "signature": "the repository is configured with a signed-by keyring holding the expected key, so apt verified its signed index at download time; no signature is stored for the installed files, so this is not a cryptographic proof about them.",
+    "integrity": "dpkg --verify compares installed files with the MD5 sums in the local package database; root could alter both; binary SHA-256 values are recorded for later comparison.",
+    "configuration": "the dockerd systemd unit and /etc/docker/daemon.json as read now.",
+    "daemon": "docker info and docker version as reported by the running daemon (self-reported)."
+  },
+  "digest": "sha256:b4417cc5b0cdf67d48b5ff46405354c0b7132516b9d63f064957f7642f984624"
+}

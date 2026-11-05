@@ -1,0 +1,67 @@
+{
+  "runner": "research-sandbox-executor",
+  "status": "refused",
+  "violations": [
+    "gate: untrusted input is not allowed by this preflight result",
+    "M1: host-side runtime binary and configuration verification is implemented against fakes only and has not been reviewed or exercised on a real host; a matching binary hash, unchanged daemon-reported configuration and the in-container /proc/version fingerprint do not by themselves prove isolation",
+    "M3: trust in the daemon-reported seccomp profile and the pinned Docker version has not been explicitly resolved",
+    "rating is refused",
+    "result has violations",
+    "result is not bound to a run"
+  ],
+  "steps": [
+    "inputs-checked",
+    "preflight"
+  ],
+  "report": null,
+  "audit": {
+    "version": 1,
+    "startedAt": "2026-11-05T10:44:52.463Z",
+    "finishedAt": "2026-11-05T10:44:54.711Z",
+    "runId": "setup-20261105-104439-807351351",
+    "jobSha256": "c93a7fdf03a2552c5952371ff325de5b3b63823690d3d08d510c682eae5b8ecb",
+    "command": [
+      "node",
+      "/app/research-cli/main.js",
+      "trading",
+      "backtest",
+      "--data-root",
+      "/in",
+      "--repo-root",
+      "/app",
+      "--dataset",
+      "fict-us-trend.json",
+      "--config",
+      "run-us-ma.json"
+    ],
+    "inputs": [
+      {
+        "name": "fict-us-trend.json",
+        "sha256": "2972fd453c39196eaee5a9fb6b662cb92e63ae9160e48dcdea2b9fe6d6961837",
+        "size": 5865,
+        "dev": "64769",
+        "ino": "802545"
+      },
+      {
+        "name": "run-us-ma.json",
+        "sha256": "2608ded501ca25be891b9aa4e1735721f34a4be6fcedc91f1b3cf1275592da1c",
+        "size": 285,
+        "dev": "64769",
+        "ino": "802546"
+      }
+    ],
+    "imageRef": "sha256:3e8a7371ba841599f91a259089fd4bad1e0e5e0bda7feba0518a555b5e6d46c5",
+    "runtime": null,
+    "preflight": {
+      "rating": "refused",
+      "lastStep": "meets-spec-blocked",
+      "violations": 2
+    },
+    "containerId": null,
+    "researchExitCode": null,
+    "reportSha256": null,
+    "reportBytes": null,
+    "hostProcessEvidence": null,
+    "cleanup": null
+  }
+}

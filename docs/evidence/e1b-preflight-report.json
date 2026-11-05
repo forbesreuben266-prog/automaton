@@ -1,0 +1,71 @@
+{
+  "runner": "research-sandbox-preflight",
+  "runId": "setup-20261105-104439-807351351",
+  "rating": "refused",
+  "allowsUntrustedInput": false,
+  "blockedOnlyByMeetsSpecBlockers": true,
+  "blockers": [
+    "M1: host-side runtime binary and configuration verification is implemented against fakes only and has not been reviewed or exercised on a real host; a matching binary hash, unchanged daemon-reported configuration and the in-container /proc/version fingerprint do not by themselves prove isolation",
+    "M3: trust in the daemon-reported seccomp profile and the pinned Docker version has not been explicitly resolved"
+  ],
+  "violations": [
+    "M1: host-side runtime binary and configuration verification is implemented against fakes only and has not been reviewed or exercised on a real host; a matching binary hash, unchanged daemon-reported configuration and the in-container /proc/version fingerprint do not by themselves prove isolation",
+    "M3: trust in the daemon-reported seccomp profile and the pinned Docker version has not been explicitly resolved"
+  ],
+  "steps": [
+    "spec",
+    "paths",
+    "host-paths",
+    "engine-target",
+    "engine-info",
+    "engine-version",
+    "runtime-binary-verified",
+    "create",
+    "runtime-config-rechecked-after-create",
+    "inspect",
+    "host-paths-recheck",
+    "container-host-files-pending",
+    "canary",
+    "host-process-evidence",
+    "inspect-after-canary",
+    "container-host-files-after-canary",
+    "removed-verified",
+    "runtime-config-rechecked-after-canary",
+    "runtime-binary-rechecked",
+    "gvisor-verified",
+    "meets-spec-blocked"
+  ],
+  "runtime": "runsc",
+  "engine": {
+    "serverVersion": "29.9.3",
+    "seccompProfile": "builtin",
+    "rootless": false,
+    "runtimes": [
+      "io.containerd.runc.v2",
+      "runc",
+      "runsc"
+    ]
+  },
+  "cleanup": {
+    "containerName": "research-sandbox-setup-20261105-104439-807351351-canary",
+    "containerId": "9c20e100120e3b062f72e5225f9f278cb5914e2ab00484f67d6f584b5afdd181",
+    "attempts": 1,
+    "verifiedRemoved": true,
+    "detail": "removed and verified"
+  },
+  "hostTrust": "operator-attested-only",
+  "hostProcessEvidence": {
+    "polls": 86,
+    "sandboxProcesses": 2,
+    "canaryOnHost": 0,
+    "replacedExecutables": 0,
+    "overflow": false,
+    "executables": [
+      "/usr/bin/containerd-shim-runc-v2",
+      "/usr/bin/dash",
+      "/usr/bin/docker",
+      "/usr/bin/gvisor-bin/gvisor_sentry",
+      "/usr/bin/runsc"
+    ]
+  }
+}
