@@ -34,6 +34,12 @@ the Step A2 command). Host folder:
 | `negative-controls.json` | `204501bdc37d656b934e0ef6a49f6bd3971915804713e6389fc7e3c72ffb55ef` | 8/8 controls as expected (baseline, docker-server-version, runsc-sha256, sidecar-sha256, image-id, canary-manifest-digest, gvisor-fingerprint, runc-instead-of-gvisor; runc only development-only) |
 | `trust-evidence.json` | `b80fc575b08466678046961ea8961d0fb1c37ab485be4b09fea67c74d285fe35` | verdict needs-review, 0 blocking, 1 review finding (gVisor key `6F1DF85E3A71C24918E727D56FC6D554E32BD943`); AppArmor enabled, docker-default loaded, Docker reports AppArmor, seccomp and cgroups |
 
+**Export check (2026-11-05, operator-reported):** the owner ran the
+read-only compact export command in the same folder. It completed, printed
+the same three SHA-256 values as above, and showed the encoded bundle; the
+owner holds screenshots of that output. The encoded content itself has not
+been transferred, so the files remain unverified here.
+
 **Evidence gap (no new VPS test needed):** the three files themselves must
 be transferred (read-only `tar | base64` command, then pasted) so that their
 hashes, schemas, findings and absence of sensitive data can be verified
