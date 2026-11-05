@@ -117,6 +117,16 @@ describe("A4: blocker governance", () => {
     expect(fs.readFileSync(path.join(REPO, "src/research-sandbox/preflight.ts"), "utf8")).toMatch(/export const MEETS_SPEC_BLOCKERS: readonly string\[\] = Object\.freeze\(\[/);
   });
 
+  it("the decision draft stays PENDING: it can't be mistaken for a decision and never states an acceptance as a record field", () => {
+    const draft = fs.readFileSync(path.join(REPO, "docs/M1-M3-DECISION-DRAFT.md"), "utf8");
+    expect(draft).toContain("**Status: PENDING.**");
+    expect(draft).not.toMatch(/^Decision: ACCEPTED$/m);
+    expect(draft).not.toMatch(/^Approved-by: /m);
+    for (const d of ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]) expect(draft).toContain(`**${d} (M`);
+    expect(decisionProblems(draft, "M1").length).toBeGreaterThan(0);
+    expect(decisionProblems(draft, "M3").length).toBeGreaterThan(0);
+  });
+
   it("the template describes the required format but is never accepted as a decision", () => {
     const t = fs.readFileSync(TEMPLATE, "utf8");
     for (const id of ["M1", "M3"]) expect(decisionProblems(t, id).length).toBeGreaterThan(0);
