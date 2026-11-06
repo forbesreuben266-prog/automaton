@@ -61,6 +61,8 @@ describe("E3 jobs.sh: static properties", () => {
 
   it("no override, network, privileged or untrusted-execution paths; every evidence write is exclusive", () => {
     for (const bad of ["--network", "--privileged", "eval(", "new Function", "--no-verify", "skip", "override"]) expect(JS.includes(bad), bad).toBe(false);
+    // Deletion appears only in: the prepare temp folder, the run folder's staged inputs (moved to evidence first) and the cleanup plan.
+    expect((JS.match(/fs\.(rmSync|unlinkSync|rmdirSync)\(/g) ?? []).length).toBe(7);
     const writes = [...JS.matchAll(/fs\.writeFileSync\(([^\n]*)/g)].map((x) => x[1]);
     expect(writes.length).toBeGreaterThan(10);
     for (const w of writes) expect(w, w).toMatch(/flag: "wx"/);
@@ -292,6 +294,69 @@ process.stdout.write(JSON.stringify(r)); process.exitCode = m === "refused" ? 1 
     fs.appendFileSync(`${STATE}/${ev1}/report.txt`, "tampered\n");
     expect(root(["results", "10"]).out).toContain("(EVIDENCE CHANGED)");
     expect(JSON.parse(root(["export-read", ev1]).out).summary.evidenceIntact).toBe(false);
+  });
+
+  it("integrity labels: stopped-before-the-job is not reported as changed; a run without checksums is NOT SEALED", () => {
+    template("lbl"); const h = hashOf(prepare("lbl").out, "lbl");
+    fs.writeFileSync(`${T}/leftover`, ""); run("lbl", h); fs.unlinkSync(`${T}/leftover`); // stops before the job
+    const stopped = fs.readdirSync(STATE).filter((n) => n.startsWith("e2-lbl-")).sort().pop()!;
+    const d = JSON.parse(root(["results", stopped]).out);
+    expect([d.outcome, d.integrity, d.evidenceIntact]).toEqual(["STOPPED BEFORE THE JOB", "not applicable", null]);
+    const table = root(["results", "100"]).out.split("\n").find((l) => l.includes(stopped))!;
+    expect(table).not.toContain("EVIDENCE CHANGED");
+    expect(table).not.toContain("NOT SEALED");
+    template("seal"); const h2 = hashOf(prepare("seal").out, "seal");
+    const r = run("seal", h2); const ev = /Evidence \(root-only\): (e2-seal-\S+)/.exec(r.out)![1];
+    fs.unlinkSync(`${STATE}/${ev}/SHA256SUMS`);
+    expect(root(["results", "100"]).out.split("\n").find((l) => l.includes(ev))).toContain("NOT SEALED");
+    expect(JSON.parse(root(["results", ev]).out)).toMatchObject({ integrity: "NOT SEALED", evidenceIntact: false });
+  });
+
+  it("cleanup is list-only by default and never lists evidence, reports, logs or used approvals", () => {
+    // Candidates: one expired unused approval, an interrupted-prepare folder, the operator's build folders.
+    template("exp"); const h = hashOf(prepare("exp").out, "exp");
+    const m = JSON.parse(fs.readFileSync(`${APPROVALS}/${h}.json`, "utf8")); m.createdAt = new Date(Date.now() - 30 * 3600e3).toISOString();
+    const b = Buffer.from(JSON.stringify(m, null, 2) + "\n"); const old = sha(b); fs.writeFileSync(`${APPROVALS}/${old}.json`, b, { mode: 0o600 });
+    const usedOld = sha(Buffer.from("used-and-old")); fs.writeFileSync(`${APPROVALS}/${usedOld}.json`, b, { mode: 0o600 }); fs.writeFileSync(`${APPROVALS}/${usedOld}.used`, "x", { mode: 0o600 });
+    fs.mkdirSync(`${STATE}/e2-prepare-exp-20261101-000000-aaaaaa`, { mode: 0o700 });
+    fs.mkdirSync(`${T}/root/tmp`, { recursive: true }); fs.chmodSync(`${T}/root/tmp`, 0o1777); // like the real /tmp
+    fs.mkdirSync(`${T}/root/tmp/e3-build.AbC123`); asOp(`${T}/root/tmp/e3-build.AbC123`); fs.writeFileSync(`${T}/root/tmp/e3-build.AbC123/x.js`, "x");
+    fs.mkdirSync(`${T}/root/tmp/e2-build.root01`); // owned by root, not the operator: never listed
+    fs.symlinkSync("/etc", `${T}/root/tmp/e3-build.LiNk01`); // a link: never listed
+    const before = (d: string) => fs.readdirSync(d).sort();
+    const keep = { state: before(STATE), approvals: before(APPROVALS) };
+    const dry = root(["cleanup"]);
+    expect(dry.code, dry.out).toBe(0);
+    const listed = [...dry.out.matchAll(/^  (\S+)\s+(\/\S+)$/gm)].map((x) => `${x[1]} ${x[2]}`).sort();
+    expect(listed).toEqual([
+      `expired-unused-approval /var/lib/research-sandbox-setup/e2-approvals/${old}.json`,
+      "interrupted-prepare-folder /var/lib/research-sandbox-setup/e2-prepare-exp-20261101-000000-aaaaaa",
+      "temporary-build-folder /tmp/e3-build.AbC123",
+    ]);
+    expect(dry.out).toContain("DRY RUN: nothing was deleted");
+    expect([before(STATE), before(APPROVALS)]).toEqual([keep.state, keep.approvals]);
+    const plan = /cleanup --delete ([0-9a-f]{64})/.exec(dry.out)![1];
+    // A wrong hash, or a list that changed after the dry run: nothing is deleted.
+    expect(root(["cleanup", "--delete", "0".repeat(64)]).out).toContain("Nothing was deleted");
+    fs.mkdirSync(`${T}/root/tmp/e2-build.NeW999`); asOp(`${T}/root/tmp/e2-build.NeW999`);
+    const changed = root(["cleanup", "--delete", plan]);
+    expect(changed.code).toBe(1); expect(changed.out).toContain("the plan hash does not match");
+    expect([before(STATE), before(APPROVALS)]).toEqual([keep.state, keep.approvals]);
+    fs.rmdirSync(`${T}/root/tmp/e2-build.NeW999`);
+    // The exact plan deletes exactly the listed paths and records it; evidence, logs and used approvals stay.
+    const del = root(["cleanup", "--delete", plan]);
+    expect(del.code, del.out).toBe(0);
+    expect(del.out).toContain("deleted 3 of 3 listed path(s)");
+    expect(fs.existsSync(`${APPROVALS}/${old}.json`)).toBe(false);
+    expect(fs.existsSync(`${T}/root/tmp/e3-build.AbC123`)).toBe(false); // removed with the operator's privileges
+    expect(fs.existsSync(`${APPROVALS}/${h}.json`)).toBe(true);
+    expect(fs.existsSync(`${APPROVALS}/${usedOld}.json`) && fs.existsSync(`${APPROVALS}/${usedOld}.used`)).toBe(true);
+    expect(fs.existsSync(`${T}/root/tmp/e2-build.root01`) && fs.lstatSync(`${T}/root/tmp/e3-build.LiNk01`).isSymbolicLink() && fs.existsSync("/etc/hostname")).toBe(true);
+    expect(before(STATE).filter((n) => !n.startsWith("e2-prepare-") && n !== "e4-cleanup.log")).toEqual(keep.state.filter((n) => !n.startsWith("e2-prepare-")));
+    expect(fs.existsSync(`${STATE}/e2-runs.log`)).toBe(true);
+    expect(fs.readFileSync(`${STATE}/e4-cleanup.log`, "utf8")).toContain(`plan=${plan} deleted=3/3`);
+    expect(root(["cleanup"]).out).toContain("Nothing to clean up");
+    expect(user(["cleanup"]).out).toContain("needs sudo");
   });
 
   it("tampering after approval stops before staging and leaves the approval unused", () => {

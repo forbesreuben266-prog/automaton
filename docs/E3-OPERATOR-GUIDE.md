@@ -54,6 +54,7 @@ It downloads the script from a fixed commit and runs it only if
 | 5. Run | `jobs run my-job <hash>` | Exactly one job. You can use the first 16 or more characters of the hash if they match only one approval. |
 | 6. Results | `jobs results` | Recent runs: outcome, runtime, gVisor processes, cleanup and report hash. For one run's details (input hashes, approval, commit), use `jobs results <evidence>`. |
 | 7. Export | `jobs export <evidence>` | Writes `report.txt`, `summary.json` and `SHA256SUMS` to `~/research-results/<evidence>/`, readable only by you. Download them with Termius SFTP. |
+| Housekeeping | `jobs cleanup` | Lists leftovers only and deletes nothing: expired approvals that were never used, folders left by an interrupted `prepare`, and your temporary build folders in `/tmp`. Run evidence, reports, logs and used approvals are never listed. To delete exactly the listed paths, run `jobs cleanup --delete <plan-hash>` with the hash it printed. If anything changed since the list was shown, nothing is deleted. |
 
 Preparing several jobs at once gives each one its own approval. There is no
 batch run: every `run` is one job, with its own hash.
@@ -74,6 +75,19 @@ batch run: every `run` is one job, with its own hash.
   as plain text with control characters replaced; open them as text only.
 - **`check` is advisory.** It mirrors the research CLI's main rules, but the
   research CLI inside the sandbox has the final say.
+
+## Reading `results`
+
+- `COMPLETED`: the research CLI exited 0. `INPUT`: the research CLI refused
+  the input, and its reasons are in the report. `STOP`: a check failed after
+  the job started. `STOPPED`: the run stopped before the job, so no
+  container ran.
+- **Evidence markers:**
+  - `(EVIDENCE CHANGED)`: a file in the evidence folder no longer matches its
+    checksum. Investigate.
+  - `(NOT SEALED ...)`: the job ran, but the checksum file is missing.
+    Investigate.
+  - Runs that stopped before the job are never sealed, and show no marker.
 
 ## What a run changes on the VPS
 

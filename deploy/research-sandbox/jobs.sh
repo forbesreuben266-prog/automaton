@@ -6,11 +6,12 @@
 #   run <job> <approval-hash>                         exactly one approved job under gVisor (hash or unique 16+ prefix)
 #   results [<n> | <evidence>]                        recent runs, or one run's summary
 #   export <evidence>                                 copy report + summary to ~/research-results/<evidence>/
+#   cleanup [--delete <plan-hash>]                    list leftovers (default); delete only an exact listed plan
 ( set -u
 CMD=${1:-}; [ "$#" -gt 0 ] && shift
 C=f7be90bfff9a9b030513e92611e771fb6dc2194e
 IN="$HOME/research-inputs"
-usage() { sed -n '3,8p' "$0" 2>/dev/null | sed 's/^# *//'; [ -s "$0" ] || echo "Usage: template|check|prepare|run|results|export (see docs/E3-OPERATOR-GUIDE.md)"; exit 2; }
+usage() { sed -n '3,9p' "$0" 2>/dev/null | sed 's/^# *//'; [ -s "$0" ] || echo "Usage: template|check|prepare|run|results|export|cleanup (see docs/E3-OPERATOR-GUIDE.md)"; exit 2; }
 okjob() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]; }
 stop() { echo "STOP: $* (nothing was run)"; exit 1; }
 js() { "$@" <<'JS'
@@ -270,27 +271,30 @@ function summarize(dir) {
   const r = (f) => { try { return fs.readFileSync(path.join(dir, f)); } catch { return null; } };
   const j = (f) => { try { return JSON.parse(r(f).toString("utf8")); } catch { return null; } };
   const ex = j("executor-run.json"), ap = j("approval.json"), a = (ex && ex.audit) || {};
-  const sums = r("SHA256SUMS"); let intact = sums !== null;
-  if (sums) for (const line of sums.toString("utf8").split("\n").filter(Boolean)) { const [h, f] = line.split(/  /); const b = r(f); if (!b || sha(b) !== h) intact = false; }
+  // integrity: "intact" / "CHANGED" (checksums present, a file differs) / "NOT SEALED" (the job ran but no checksums) /
+  // "not applicable" (stopped before the job: the evidence folder is never sealed then, so there is nothing to verify).
+  const sums = r("SHA256SUMS");
+  let integrity = sums !== null ? "intact" : ex ? "NOT SEALED" : "not applicable";
+  if (sums) for (const line of sums.toString("utf8").split("\n").filter(Boolean)) { const [h, f] = line.split(/  /); const b = r(f); if (!b || sha(b) !== h) integrity = "CHANGED"; }
   const rep = r("report.txt");
   const t0 = Date.parse(a.startedAt), t1 = Date.parse(a.finishedAt);
   const h = a.hostProcessEvidence || null;
   return {
     evidence: path.basename(dir), job: ap ? ap.job : null, approval: ap ? sha(r("approval.json")) : null, command: ap ? ap.command : null,
     status: ex ? ex.status : "no executor result", researchExitCode: a.researchExitCode ?? null,
-    outcome: ex && ex.status === "completed" && a.researchExitCode === 0 ? "COMPLETED" : ex && ex.status === "completed" && a.researchExitCode === 1 ? "INPUT REFUSED BY THE RESEARCH CLI" : "STOP",
+    outcome: ex && ex.status === "completed" && a.researchExitCode === 0 ? "COMPLETED" : ex && ex.status === "completed" && a.researchExitCode === 1 ? "INPUT REFUSED BY THE RESEARCH CLI" : ex ? "STOP" : "STOPPED BEFORE THE JOB",
     startedAt: a.startedAt || null, runtimeSeconds: Number.isFinite(t1 - t0) ? Math.round((t1 - t0) / 100) / 10 : null,
     inputs: ap ? Object.fromEntries(Object.entries(ap.inputs).map(([n, i]) => [n, i.sha256])) : null, jobFileSha256: ap ? ap.jobFile.sha256 : null,
     reportSha256: rep ? sha(rep) : null, reportBytes: rep ? rep.length : null,
     gvisor: h ? { samples: h.polls, sandboxProcesses: h.sandboxProcesses, researchScriptOnHost: h.canaryOnHost, replacedExecutables: h.replacedExecutables } : null,
     cleanupVerified: !!(a.cleanup && a.cleanup.verifiedRemoved), runtime: a.runtime || null, image: a.imageRef || null,
-    commit: ap ? ap.code.commit : null, evidenceIntact: intact,
+    commit: ap ? ap.code.commit : null, integrity, evidenceIntact: integrity === "intact" ? true : integrity === "not applicable" ? null : false,
   };
 }
 
 (async () => {
   const argv = process.argv.slice(2), MODE = argv[0];
-  const ROOT_MODES = ["prepare", "run", "results", "export-read"], USER_MODES = ["template", "check", "export-write"];
+  const ROOT_MODES = ["prepare", "run", "results", "export-read", "cleanup"], USER_MODES = ["template", "check", "export-write"];
   const euid = process.geteuid();
   if (ROOT_MODES.includes(MODE) && euid !== 0) { console.log("STOP: this step needs sudo"); process.exitCode = 1; return; }
   if (USER_MODES.includes(MODE) && euid === 0) { console.log("STOP: run this step as yourself, not as root"); process.exitCode = 1; return; }
@@ -351,7 +355,7 @@ function summarize(dir) {
       for (const [n, t] of Object.entries(out)) fs.writeFileSync(`/proc/self/fd/${dfd}/${NAME}/${n}`, t, { mode: 0o600, flag: "wx" });
     } catch (e) { console.log(`STOP: ${clean(e.message, 200)}`); process.exitCode = 1; return; } finally { fs.closeSync(dfd); }
     const s = b.summary;
-    console.log(`Exported to ${BASE}/${NAME}/ (report.txt, summary.json, SHA256SUMS; readable only by you)\n  ${s.job}: ${s.outcome}, report sha256 ${s.reportSha256}, evidence intact: ${s.evidenceIntact ? "yes" : "NO"}`);
+    console.log(`Exported to ${BASE}/${NAME}/ (report.txt, summary.json, SHA256SUMS; readable only by you)\n  ${s.job}: ${s.outcome}, report sha256 ${s.reportSha256}, evidence: ${s.integrity}`);
     console.log("  report.txt is untrusted text produced from your input: open it as plain text only.");
     return;
   }
@@ -367,10 +371,56 @@ function summarize(dir) {
     console.log("started (UTC)        job                  outcome     runtime  gVisor procs  on host  cleanup  report sha256      evidence");
     for (const d of dirs.slice(-n)) {
       const s = summarize(path.join(STATE, d));
-      console.log(`${String(s.startedAt || "-").slice(0, 19).padEnd(20)} ${String(s.job || "-").slice(0, 20).padEnd(20)} ${s.outcome.split(" ")[0].padEnd(11)} ${String(s.runtimeSeconds ?? "-").padStart(6)} s ${String(s.gvisor ? s.gvisor.sandboxProcesses : "-").padStart(12)} ${String(s.gvisor ? s.gvisor.researchScriptOnHost : "-").padStart(8)}  ${(s.cleanupVerified ? "yes" : "NO").padEnd(7)}  ${String(s.reportSha256 || "-").slice(0, 16).padEnd(17)}  ${d}${s.evidenceIntact ? "" : "  (EVIDENCE CHANGED)"}`);
+      console.log(`${String(s.startedAt || "-").slice(0, 19).padEnd(20)} ${String(s.job || "-").slice(0, 20).padEnd(20)} ${s.outcome.split(" ")[0].padEnd(11)} ${String(s.runtimeSeconds ?? "-").padStart(6)} s ${String(s.gvisor ? s.gvisor.sandboxProcesses : "-").padStart(12)} ${String(s.gvisor ? s.gvisor.researchScriptOnHost : "-").padStart(8)}  ${(s.cleanupVerified ? "yes" : "NO").padEnd(7)}  ${String(s.reportSha256 || "-").slice(0, 16).padEnd(17)}  ${d}${s.integrity === "CHANGED" ? "  (EVIDENCE CHANGED)" : s.integrity === "NOT SEALED" ? "  (NOT SEALED: the job ran but checksums are missing)" : ""}`);
     }
     if (dirs.length === 0) console.log("(no runs yet)");
     console.log("\nDetails: results <evidence>    Copy report and summary to ~/research-results: export <evidence>");
+    return;
+  }
+
+  if (MODE === "cleanup") {
+    // Lists ONLY leftovers that are safe to remove: expired approvals that were never used, temporary folders of an
+    // interrupted prepare, and the operator's own temporary build folders. Run evidence, reports, logs and used
+    // approvals are never listed. Nothing is deleted unless the exact plan hash shown by a dry run is given back.
+    const del = argv[1] === "--delete" ? String(argv[2]) : null;
+    const items = [];
+    if (fs.existsSync(APPROVALS)) for (const n of fs.readdirSync(APPROVALS).sort()) {
+      const m = /^([0-9a-f]{64})\.json$/.exec(n); if (!m) continue;
+      if (fs.existsSync(`${APPROVALS}/${m[1]}.used`)) continue; // used approvals are part of the audit trail
+      try { const a = JSON.parse(readRootFile(`${APPROVALS}/${n}`, 64 * 1024).toString("utf8")); const age = Date.now() - Date.parse(a.createdAt);
+        if (Number.isFinite(age) && age > APPROVAL_TTL_MS) items.push(["expired-unused-approval", `${APPROVALS}/${n}`]); } catch { /* unreadable: not listed */ }
+    }
+    for (const n of fs.readdirSync(STATE).sort()) {
+      if (!/^e2-prepare-[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/.test(n)) continue;
+      const s = fs.lstatSync(path.join(STATE, n)); if (s.isDirectory() && !s.isSymbolicLink() && s.uid === 0) items.push(["interrupted-prepare-folder", path.join(STATE, n)]);
+    }
+    const TMP = ROOT + "/tmp";
+    for (const n of fs.existsSync(TMP) ? fs.readdirSync(TMP).sort() : []) {
+      if (!/^e[23]-build\.[A-Za-z0-9]{6}$/.test(n)) continue;
+      const s = fs.lstatSync(path.join(TMP, n)); if (s.isDirectory() && !s.isSymbolicLink() && s.uid === opUid) items.push(["temporary-build-folder", path.join(TMP, n)]);
+    }
+    const plan = sha(items.map(([k, p]) => `${k} ${p}`).join("\n"));
+    if (items.length === 0) { console.log("Nothing to clean up (run evidence, reports, logs and used approvals are never listed)."); return; }
+    console.log(`Cleanup candidates (${items.length}); run evidence, reports, logs and used approvals are never listed:`);
+    for (const [k, p] of items) console.log(`  ${k.padEnd(27)} ${p.slice(ROOT.length)}`);
+    if (del === null) { console.log(`\nDRY RUN: nothing was deleted. To delete exactly these ${items.length} path(s), and nothing else:\n  cleanup --delete ${plan}`); return; }
+    if (del !== plan) { console.log(`\nSTOP: the plan hash does not match the current list (the list changed, or the hash is wrong). Nothing was deleted.`); process.exitCode = 1; return; }
+    let n = 0;
+    for (const [k, p] of items) {
+      const s = fs.lstatSync(p);
+      if (s.isSymbolicLink()) { bad(`${p.slice(ROOT.length)}: became a link; not deleted`); continue; }
+      if (k === "expired-unused-approval") { if (!s.isFile()) { bad(`${p.slice(ROOT.length)}: not a file; not deleted`); continue; } fs.unlinkSync(p); }
+      else if (!s.isDirectory()) { bad(`${p.slice(ROOT.length)}: not a folder; not deleted`); continue; }
+      else if (k === "temporary-build-folder") {
+        // The operator's own folder is removed with the operator's privileges, never as root.
+        if (s.uid !== opUid) { bad(`${p.slice(ROOT.length)}: owner changed; not deleted`); continue; }
+        const r = cp.spawnSync("/usr/bin/setpriv", [`--reuid=${opUid}`, `--regid=${s.gid}`, "--clear-groups", "/bin/rm", "-rf", "--one-file-system", "--", p], { encoding: "utf8", timeout: 60000 });
+        if (r.status !== 0 || fs.existsSync(p)) { bad(`${p.slice(ROOT.length)}: could not be removed as the operator (${clean(r.stderr || r.error, 120)})`); continue; }
+      } else fs.rmSync(p, { recursive: true });
+      n += 1; console.log(`  deleted ${p.slice(ROOT.length)}`);
+    }
+    fs.appendFileSync(`${STATE}/e4-cleanup.log`, `${new Date().toISOString()} plan=${plan} deleted=${n}/${items.length}\n${items.map(([k, p]) => `  ${k} ${p.slice(ROOT.length)}`).join("\n")}\n`, { mode: 0o600 });
+    console.log(`\nRESULT: deleted ${n} of ${items.length} listed path(s); recorded in e4-cleanup.log.`); process.exitCode = n === items.length ? 0 : 1;
     return;
   }
 
@@ -655,6 +705,8 @@ case "$CMD" in
   export) { [ "$#" -eq 1 ] && [[ "$1" =~ ^e2-[a-z0-9][a-z0-9-]{0,39}-[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$ ]]; } || usage
     T=$(mktemp) || stop "cannot create a temporary file"
     js sudo node - export-read "$1" > "$T" && js node - export-write "$1" "$HOME/research-results" "$T"; r=$?; rm -f -- "$T"; exit $r ;;
+  cleanup) { [ "$#" -eq 0 ] || { [ "$#" -eq 2 ] && [ "$1" = --delete ] && [[ "$2" =~ ^[0-9a-f]{64}$ ]]; }; } || usage
+    js sudo node - cleanup "$@" ;;
   *) usage ;;
 esac
 )
