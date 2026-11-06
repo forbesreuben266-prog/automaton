@@ -28,7 +28,7 @@
 import type { ContainerEngine } from "./engine.js";
 import type { HostFs } from "./host-paths.js";
 import type { HostProcessEvidence, HostProcessObserver } from "./host-processes.js";
-import { MEETS_SPEC_BLOCKERS, runPreflight, type PreflightOptions, type PreflightResult } from "./preflight.js";
+import { MEETS_SPEC_BLOCKERS, blockersFor, runPreflight, type PreflightOptions, type PreflightResult } from "./preflight.js";
 import { containerName, expectedRunPaths, resolveSpec, SandboxSpecError, type RunPaths } from "./spec.js";
 
 export const RUNNER_CONFIG_VERSION = 1;
@@ -171,12 +171,13 @@ export interface RunnerReport {
   readonly hostProcessEvidence: HostProcessEvidence | null;
 }
 
-export function toReport(r: PreflightResult, runId: string): RunnerReport {
-  const blockedOnly = r.rating === "refused" && r.steps[r.steps.length - 1] === "meets-spec-blocked" &&
+/** blockers: the M1/M3 blockers that apply to the checked configuration (none inside the accepted decision scope). */
+export function toReport(r: PreflightResult, runId: string, blockers: readonly string[] = MEETS_SPEC_BLOCKERS): RunnerReport {
+  const blockedOnly = r.rating === "refused" && r.steps[r.steps.length - 1] === "meets-spec-blocked" && MEETS_SPEC_BLOCKERS.length > 0 &&
     r.violations.length === MEETS_SPEC_BLOCKERS.length && r.violations.every((v, i) => v === MEETS_SPEC_BLOCKERS[i]);
   return Object.freeze({
     runner: "research-sandbox-preflight" as const, runId, rating: r.rating, allowsUntrustedInput: r.allowsUntrustedInput, blockedOnlyByMeetsSpecBlockers: blockedOnly,
-    blockers: [...MEETS_SPEC_BLOCKERS], violations: [...r.violations], steps: [...r.steps], runtime: r.runtime,
+    blockers: [...blockers], violations: [...r.violations], steps: [...r.steps], runtime: r.runtime,
     engine: r.engine === null ? null : { serverVersion: r.engine.serverVersion, seccompProfile: r.engine.seccompProfile, rootless: r.engine.rootless, runtimes: [...r.engine.runtimes] },
     cleanup: r.cleanup, hostTrust: r.hostTrust, hostProcessEvidence: r.hostProcessEvidence ?? null,
   });
@@ -190,7 +191,8 @@ export function renderRunnerReport(rep: RunnerReport): string {
   ];
   if (rep.rating === "development-only") lines.push("development-only: shared host kernel (runc/crun); never allows untrusted input.");
   if (rep.blockedOnlyByMeetsSpecBlockers) lines.push("Every check passed; refused only because of the M1/M3 blockers (removing one is a reviewed code change).");
-  lines.push("", "Blockers (M1/M3, active):", ...rep.blockers.map((b) => `  - ${printable(b)}`));
+  if (rep.blockers.length > 0) lines.push("", "Blockers (M1/M3, active):", ...rep.blockers.map((b) => `  - ${printable(b)}`));
+  else lines.push("", "Blockers: none for this configuration (M1/M3 lifted only within the accepted scope of docs/M1-M3-DECISION.md).");
   if (!rep.blockedOnlyByMeetsSpecBlockers && rep.violations.length > 0) lines.push("", "Problems found:", ...rep.violations.map((v) => `  - ${printable(v)}`));
   lines.push("", `Steps completed: ${rep.steps.map(printable).join(" -> ") || "(none)"}`);
   if (rep.engine) {
@@ -260,11 +262,12 @@ export async function runPreflightCommand(argv: readonly string[], deps: RunnerD
         `Check for a leftover container named ${containerName(config.runId, "canary")} and remove it manually.\n`);
       return RUNNER_EXIT.internal;
     }
-    if (MEETS_SPEC_BLOCKERS.length > 0 && (result.rating === "meets-spec" || result.allowsUntrustedInput)) {
-      deps.err("Internal inconsistency: a result claimed meets-spec or allowed untrusted input while the M1/M3 blockers exist. Treated as refused.\n");
+    const blockers = blockersFor(spec, result.runtime, result.engine);
+    if (blockers.length > 0 && (result.rating === "meets-spec" || result.allowsUntrustedInput)) {
+      deps.err("Internal inconsistency: a result claimed meets-spec or allowed untrusted input while the M1/M3 blockers apply. Treated as refused.\n");
       return RUNNER_EXIT.internal;
     }
-    const report = toReport(result, config.runId);
+    const report = toReport(result, config.runId, blockers);
     deps.out(output === "json" ? `${JSON.stringify(report, null, 2)}\n` : renderRunnerReport(report));
     return result.rating === "meets-spec" ? RUNNER_EXIT.meetsSpec : RUNNER_EXIT.refused;
   } catch (err) {

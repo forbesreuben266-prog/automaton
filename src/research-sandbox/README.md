@@ -5,16 +5,17 @@ research analyst. **Nothing here processes research documents, calls a
 model, pulls an image or touches the network.** No untrusted input may be
 processed until a preflight on the target host returns `meets-spec`.
 
-> **`meets-spec` is currently unreachable by design.** `MEETS_SPEC_BLOCKERS`
-> (`preflight.ts`) refuses every isolating runtime, even when all checks
-> pass, until (M1) host-side verification that `runsc` is the approved gVisor
-> binary is implemented and reviewed, and (M3) the trust assumptions about the
-> pinned Docker version and its daemon-reported seccomp profile are explicitly
-> resolved. M1 host-side binary verification now exists (fakes only, see
-> below) but has not been reviewed or run on a real host, so the M1 blocker
-> stays. `assertUntrustedInputAllowed` refuses for the same reasons, and a
-> direct call to `rate()` returns `refused` for the approved configuration.
-> Removing a blocker is a reviewed code change.
+> **`meets-spec` is reachable only inside the accepted M1/M3 decision scope.**
+> `MEETS_SPEC_BLOCKERS` (`preflight.ts`) still refuses every isolating
+> runtime whose configuration differs from `ACCEPTED_DECISION_SCOPE`
+> (`decision-scope.ts`) in any item: Docker version, daemon runtimes and runsc
+> configuration, seccomp profile, runsc binary, sidecars and arguments, gVisor
+> reference, image ID or data root (host pins recorded 2026-11-06 from the
+> VPS's runner configuration after a read-only check). The owner accepted D1-D8
+> for the current VPS only (`docs/M1-M3-DECISION.md`, checked by
+> `blocker-governance.test.ts`). This binds a configuration; it does not
+> identify the host. Changing the blockers or the scope is a reviewed code
+> change, and each research run still needs the owner's approval.
 
 ## Decisions encoded
 
@@ -216,8 +217,9 @@ wrap the existing preflight for future use on the approved host:
 The runner validates an operator configuration (all pins required; spec pins
 through `resolveSpec`), builds the engine with `createCliEngine` and calls
 `runPreflight`; no check is re-implemented and there is no override. Exit 0
-(meets-spec) is unreachable while `MEETS_SPEC_BLOCKERS` is non-empty, and a
-result claiming it would be reported as an internal inconsistency (exit 3).
+(meets-spec) is reachable only inside the accepted M1/M3 decision scope; a
+result claiming it for any other configuration is reported as an internal
+inconsistency (exit 3).
 Tested offline only (fake process runner and fake host filesystem). See
 `docs/V1-VPS-DEPLOYMENT-PLAN.md` for the configuration, prerequisites and
 approvals.

@@ -39,11 +39,12 @@
  *     refuses and the result reports the container id/name for manual
  *     cleanup.
  *
- * meets-spec is currently BLOCKED (MEETS_SPEC_BLOCKERS, acceptance decisions
- * M1 and M3): even when every check passes, an isolating runtime is refused
- * until host-side runtime verification exists and the trust assumptions
- * about the pinned Docker version and its seccomp profile are resolved.
- * Removing a blocker requires a reviewed code change.
+ * meets-spec is BLOCKED (MEETS_SPEC_BLOCKERS, acceptance decisions M1 and
+ * M3) for every configuration outside ACCEPTED_DECISION_SCOPE: the owner's
+ * recorded decision (docs/M1-M3-DECISION.md) lifts them only for the reviewed
+ * configuration in decision-scope.ts (Docker version and runtimes, runsc
+ * binary, sidecars and arguments, gVisor reference, image, data root).
+ * Changing the blockers or the scope requires a reviewed code change.
  *
  * Ratings (D2, as approved):
  * - meets-spec:       everything passed on Docker with runsc AND gVisor was
@@ -64,6 +65,7 @@
  */
 
 import { evaluateCanary, verifyGvisorEvidence } from "./canary.js";
+import { ACCEPTED_DECISION_SCOPE, decisionScopeProblems } from "./decision-scope.js";
 import type { ContainerEngine, EngineInfo } from "./engine.js";
 import {
   canonicalRuntimeConfig, readHostProcVersion, runtimeConfigProblems, sameIdentities, sameRuntimeBinary, verifyContainerHostFiles, verifyRuntimeBinary,
@@ -143,6 +145,14 @@ export const MEETS_SPEC_BLOCKERS: readonly string[] = Object.freeze([
   "M3: trust in the daemon-reported seccomp profile and the pinned Docker version has not been explicitly resolved",
 ]);
 
+/**
+ * The blockers that apply to a configuration: none inside the accepted M1/M3 decision scope (decision-scope.ts,
+ * docs/M1-M3-DECISION.md), M1/M3 otherwise. info: the daemon's report the preflight checked (null = none).
+ */
+export function blockersFor(spec: SandboxSpec, runtime: string | null, info: EngineInfo | null): readonly string[] {
+  return decisionScopeProblems(spec, runtime, info, ACCEPTED_DECISION_SCOPE).length === 0 ? [] : MEETS_SPEC_BLOCKERS;
+}
+
 export const CLEANUP_ATTEMPTS = 3;
 const CANARY_TIMEOUT_CAP_MS = 60_000;
 const CANARY_OUTPUT_CAP = 64 * 1024;
@@ -193,12 +203,12 @@ export function serverVersionProblems(info: EngineInfo, spec: SandboxSpec): stri
 
 /**
  * Rating for checked evidence. Fails closed: the approved configuration is
- * "refused" while MEETS_SPEC_BLOCKERS is non-empty, so even a direct call
- * can never return meets-spec today. Everything else is development-only.
+ * "refused" while M1/M3 apply to it (blockersFor: any configuration outside
+ * the accepted decision scope). Everything else is development-only.
  */
 export function rate(info: EngineInfo, runtime: string, spec: SandboxSpec, gvisorVerified: boolean): IsolationRating {
   if (!approvedConfiguration(info, runtime, spec, gvisorVerified)) return "development-only";
-  return MEETS_SPEC_BLOCKERS.length > 0 ? "refused" : "meets-spec";
+  return blockersFor(spec, runtime, info).length > 0 ? "refused" : "meets-spec";
 }
 
 export async function runPreflight(options: PreflightOptions): Promise<PreflightResult> {
@@ -327,7 +337,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   }
   const rating = rate(info, runtime, spec, gvisorVerified);
   if (rating === "refused") {
-    return result({ violations: [...MEETS_SPEC_BLOCKERS], steps: [...steps, "meets-spec-blocked"], engine: info, runtime, cleanup, hostProcessEvidence });
+    return result({ violations: [...blockersFor(spec, runtime, info)], steps: [...steps, "meets-spec-blocked"], engine: info, runtime, cleanup, hostProcessEvidence });
   }
   return result({
     rating, allowsUntrustedInput: rating === "meets-spec", runtime, engine: info, violations: [], steps, cleanup, hostProcessEvidence,
@@ -462,7 +472,7 @@ export class IsolationRefusedError extends Error {
 export function assertUntrustedInputAllowed(r: PreflightResult, intended: { spec: SandboxSpec; run: RunPaths }): void {
   const reasons: string[] = [];
   if (!r || typeof r !== "object") throw new IsolationRefusedError(["no preflight result"]);
-  reasons.push(...MEETS_SPEC_BLOCKERS);
+  reasons.push(...blockersFor(intended?.spec, typeof r.runtime === "string" ? r.runtime : null, r.engine ?? null));
   if (r.rating !== "meets-spec" || r.allowsUntrustedInput !== true) reasons.push(`rating is ${String(r.rating)}`);
   if (!Array.isArray(r.violations) || r.violations.length > 0) reasons.push("result has violations");
   if (!Array.isArray(r.steps) || !r.steps.includes("canary") || !r.steps.includes("removed-verified")) reasons.push("preflight did not complete with verified cleanup");

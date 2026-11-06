@@ -1,5 +1,9 @@
 # M1/M3 decision record: DRAFT (no decision has been made)
 
+> **Superseded on 2026-11-05 by `docs/M1-M3-DECISION.md`** (D1-D8 accepted
+> by the owner, for the current VPS only). This draft is kept unchanged below
+> as the prepared basis for that decision.
+
 **Status: PENDING.** Both blockers (`MEETS_SPEC_BLOCKERS`, M1 and M3) remain
 active. Nothing in this draft accepts a risk or removes a blocker. Each of
 the eight decisions D1-D8 below needs the owner's explicit answer. A valid

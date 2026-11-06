@@ -11,8 +11,9 @@
  *     limits; hashed; the output folder is empty;
  *  3. a FRESH preflight runs (canary from the same pinned image), then the
  *     GATE: assertUntrustedInputAllowed must accept the result for this exact
- *     run, image and security arguments. While MEETS_SPEC_BLOCKERS (M1/M3) is
- *     non-empty it always refuses, so no research container is ever created;
+ *     run, image and security arguments. Outside the accepted M1/M3 decision
+ *     scope (ACCEPTED_DECISION_SCOPE, docs/M1-M3-DECISION.md) it always
+ *     refuses, so no research container is ever created there;
  *  4. re-checks after the gate: inputs unchanged, run folders valid, Docker
  *     version, runtime configuration and runtime binary equal to what the
  *     preflight bound;

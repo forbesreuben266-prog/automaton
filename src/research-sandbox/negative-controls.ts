@@ -16,7 +16,7 @@
  * Untrusted input is never involved: every container runs the canary probe.
  */
 
-import { MEETS_SPEC_BLOCKERS, runPreflight, type PreflightOptions, type PreflightResult } from "./preflight.js";
+import { MEETS_SPEC_BLOCKERS, blockersFor, runPreflight, type PreflightOptions, type PreflightResult } from "./preflight.js";
 import { RUNNER_EXIT, RunnerConfigError, parseRunnerConfig, type RunnerDeps } from "./runner.js";
 import { containerName, expectedRunPaths, resolveSpec, SandboxSpecError, type SandboxSpec } from "./spec.js";
 
@@ -69,7 +69,12 @@ export function buildNegativeControls(spec: SandboxSpec): NegativeControl[] {
   const controls: NegativeControl[] = [{
     name: "baseline", change: "none (the approved pins)", spec,
     check: (r) => {
-      if (!(r.rating === "refused" && last(r) === "meets-spec-blocked" && r.violations.length === MEETS_SPEC_BLOCKERS.length && r.violations.every((v, i) => v === MEETS_SPEC_BLOCKERS[i]))) {
+      if (blockersFor(spec, "runsc", r.engine).length === 0) {
+        // Inside the accepted M1/M3 decision scope: the approved pins must pass outright.
+        if (!(r.rating === "meets-spec" && r.allowsUntrustedInput === true && r.violations.length === 0 && r.steps.includes("gvisor-verified"))) {
+          return `the baseline must meet the spec within the accepted M1/M3 decision scope (got ${r.rating}, stopped at "${last(r)}")`;
+        }
+      } else if (!(r.rating === "refused" && last(r) === "meets-spec-blocked" && r.violations.length === MEETS_SPEC_BLOCKERS.length && r.violations.every((v, i) => v === MEETS_SPEC_BLOCKERS[i]))) {
         return `the baseline must be refused only by the M1/M3 blockers (got ${r.rating}, stopped at "${last(r)}")`;
       }
       const h = r.hostProcessEvidence;

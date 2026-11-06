@@ -25,7 +25,8 @@
 #   5. the runsc binary and every gVisor sidecar file, by SHA-256;
 #   6. host folders for one run, an empty Docker client config folder, the
 #      runner configuration (root-only), then the repository's preflight
-#      runner. Expected result while M1/M3 stand: "refused only by M1/M3".
+#      runner. Expected result: "meets-spec" within the accepted M1/M3 decision scope
+#      (docs/M1-M3-DECISION.md); any other configuration: "refused only by M1/M3".
 # Temporary containers (research-setup-*) are never published, never get a
 # network, mounts or privileges, and are always removed. Nothing touches
 # daemon.json, AppArmor, UFW, SSH or packages. Images, pins and the
@@ -93,7 +94,7 @@ if [ "$EXECUTE" = 0 ]; then
   plan "create: $RUNS_ROOT/setup-<time>/in (root, 755), .../out (uid $SANDBOX_UID, 700, empty), $CANARY_FILE (root, 644), $ENGINE_CONFIG_DIR (root, 700, empty)"
   plan "write: $CONF (root, 600); logs and pins under $STATE_ROOT/setup-<time>/"
   plan "run: node dist/research-sandbox/preflight-main.js --config $CONF --confirm-docker-access --output json"
-  plan "expected while M1/M3 stand: REFUSED, every check passed, refused only by the M1/M3 blockers"
+  plan "expected: MEETS-SPEC within the accepted M1/M3 decision scope; otherwise REFUSED only by the M1/M3 blockers"
   say ""
   say "Dry run complete. Re-run with --execute (add --allow-base-pull if the base image is not yet on the host) after approval."
   exit 0
@@ -338,11 +339,15 @@ ok "runner configuration written to $CONF (root, 600); a copy is in $OUT"
 RC=$?
 VERDICT="$(j 'try{const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
   if(r.blockedOnlyByMeetsSpecBlockers===true&&r.rating==="refused"&&r.allowsUntrustedInput===false&&r.cleanup&&r.cleanup.verifiedRemoved===true)process.stdout.write("EXPECTED");
+  else if(r.rating==="meets-spec"&&r.allowsUntrustedInput===true&&r.violations.length===0&&Array.isArray(r.blockers)&&r.blockers.length===0&&r.runtime==="runsc"&&r.cleanup&&r.cleanup.verifiedRemoved===true)process.stdout.write("MEETS-SPEC");
   else process.stdout.write("PROBLEMS: "+(r.violations||[]).join(" | ").slice(0,1500));}catch(e){process.stdout.write("NO-REPORT");}' "$OUT/preflight-report.json")" || die "cannot evaluate the preflight report"
 say ""
 case "$VERDICT" in
   EXPECTED) [ "$RC" = 1 ] || die "unexpected runner exit code $RC"
     say "RESULT: every preflight check passed on this host; refused only by the M1/M3 blockers (as expected)."
+    say "Send me: $OUT/preflight-report.json, $OUT/preflight-config.json, $OUT/image-files.sha256 and $LOG" ;;
+  MEETS-SPEC) [ "$RC" = 0 ] || die "unexpected runner exit code $RC"
+    say "RESULT: every preflight check passed; meets-spec only within the accepted M1/M3 decision scope (docs/M1-M3-DECISION.md)."
     say "Send me: $OUT/preflight-report.json, $OUT/preflight-config.json, $OUT/image-files.sha256 and $LOG" ;;
   *) die "preflight did not reach the expected result (exit $RC): $VERDICT. Send me $OUT/preflight-report.json and $LOG" ;;
 esac

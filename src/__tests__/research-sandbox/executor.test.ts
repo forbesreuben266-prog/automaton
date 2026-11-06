@@ -1,7 +1,8 @@
 /**
- * E1: the sandbox executor, offline with fakes. The gate (assertUntrustedInputAllowed) refuses while M1/M3 exist, so
- * the default path never creates a research container; the post-gate path is reached only by replacing the
- * internals in these tests (the entry point never does; see the boundary checks at the end).
+ * E1: the sandbox executor, offline with fakes. The gate (assertUntrustedInputAllowed) refuses outside the accepted
+ * M1/M3 decision scope (the fixtures' fake pins are outside it), so there the default path never creates a research
+ * container; inside the scope the real preflight and gate are exercised end to end, and other post-gate paths are
+ * reached by replacing the internals in these tests (the entry point never does; see the boundary checks at the end).
  */
 
 import fs from "node:fs";
@@ -13,12 +14,26 @@ import {
   type ExecutorInternals, type ExecutorOptions, type ResearchJob,
 } from "../../research-sandbox/executor.js";
 import { RESEARCH_IMAGE_FILES, RESEARCH_IMAGE_LAYOUT, RESEARCH_SCRIPT } from "../../research-sandbox/research-image.js";
-import { MEETS_SPEC_BLOCKERS, buildCreateArgs, imageReference, securityArgsHash, type ContainerEngine, type PreflightResult, type ProcessResult } from "../../research-sandbox/index.js";
+import {
+  ACCEPTED_DECISION_SCOPE, MEETS_SPEC_BLOCKERS, assertUntrustedInputAllowed, buildCreateArgs, decisionScopeProblems, imageReference, resolveSpec, securityArgsHash,
+  type ContainerEngine, type PreflightResult, type ProcessResult,
+} from "../../research-sandbox/index.js";
 import type { HostProcessObserver } from "../../research-sandbox/host-processes.js";
 import {
-  CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_ENTRYPOINT, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC, compliantHostLayout, compliantInspect,
+  CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_DATA_ROOT, FAKE_DIGEST, FAKE_ENTRYPOINT, FAKE_GVISOR_PROC_VERSION, FAKE_IMAGE_ENV, FAKE_IMAGE_ID, FAKE_MANIFEST_DIGEST, FAKE_RUNSC_PATH, FAKE_RUNSC_SHA256, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC, compliantHostLayout, compliantInspect,
   compliantReport, fakeHostFs, finishedInspect, type FakeEntry,
 } from "./fixtures.js";
+
+/**
+ * The real decision scope's host pins and image are the VPS's (not present in these fakes), so these tests exercise
+ * the mechanism with the scope's host pins and image set to the fixtures' fake values. Only this file is affected; the
+ * real constant is checked in blocker-governance.test.ts.
+ */
+vi.mock("../../research-sandbox/decision-scope.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../../research-sandbox/decision-scope.js")>();
+  return { ...orig, ACCEPTED_DECISION_SCOPE: Object.freeze({ ...orig.ACCEPTED_DECISION_SCOPE, daemonRuntimes: Object.freeze(["runc", "runsc"]), imageId: `sha256:${"cd".repeat(32)}`,
+    runscSha256: "5e".repeat(32), sidecars: Object.freeze([]), gvisorProcVersion: "Linux version 4.4.0 #1 SMP (fake gVisor reference for tests)" }) };
+});
 
 const REPO = path.resolve(__dirname, "../../..");
 beforeEach(() => {
@@ -40,14 +55,14 @@ function layout(): Record<string, FakeEntry> {
 }
 
 /** A fake Docker host serving the canary (preflight) and the research container ("-run"). */
-function fakeDocker(o: { run?: Partial<ProcessResult>; onRunStart?: () => void; runInspect?: (c: any) => void; leftover?: boolean; removeFails?: boolean; infoAfterCreate?: any; infoAtEnd?: any } = {}) {
+function fakeDocker(o: { run?: Partial<ProcessResult>; onRunStart?: () => void; runInspect?: (c: any) => void; leftover?: boolean; removeFails?: boolean; infoAfterCreate?: any; infoAtEnd?: any; info?: any } = {}) {
   const calls: string[] = [];
   const existing = new Set<string>(o.leftover ? ["research-sandbox-r1-run"] : []);
   let cur: { name: string; runtime: string; cmd: string[]; started: boolean; exit: number } | null = null;
   let infos = 0;
   const engine: ContainerEngine = {
     target: ENGINE_TARGET,
-    async info() { infos += 1; calls.push("info"); return (cur?.name.endsWith("-run") && o.infoAfterCreate && cur.started === false) ? o.infoAfterCreate : (o.infoAtEnd && calls.includes("remove:run") ? o.infoAtEnd : DOCKER_INFO); },
+    async info() { infos += 1; calls.push("info"); return (cur?.name.endsWith("-run") && o.infoAfterCreate && cur.started === false) ? o.infoAfterCreate : (o.infoAtEnd && calls.includes("remove:run") ? o.infoAtEnd : (o.info ?? DOCKER_INFO)); },
     async create(args, ref) {
       const name = args[args.indexOf("--name") + 1];
       calls.push(`create:${name.endsWith("-run") ? "run" : "canary"}`);
@@ -75,7 +90,7 @@ function fakeDocker(o: { run?: Partial<ProcessResult>; onRunStart?: () => void; 
   return { engine, calls, infos: () => infos };
 }
 /** gVisor-like host processes; with runOnHost the research script appears as an ordinary host process. */
-function observer(runOnHost = false): HostProcessObserver & { scripts: (string | undefined)[] } {
+function observer(runOnHost = false, runscExe: string = FAKE_RUNSC_PATH): HostProcessObserver & { scripts: (string | undefined)[] } {
   const scripts: (string | undefined)[] = [];
   return {
     scripts,
@@ -83,7 +98,7 @@ function observer(runOnHost = false): HostProcessObserver & { scripts: (string |
       scripts.push(script);
       return { stop: () => ({ polls: 30, unreadable: 0, overflow: false,
         samples: script === RESEARCH_SCRIPT && runOnHost ? [{ pid: 7, exe: "/usr/local/bin/node", argv0: "node", mentionsContainer: false, runsCanaryScript: true, role: "other" as const }]
-          : [{ pid: 9, exe: FAKE_RUNSC_PATH, argv0: "runsc-sandbox", mentionsContainer: true, runsCanaryScript: false, role: "boot" as const }] }) };
+          : [{ pid: 9, exe: runscExe, argv0: "runsc-sandbox", mentionsContainer: true, runsCanaryScript: false, role: "boot" as const }] }) };
     },
   };
 }
@@ -169,6 +184,116 @@ describe("E1: the gate (default internals)", () => {
     const r = await runResearchJob(o);
     expect(r.status).toBe("refused");
     expect(d.calls).toEqual([]);
+  });
+});
+
+describe("E1: inside the accepted M1/M3 decision scope (real preflight and real gate)", () => {
+  const RUNSC_PATH = ACCEPTED_DECISION_SCOPE.runscPath;
+  /** The fixtures' fake pins with the accepted Docker version and runsc path/arguments (docs/M1-M3-DECISION.md). */
+  const SCOPED = resolveSpec({
+    imageDigest: FAKE_DIGEST, imageEntrypoint: FAKE_ENTRYPOINT, gvisorProcVersion: FAKE_GVISOR_PROC_VERSION, imageEnv: FAKE_IMAGE_ENV, imageManifestDigest: FAKE_MANIFEST_DIGEST,
+    dockerDataRoot: FAKE_DATA_ROOT, runscBinary: { path: RUNSC_PATH, sha256: FAKE_RUNSC_SHA256, args: ["--oci-seccomp"], sidecars: [] }, dockerServerVersion: "29.9.3", imageId: FAKE_IMAGE_ID,
+  });
+  const INFO = { ...DOCKER_INFO, serverVersion: "29.9.3", runtimeConfigs: { ...DOCKER_INFO.runtimeConfigs, runsc: { path: RUNSC_PATH, runtimeArgs: ["--oci-seccomp"] } } };
+  function scopedLayout(): Record<string, FakeEntry> {
+    const l = layout();
+    l["/usr/bin"] = { kind: "dir", uid: 0, mode: 0o40755, ino: 54 };
+    l[RUNSC_PATH] = { ...l[FAKE_RUNSC_PATH] };
+    return l;
+  }
+  const scoped = (over: { info?: any; spec?: any } = {}) => opts({ spec: over.spec ?? SCOPED, l: scopedLayout(), d: fakeDocker({ info: over.info ?? INFO }), obs: observer(false, RUNSC_PATH) });
+  /** A passing result bound to the scoped spec and run, built by hand (for binding mismatches). */
+  const bound = (): PreflightResult => {
+    const p = passing();
+    return { ...p, engine: INFO as any, binding: { ...p.binding!, securityArgsSha256: securityArgsHash(buildCreateArgs(SCOPED, RUN, "runsc", ["node"], "run"), SCOPED),
+      runtimeBinarySha256: SCOPED.runscBinary!.sha256, dockerServerVersion: "29.9.3" } };
+  };
+
+  it("the fixture is inside the scope, and the default internals are the real preflight and gate", () => {
+    expect(ACCEPTED_DECISION_SCOPE.runscSha256).toBe(FAKE_RUNSC_SHA256); // the test scope (see vi.mock above)
+    expect(decisionScopeProblems(SCOPED, "runsc", INFO, ACCEPTED_DECISION_SCOPE)).toEqual([]);
+    expect(decisionScopeProblems(SPEC, "runsc", DOCKER_INFO, ACCEPTED_DECISION_SCOPE).length).toBeGreaterThan(0);
+  });
+
+  it("valid evidence and matching configuration: the real preflight meets the spec, the real gate passes and the job completes", async () => {
+    const { o, d } = scoped();
+    const r = await runResearchJob(o);
+    expect(r.status, r.violations.join("\n")).toBe("completed");
+    expect(r.audit.preflight).toMatchObject({ rating: "meets-spec", violations: 0 });
+    expect(r.steps.slice(0, 4)).toEqual(["inputs-checked", "preflight", "gate-passed", "rechecked"]);
+    expect(d.calls).toEqual(expect.arrayContaining(["create:canary", "create:run", "start:run", "remove:run"]));
+    expect(r.report).toBe(REPORT);
+  });
+
+  it("the daemon reporting another Docker version: refused by the real preflight, no research container", async () => {
+    const { o, d } = scoped({ info: { ...INFO, serverVersion: "29.9.4" } });
+    const r = await runResearchJob(o);
+    expect(r.status).toBe("refused");
+    expect(r.audit.preflight).toMatchObject({ rating: "refused" });
+    expect(r.audit.preflight!.lastStep).not.toBe("gvisor-verified");
+    expect(d.calls).not.toContain("create:canary"); // refused at the version check, before any container
+    expect(d.calls).not.toContain("create:run");
+  });
+
+  it("a configuration outside the scope (another Docker version pinned): M1/M3 apply, the real gate refuses, no research container", async () => {
+    const spec = { ...SCOPED, dockerServerVersion: "29.9.4" };
+    const { o, d } = scoped({ spec, info: { ...INFO, serverVersion: "29.9.4" } });
+    const r = await runResearchJob(o);
+    expect(r.status).toBe("refused");
+    expect(r.violations).toEqual(expect.arrayContaining([...MEETS_SPEC_BLOCKERS]));
+    expect(d.calls).not.toContain("create:run");
+  });
+
+  it("a different runsc binary, consistently pinned and installed (e.g. host-setup re-run after an upgrade): M1/M3 apply, no research container", async () => {
+    const other = "6f".repeat(32);
+    const spec = { ...SCOPED, runscBinary: { ...SCOPED.runscBinary!, sha256: other } };
+    const l = scopedLayout(); l[RUNSC_PATH] = { ...l[RUNSC_PATH], sha256: other };
+    const d = fakeDocker({ info: INFO });
+    const { o } = opts({ spec, l, d, obs: observer(false, RUNSC_PATH) });
+    const r = await runResearchJob(o);
+    expect(r.status).toBe("refused");
+    expect(r.audit.preflight).toMatchObject({ rating: "refused", lastStep: "meets-spec-blocked" }); // every check passed; only the scope differs
+    expect(r.violations).toEqual(expect.arrayContaining([...MEETS_SPEC_BLOCKERS]));
+    expect(d.calls).not.toContain("create:run");
+  });
+
+  it("an unexpected extra runtime in the daemon's configuration: M1/M3 apply, no research container", async () => {
+    const { o, d } = scoped({ info: { ...INFO, runtimes: [...INFO.runtimes, "kata"], runtimeConfigs: { ...INFO.runtimeConfigs, kata: { path: "/usr/bin/kata" } } } });
+    const r = await runResearchJob(o);
+    expect(r.status).toBe("refused");
+    expect(r.violations).toEqual(expect.arrayContaining([...MEETS_SPEC_BLOCKERS]));
+    expect(d.calls).not.toContain("create:run");
+  });
+
+  it.each([
+    ["another run", (b: any) => ({ ...b, runId: "r2" }), "different run or folders"],
+    ["another image", (b: any) => ({ ...b, imageRef: `sha256:${"0".repeat(64)}` }), "different image"],
+    ["another runsc binary", (b: any) => ({ ...b, runtimeBinarySha256: "0".repeat(64) }), "recorded runtime binary"],
+    ["another Docker version", (b: any) => ({ ...b, dockerServerVersion: "29.9.4" }), "recorded Docker server version"],
+    ["another gVisor reference", (b: any) => ({ ...b, gvisorProcVersion: "Linux version 9" }), "recorded gVisor reference"],
+    ["other security arguments", (b: any) => ({ ...b, securityArgsSha256: "0".repeat(64) }), "different security arguments"],
+  ])("a meets-spec result bound to %s: refused by the real gate, no research container", async (_l, change, message) => {
+    const { o, d } = scoped();
+    const r = await runResearchJob(o, { preflight: async () => ({ ...bound(), binding: change(bound().binding) }), gate: assertUntrustedInputAllowed });
+    expect(r.status).toBe("refused");
+    expect(r.violations.join("\n")).toContain(message);
+    expect(d.calls.some((c) => c.startsWith("create"))).toBe(false);
+  });
+
+  it("a result with incomplete preflight evidence (gVisor not verified, cleanup unverified): refused by the real gate", async () => {
+    const { o, d } = scoped();
+    const noGvisor = { ...bound(), steps: bound().steps.filter((s) => s !== "gvisor-verified") };
+    expect((await runResearchJob(o, { preflight: async () => noGvisor, gate: assertUntrustedInputAllowed })).violations.join("\n")).toContain("gVisor was not positively verified");
+    const dirty = { ...bound(), cleanup: { ...bound().cleanup!, verifiedRemoved: false } };
+    expect((await runResearchJob(o, { preflight: async () => dirty, gate: assertUntrustedInputAllowed })).violations.join("\n")).toContain("cleanup was not verified");
+    expect(d.calls.some((c) => c.startsWith("create"))).toBe(false);
+  });
+
+  it("the hand-built bound result itself passes the real gate (the mismatch tests change only one field)", async () => {
+    const { o, d } = scoped();
+    const r = await runResearchJob(o, { preflight: async () => bound(), gate: assertUntrustedInputAllowed });
+    expect(r.status, r.violations.join("\n")).toBe("completed");
+    expect(d.calls).toContain("create:run");
   });
 });
 

@@ -53,8 +53,16 @@ function stringLiterals(file: string): string[] {
 
 describe("research sandbox static boundaries", () => {
   it("contains exactly the reviewed modules", () => {
-    expect(files).toEqual(["canary-probe.ts", "canary.ts", "engine.ts", "executor-main.ts", "executor.ts", "host-paths.ts", "host-processes.ts", "index.ts", "inspect.ts", "negative-controls-main.ts", "negative-controls.ts",
+    expect(files).toEqual(["canary-probe.ts", "canary.ts", "decision-scope.ts", "engine.ts", "executor-main.ts", "executor.ts", "host-paths.ts", "host-processes.ts", "index.ts", "inspect.ts", "negative-controls-main.ts", "negative-controls.ts",
       "preflight-main.ts", "preflight.ts", "research-image.ts", "runner.ts", "spec.ts", "trust-evidence-main.ts", "trust-evidence.ts"]);
+  });
+
+  it("decision-scope.ts is pure data and checks: type-only imports, no I/O", () => {
+    const src = fs.readFileSync(path.join(PKG, "decision-scope.ts"), "utf8");
+    const imports = src.split("\n").filter((l) => /^import\b/.test(l));
+    expect(imports.length).toBeGreaterThan(0);
+    for (const l of imports) expect(l, l).toMatch(/^import type \{[^}]+\} from "\.\/[a-z-]+\.js";$/);
+    expect(src.replace(/\/\*[\s\S]*?\*\//g, "")).not.toMatch(/\bfs\b|readFile|process\.|child_process|fetch\(|require\(|import\(/);
   });
 
   it("each file imports only siblings and its allowlisted Node modules; no dynamic import/require", () => {

@@ -7,13 +7,20 @@
 
 import fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MEETS_SPEC_BLOCKERS, imageReference, runPreflight, type ContainerEngine, type PreflightOptions, type PreflightResult, type ProcessResult, type SandboxSpec } from "../../research-sandbox/index.js";
+import { MEETS_SPEC_BLOCKERS, imageReference, resolveSpec, runPreflight, type ContainerEngine, type PreflightOptions, type PreflightResult, type ProcessResult, type SandboxSpec } from "../../research-sandbox/index.js";
 import { NEGATIVE_CONTROLS_CONFIRM_FLAG, buildNegativeControls, flipHex, runNegativeControls, runNegativeControlsCommand } from "../../research-sandbox/negative-controls.js";
 import type { HostProcessObserver } from "../../research-sandbox/host-processes.js";
 import {
   CONTAINER_ID, DOCKER_INFO, ENGINE_TARGET, FAKE_RUNSC_PATH, HOST_CANARY, HOST_PROC_VERSION, POLICY, RUN, SPEC, compliantHostLayout, compliantInspect, compliantReport,
   fakeHostFs, finishedInspect,
 } from "./fixtures.js";
+
+/** Test scope: the real decision scope with the fixtures' fake host pins and image in place of the VPS's. */
+vi.mock("../../research-sandbox/decision-scope.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../../research-sandbox/decision-scope.js")>();
+  return { ...orig, ACCEPTED_DECISION_SCOPE: Object.freeze({ ...orig.ACCEPTED_DECISION_SCOPE, daemonRuntimes: Object.freeze(["runc", "runsc"]), imageId: `sha256:${"cd".repeat(32)}`,
+    runscSha256: "5e".repeat(32), sidecars: Object.freeze([]), gvisorProcVersion: "Linux version 4.4.0 #1 SMP (fake gVisor reference for tests)" }) };
+});
 
 beforeEach(() => {
   const real = fs.readFileSync;
@@ -133,8 +140,27 @@ describe("A2: the controls", () => {
     expect(out[0].detail).toContain("baseline must be refused only by the M1/M3 blockers");
   });
 
-  it("the blockers are still what the baseline must reach", () => {
+  it("the blockers are still what the baseline must reach (outside the accepted decision scope)", () => {
     expect(MEETS_SPEC_BLOCKERS).toHaveLength(2);
+  });
+
+  it("inside the accepted M1/M3 decision scope the baseline must meet the spec outright; a blocker-only refusal fails it", () => {
+    const scoped = resolveSpec({ dockerServerVersion: "29.9.3", runscBinary: { path: "/usr/bin/runsc", sha256: "5e".repeat(32), args: ["--oci-seccomp"], sidecars: [] } },
+      { ...SPEC, dockerServerVersion: null, runscBinary: null } as SandboxSpec);
+    const baseline = buildNegativeControls(scoped)[0];
+    const h = { polls: 30, sandboxProcesses: 1, canaryOnHost: 0, replacedExecutables: 0, overflow: false, executables: ["/usr/bin/runsc"] };
+    const engine = { engine: "docker" as const, rootless: false, runtimes: ["runc", "runsc"], seccompProfile: "builtin", serverVersion: "29.9.3", runtimeConfigs: { runsc: { path: "/usr/bin/runsc", runtimeArgs: ["--oci-seccomp"] } } };
+    const r = (over: Partial<PreflightResult>): PreflightResult => ({ rating: "meets-spec", allowsUntrustedInput: true, runtime: "runsc", engine, violations: [], hostTrust: "operator-attested-only",
+      steps: ["canary", "removed-verified", "gvisor-verified"], binding: null, hostProcessEvidence: h,
+      cleanup: { containerName: "c", containerId: null, attempts: 1, verifiedRemoved: true, detail: "removed and verified" }, ...over });
+    expect(baseline.check(r({}))).toBeNull();
+    expect(baseline.check(r({ rating: "refused", allowsUntrustedInput: false, violations: [...MEETS_SPEC_BLOCKERS], steps: ["gvisor-verified", "meets-spec-blocked"] }))).toContain("must meet the spec within the accepted M1/M3 decision scope");
+    expect(baseline.check(r({ steps: ["canary", "removed-verified"] }))).toContain("must meet the spec");
+    expect(baseline.check(r({ hostProcessEvidence: { ...h, canaryOnHost: 1 } }))).toContain("host process evidence");
+    // A daemon report outside the scope (an extra runtime) puts the baseline back under the blockers.
+    expect(baseline.check(r({ engine: { ...engine, runtimes: ["runc", "runsc", "kata"] } }))).toContain("refused only by the M1/M3 blockers");
+    // The fixtures (outside the scope) still require the blocker-only refusal.
+    expect(buildNegativeControls(SPEC)[0].check(r({}))).toContain("refused only by the M1/M3 blockers");
   });
 });
 

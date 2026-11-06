@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readRunnerConfigFile } from "../../research-sandbox/preflight-main.js";
+import { renderRunnerReport, toReport } from "../../research-sandbox/runner.js";
 import {
   CONFIRM_FLAG, MEETS_SPEC_BLOCKERS, RUNNER_EXIT, createCliEngine, parseRunnerConfig, runPreflightCommand,
   type PreflightResult, type ProcessResult, type ProcessRunner, type RunnerDeps,
@@ -219,6 +220,22 @@ describe("internal errors and inconsistencies (exit 3)", () => {
       expect(h.err()).toContain("Internal inconsistency");
       expect(h.out()).toBe("");
     }
+  });
+});
+
+describe("the report inside the accepted M1/M3 decision scope", () => {
+  const meets: PreflightResult = { rating: "meets-spec", allowsUntrustedInput: true, runtime: "runsc", engine: null, violations: [], hostTrust: "operator-attested-only", steps: ["gvisor-verified"],
+    binding: null, cleanup: null, hostProcessEvidence: null };
+  it("no blockers apply: the report lists none and says the lift is limited to the decision's scope", () => {
+    const rep = toReport(meets, "r1", []);
+    expect(rep).toMatchObject({ rating: "meets-spec", blockers: [], blockedOnlyByMeetsSpecBlockers: false });
+    const text = renderRunnerReport(rep);
+    expect(text).toContain("Blockers: none for this configuration (M1/M3 lifted only within the accepted scope of docs/M1-M3-DECISION.md).");
+    expect(text).not.toContain("Blockers (M1/M3, active)");
+  });
+  it("by default (outside the scope) the M1/M3 blockers are listed as active", () => {
+    expect(toReport(meets, "r1").blockers).toEqual([...MEETS_SPEC_BLOCKERS]);
+    expect(renderRunnerReport(toReport(meets, "r1"))).toContain("Blockers (M1/M3, active):");
   });
 });
 
