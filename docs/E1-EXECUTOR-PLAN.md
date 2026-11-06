@@ -1,6 +1,21 @@
 # E1: sandbox executor for research input
 
-**Status: E1a implemented offline (not deployed).** `src/research-sandbox/executor.ts`
+**Status: E1 complete (2026-11-06).** E1c, the first synthetic-only run under
+the lifted M1/M3 gate (`docs/M1-M3-DECISION.md`), passed on the VPS. The run
+used commit `8e7e4977` and the script `deploy/research-sandbox/e1c-retry.sh`
+(branch `e1c-retry`, `701a7ac9`). One fictional `trading backtest` job ran
+under gVisor:
+- executor and research CLI both exited 0;
+- 18 host-process samples showed 2 gVisor processes and 0 research-script
+  processes on the host;
+- the report hash matched the offline prediction;
+- cleanup was verified and no containers were left over.
+
+The evidence is on the host (root-only):
+`/var/lib/research-sandbox-setup/e1c-20261106-215858`. These results are
+operator-reported.
+
+**Earlier stages:** `src/research-sandbox/executor.ts`
 and `executor-main.ts` run one operator job (research CLI `trading validate` or
 `trading backtest` on files staged in the run's input folder) after a fresh
 preflight and the `assertUntrustedInputAllowed` gate. While M1/M3 exist the
@@ -44,6 +59,6 @@ fail-closed and auditable.
 |---|---|---|
 | E1a | Offline, one review | Executor module and entry point, research image definition, tests with fakes (hostile inputs, timeouts, crashes, oversized output, cleanup failure, a result for another run). Still refused by M1/M3. |
 | E1b | VPS, approval | Build and record the research image; dry run with a fixture input: must be refused by M1/M3, with every other check passing. |
-| E1c | VPS, approval | Only after an owner decision lifts the blockers: one controlled run with synthetic input, output reviewed in quarantine. |
+| E1c | VPS, approval | Done 2026-11-06: one controlled run with synthetic input passed (see status above). |
 
 No agents, paid APIs, real-world data, wallets or trading are part of E1.
