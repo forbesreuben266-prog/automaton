@@ -212,7 +212,13 @@ function leftovers(label) {
 
   console.log("== 4. one executor job under gVisor (only if 1-3 passed)");
   if (fails > 0 || !CODEDIR) { console.log(`\nRESULT: STOP before the job (${fails} problem(s) above). No research container was created. Send this output.`); process.exitCode = 1; return; }
-  fs.copyFileSync("deploy/research-sandbox/e1b-sample/job.json", `${ev}/job.json`); fs.chmodSync(`${ev}/job.json`, 0o600);
+  // The job file is created by root (not copied: copyFileSync keeps the source file's owner) from the committed bytes.
+  const jobBytes = fs.readFileSync("deploy/research-sandbox/e1b-sample/job.json");
+  if (sha(jobBytes) !== JOB_SHA) { bad("committed sample job changed before the job"); console.log(`\nRESULT: STOP before the job (${fails} problem(s) above). No research container was created. Send this output.`); process.exitCode = 1; return; }
+  fs.writeFileSync(`${ev}/job.json`, jobBytes, { mode: 0o600, flag: "wx" });
+  { const js = fs.lstatSync(`${ev}/job.json`), jb = fs.readFileSync(`${ev}/job.json`);
+    if (!js.isFile() || js.uid !== 0 || js.gid !== 0 || (js.mode & 0o777) !== 0o600 || sha(jb) !== JOB_SHA) { bad(`job file is not a root:root 600 copy of the committed job (${st(`${ev}/job.json`)})`); console.log(`\nRESULT: STOP before the job (${fails} problem(s) above). No research container was created. Send this output.`); process.exitCode = 1; return; }
+    ok(`job file created by root: root:root 600, sha256 ${JOB_SHA.slice(0, 16)}... (the committed job)`); }
   for (const [label, p] of [["runner configuration", CONF], ["job file", `${ev}/job.json`]]) {
     const why = reader ? tryRead(p) : "no verified file reader";
     if (why !== null) { bad(`${label} refused by the executor's file reader: ${why}`); console.log(`\nRESULT: STOP before the job (${fails} problem(s) above). No research container was created. Send this output.`); process.exitCode = 1; return; }
