@@ -10,6 +10,18 @@
   - Script: `e2-job.sh` at commit `93d298c6`, SHA-256 `f6f35e8c...2966`.
   - The run's evidence folder, report hash and gVisor counts were not reported,
     so none are recorded here.
+- **E3** (this workflow, validated end to end): PASS on 2026-11-06,
+  operator-reported.
+  - Script: `jobs.sh` at commit `23571b07`, SHA-256 `f44e660d...bfda`.
+  - The `template`, `check` and `prepare` steps passed for job `e3-demo`.
+  - One approved run: COMPLETED, research exit 0, runtime 3.1 s.
+  - gVisor: 2 gVisor processes observed and 0 research-script processes on
+    the host.
+  - Cleanup verified, approval consumed, evidence intact.
+  - Evidence: `e2-e3-demo-20261106-225942-e8b75e`.
+  - Report SHA-256:
+    `0d1c79deaeb2727fa82255ce74b5c0ced8f53b82bc5fd098caccd86ed280692d`.
+  - Export: `report.txt` and `summary.json` verified against `SHA256SUMS`.
 
 ## What this does
 
