@@ -426,6 +426,9 @@ describe("inference call sites", () => {
     "orchestration/orchestrator.ts",
     "orchestration/planner.ts",
     "orchestration/plan-mode.ts",
+    // Personal agent: its provider is the local (free) model; any provider marked paid is refused unless the owner
+    // enables it with a daily token budget (src/__tests__/personal-agent: "a paid provider is refused ...").
+    "personal-agent/agent.ts",
   ]);
   // Ungated helpers that must stay unused by runtime code.
   const UNWIRED = new Map([
