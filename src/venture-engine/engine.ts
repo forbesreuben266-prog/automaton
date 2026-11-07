@@ -1,8 +1,8 @@
 /**
- * The engine cycle (one call = one cycle, bounded by Limits):
+ * The engine cycle (one call = one cycle, bounded by Limits and refused while STOP is set or the daily budget is used):
  *   1. apply the owner's approval decisions;
  *   2. decide SCALE / IMPROVE / HOLD / KILL for every active venture from its latest evidence;
- *   3. run the IMPROVE iterations (plan -> build -> verify -> simulate);
+ *   3. run the IMPROVE iterations (plan with the last weaknesses -> build -> verify -> evaluate);
  *   4. generate, score and select new opportunities while there is room, and run their first experiment.
  *
  * Decision rules (evidence-based; simulated evidence can never produce SCALE):
@@ -14,32 +14,42 @@
  * The engine never publishes, spends, contacts anyone, uses paid models or trades.
  */
 
+import { stopReason } from "./control.js";
+import { evaluate } from "./evaluate.js";
+import { ModelBudget, type ModelClient, type ModelUse } from "./model.js";
 import { newId, Store } from "./store.js";
 import type { ApprovalAction, ApprovalRequest, Asset, Decision, DecisionKind, Evidence, Experiment, Limits, Venture, VentureKind } from "./types.js";
 
 export const DEFAULT_LIMITS: Limits = Object.freeze({ maxActiveVentures: 5, maxNewVenturesPerCycle: 2, maxIterationsPerVenture: 3, maxCyclesPerRun: 10, spendLimitUsd: 0 });
 export const MIN_OPPORTUNITY_SCORE = 0.5;
+export const LAUNCH_QUALITY = 0.75;
 const ACTIVE: ReadonlySet<Venture["status"]> = new Set(["draft", "built", "awaiting-launch-approval", "launched", "awaiting-shutdown-approval"]);
 
-export interface EngineOptions { readonly store: Store; readonly kinds: readonly VentureKind[]; readonly limits?: Limits; readonly now?: () => Date }
-export interface CycleReport { readonly cycle: number; readonly created: string[]; readonly decisions: { venture: string; kind: DecisionKind; basis: string; reason: string }[]; readonly approvalsRequested: string[]; iterations: number }
+export interface EngineOptions {
+  readonly store: Store; readonly kinds: readonly VentureKind[]; readonly limits?: Limits; readonly now?: () => Date;
+  readonly model?: ModelClient | null; readonly maxModelCallsPerCycle?: number; readonly maxCyclesPerDay?: number;
+}
+export interface CycleReport { readonly cycle: number; readonly created: string[]; readonly decisions: { venture: string; kind: DecisionKind; basis: string; reason: string }[]; readonly approvalsRequested: string[]; iterations: number; modelCalls: number }
 
-const latestEvidence = (v: Venture): Evidence | null => { const e = v.experiments.at(-1)?.evidence ?? []; return e.at(-1) ?? null; };
 const latestActual = (v: Venture): Evidence | null => { for (const x of [...v.experiments].reverse()) for (const e of [...x.evidence].reverse()) if (e.kind === "actual") return e; return null; };
+const latestSimulated = (v: Venture): Evidence | null => v.experiments.at(-1)?.evidence.filter((e) => e.kind === "simulated").at(-1) ?? null;
 
-/** Plans, builds, verifies and evaluates (simulated) one experiment iteration. */
-function runExperiment(store: Store, kind: VentureKind, v: Venture, now: Date): Experiment {
+async function runExperiment(store: Store, kind: VentureKind, v: Venture, portfolio: readonly Venture[], model: ModelUse, now: Date): Promise<Experiment> {
   const iteration = v.experiments.length + 1;
   const id = newId("exp");
-  const plan = kind.plan(v.opportunity, iteration, v.experiments.at(-1)?.checks ?? []);
+  const lastSim = latestSimulated(v);
+  const plan = kind.plan(v.opportunity, iteration, v.experiments.at(-1)?.checks ?? [], lastSim ? (lastSim.notes.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2))) : []);
   const dir = store.assetDir(v.id, id);
   const assets: Asset[] = [];
-  let buildError: string | null = null;
-  try { kind.build(v.opportunity, plan, iteration, store.writer(dir, assets)); } catch (e) { buildError = (e as Error).message; }
-  const checks = [...kind.verify(store.reader(dir), assets.map((a) => a.name)), ...(buildError ? [{ name: "build", passed: false, detail: buildError.slice(0, 200) }] : [])];
-  const verified = checks.every((c) => c.passed);
-  const sim: Evidence = { id: newId("ev"), kind: "simulated", source: `engine estimate (${kind.id})`, at: now.toISOString(), metrics: kind.simulate(v.opportunity, checks, iteration), notes: "Simulated: the engine's own quality estimate. Not customer or financial data." };
-  return { id, iteration, hypothesis: plan.hypothesis, assets, checks, verified, evidence: [sim], createdAt: now.toISOString() };
+  let buildError: string | null = null, contentSource = "template";
+  try { contentSource = (await kind.build(v.opportunity, plan, iteration, store.writer(dir, assets), model)).contentSource; } catch (e) { buildError = (e as Error).message; }
+  const read = store.reader(dir);
+  const checks = [...kind.verify(read, assets.map((a) => a.name)), ...(buildError ? [{ name: "build", passed: false, detail: buildError.slice(0, 200) }] : [])];
+  const docs = { page: read("index.html") ?? "", markdown: assets.filter((a) => a.name.endsWith(".md") && a.name !== "launch-checklist.md").map((a) => read(a.name) ?? "").join("\n") };
+  const ev = await evaluate(v.opportunity, checks, docs, portfolio, model);
+  const sim: Evidence = { id: newId("ev"), kind: "simulated", source: `engine evaluation (${kind.id}; content: ${contentSource})`, at: now.toISOString(),
+    metrics: { qualityScore: ev.quality, scores: ev.scores }, notes: `Simulated: the engine's own evaluation, not customer or financial data.\n${ev.weaknesses.map((w) => `- ${w}`).join("\n")}` };
+  return { id, iteration, hypothesis: plan.hypothesis, assets, checks, verified: checks.every((c) => c.passed), evidence: [sim], createdAt: now.toISOString() };
 }
 
 function decide(v: Venture, limits: Limits): { kind: DecisionKind; basis: Decision["basis"]; reason: string; approval?: ApprovalAction } {
@@ -55,21 +65,30 @@ function decide(v: Venture, limits: Limits): { kind: DecisionKind; basis: Decisi
   }
   if (v.status === "launched") return { kind: "HOLD", basis: "none", reason: "launched; waiting for owner-recorded results" };
   const last = v.experiments.at(-1);
-  const q = latestEvidence(v)?.metrics.qualityScore ?? 0;
-  if (last?.verified && q >= 0.75) return { kind: "HOLD", basis: "simulated", reason: `assets verified, simulated quality ${q}; ready for an owner-approved launch`, approval: "launch-public" };
-  if (q >= 0.5 && v.experiments.length < limits.maxIterationsPerVenture) return { kind: "IMPROVE", basis: "simulated", reason: `simulated quality ${q} (target 0.75)${last && !last.verified ? "; failed checks: " + last.checks.filter((c) => !c.passed).map((c) => c.name).join(", ") : ""}` };
-  return { kind: "KILL", basis: "simulated", reason: q >= 0.5 ? `iteration limit reached at simulated quality ${q}` : `simulated quality ${q} < 0.5` };
+  const sim = latestSimulated(v), q = sim?.metrics.qualityScore ?? 0;
+  const breakdown = sim?.metrics.scores ? Object.entries(sim.metrics.scores).map(([k, x]) => `${k} ${x}`).join(", ") : "";
+  if (last?.verified && q >= LAUNCH_QUALITY) return { kind: "HOLD", basis: "simulated", reason: `assets verified, simulated quality ${q} (${breakdown}); ready for an owner-approved launch`, approval: "launch-public" };
+  if (q >= 0.5 && v.experiments.length < limits.maxIterationsPerVenture) return { kind: "IMPROVE", basis: "simulated", reason: `simulated quality ${q} < ${LAUNCH_QUALITY} (${breakdown})` };
+  const failed = last && !last.verified ? `; failed checks: ${last.checks.filter((c) => !c.passed).map((c) => c.name).join(", ")}` : "";
+  return { kind: "KILL", basis: "simulated", reason: q >= 0.5 ? `iteration limit reached (simulated quality ${q}${failed})` : `simulated quality ${q} < 0.5${failed}` };
 }
 
-export function runCycle(o: EngineOptions): CycleReport {
+export async function runCycle(o: EngineOptions): Promise<CycleReport> {
   const limits = o.limits ?? DEFAULT_LIMITS;
   if (limits.spendLimitUsd !== 0) throw new Error("spending is not supported in this phase (spendLimitUsd must be 0)");
-  const now = (o.now ?? (() => new Date()))();
   const { store } = o;
+  const stopped = stopReason(store.dir);
+  if (stopped) throw new Error(`the engine is stopped (${stopped}); run 'resume' to continue`);
+  const now = (o.now ?? (() => new Date()))();
   const state = store.state();
+  const today = now.toISOString().slice(0, 10);
+  const cyclesToday = state.day === today ? state.cyclesToday ?? 0 : 0;
+  if (o.maxCyclesPerDay !== undefined && cyclesToday >= o.maxCyclesPerDay) throw new Error(`the daily cycle budget is used (${cyclesToday} of ${o.maxCyclesPerDay}); it resets at 00:00 UTC`);
   let ventures = store.ventures();
   let approvals = store.approvals();
-  const report: CycleReport = { cycle: state.cycles + 1, created: [], decisions: [], approvalsRequested: [], iterations: 0 };
+  const budget = new ModelBudget(o.maxModelCallsPerCycle ?? 0);
+  const model: ModelUse = { client: o.model ?? null, budget, log: (e) => store.audit(e, now) };
+  const report: CycleReport = { cycle: state.cycles + 1, created: [], decisions: [], approvalsRequested: [], iterations: 0, modelCalls: 0 };
   const kindOf = (id: string) => { const k = o.kinds.find((x) => x.id === id); if (!k) throw new Error(`no module for venture kind ${id}`); return k; };
   const set = (id: string, change: (v: Venture) => Venture) => { ventures = ventures.map((v) => (v.id === id ? { ...change(v), updatedAt: now.toISOString() } : v)); };
 
@@ -82,47 +101,61 @@ export function runCycle(o: EngineOptions): CycleReport {
 
   // 2-3. Decisions and iterations.
   for (const v of ventures.filter((x) => x.status === "built" || x.status === "launched")) {
-    const d = decide(v, limits);
-    const decision: Decision = { at: now.toISOString(), kind: d.kind, basis: d.basis, reason: d.reason };
+    let d = decide(v, limits);
+    // Respect the owner's "no": after a denial, the same request is not repeated until something new happens.
+    const denied = d.approval && approvals.filter((a) => a.ventureId === v.id && a.action === d.approval && a.status === "denied").map((a) => a.decidedAt ?? "").sort().at(-1);
+    if (d.approval && denied) {
+      const newest = v.experiments.flatMap((x) => x.evidence).filter((e) => e.kind === (d.basis === "actual" ? "actual" : "simulated")).map((e) => e.at).sort().at(-1) ?? "";
+      if (newest <= denied) d = d.approval === "launch-public" && v.experiments.length < limits.maxIterationsPerVenture
+        ? { kind: "IMPROVE", basis: d.basis, reason: "the owner declined the launch; improving the draft" }
+        : { kind: "HOLD", basis: d.basis, reason: `the owner declined (${d.approval}); waiting for new ${d.basis === "actual" ? "results" : "work"}` };
+    }
     report.decisions.push({ venture: v.id, kind: d.kind, basis: d.basis, reason: d.reason });
     if (d.approval && !approvals.some((a) => a.ventureId === v.id && a.action === d.approval && a.status === "pending")) {
-      const req: ApprovalRequest = { id: newId("apr"), ventureId: v.id, action: d.approval, summary: `${d.approval === "launch-public" ? "Launch publicly" : "Shut down (irreversible)"}: ${v.opportunity.title}. Reason: ${d.reason}.`, status: "pending", createdAt: now.toISOString(), decidedAt: null };
+      const reqs = d.approval === "launch-public" ? ` Before launching you need: ${kindOf(v.opportunity.kind).launchRequirements().join("; ")}.` : "";
+      const req: ApprovalRequest = { id: newId("apr"), ventureId: v.id, action: d.approval, summary: `${d.approval === "launch-public" ? "Launch publicly" : "Shut down (irreversible)"}: ${v.opportunity.title}. Reason: ${d.reason}.${reqs}`, status: "pending", createdAt: now.toISOString(), decidedAt: null };
       approvals = [...approvals, req]; report.approvalsRequested.push(req.id);
     }
-    set(v.id, (x) => ({ ...x, decisions: [...x.decisions, decision],
+    set(v.id, (x) => ({ ...x, decisions: [...x.decisions, { at: now.toISOString(), kind: d.kind, basis: d.basis, reason: d.reason }],
       status: d.approval === "launch-public" ? "awaiting-launch-approval" : d.approval === "irreversible-shutdown" ? "awaiting-shutdown-approval" : d.kind === "KILL" && x.status === "built" ? "archived" : x.status }));
     if (d.kind === "IMPROVE") {
       const cur = ventures.find((x) => x.id === v.id)!;
-      const exp = runExperiment(store, kindOf(cur.opportunity.kind), cur, now);
+      const exp = await runExperiment(store, kindOf(cur.opportunity.kind), cur, ventures, model, now);
       set(v.id, (x) => ({ ...x, experiments: [...x.experiments, exp] }));
       report.iterations += 1;
     }
   }
 
   // 4. New opportunities, while there is room.
-  const active = ventures.filter((v) => ACTIVE.has(v.status)).length;
-  const room = Math.min(limits.maxNewVenturesPerCycle, limits.maxActiveVentures - active);
+  const room = Math.min(limits.maxNewVenturesPerCycle, limits.maxActiveVentures - ventures.filter((v) => ACTIVE.has(v.status)).length);
   if (room > 0) {
-    const seen = new Set(ventures.map((v) => v.opportunity.title));
-    const candidates = o.kinds.flatMap((k, i) => k.generateOpportunities(state.seed * 7919 + i, seen, room * 3))
-      .filter((c) => c.score >= MIN_OPPORTUNITY_SCORE).sort((a, b) => b.score - a.score).slice(0, room);
+    const avoid = new Set(ventures.map((v) => v.opportunity.title));
+    const candidates = (await Promise.all(o.kinds.map((k, i) => k.generateOpportunities({ seed: state.seed * 7919 + i, avoid, count: room * 3, model }))))
+      .flat().filter((c) => c.score >= MIN_OPPORTUNITY_SCORE).sort((a, b) => b.score - a.score).slice(0, room);
     for (const c of candidates) {
       const opp = { ...c, id: newId("opp"), createdAt: now.toISOString() };
-      let v: Venture = { id: newId("ven"), opportunity: opp, status: "draft", experiments: [], decisions: [], createdAt: now.toISOString(), updatedAt: now.toISOString() };
-      v = { ...v, experiments: [runExperiment(store, kindOf(opp.kind), v, now)], status: "built" };
+      const v0: Venture = { id: newId("ven"), opportunity: opp, status: "draft", experiments: [], decisions: [], createdAt: now.toISOString(), updatedAt: now.toISOString() };
+      const v: Venture = { ...v0, experiments: [await runExperiment(store, kindOf(opp.kind), v0, ventures, model, now)], status: "built" };
       ventures = [...ventures, v]; report.created.push(v.id); report.iterations += 1;
     }
   }
+  report.modelCalls = budget.calls;
 
-  store.saveVentures(ventures); store.saveApprovals(approvals); store.saveState({ cycles: state.cycles + 1, seed: state.seed + 1 });
-  store.audit({ kind: "cycle", cycle: report.cycle, created: report.created, decisions: report.decisions.map((d) => `${d.venture}:${d.kind}:${d.basis}`), approvalsRequested: report.approvalsRequested }, now);
+  store.saveVentures(ventures); store.saveApprovals(approvals);
+  store.saveState({ cycles: state.cycles + 1, seed: state.seed + 1, day: today, cyclesToday: cyclesToday + 1 });
+  store.audit({ kind: "cycle", cycle: report.cycle, created: report.created, decisions: report.decisions.map((d) => `${d.venture}:${d.kind}:${d.basis}`), approvalsRequested: report.approvalsRequested, modelCalls: report.modelCalls }, now);
   return report;
 }
 
-export function runEngine(o: EngineOptions, cycles: number): CycleReport[] {
+export async function runEngine(o: EngineOptions, cycles: number): Promise<CycleReport[]> {
   const limits = o.limits ?? DEFAULT_LIMITS;
   if (!Number.isInteger(cycles) || cycles < 1 || cycles > limits.maxCyclesPerRun) throw new Error(`cycles: 1 to ${limits.maxCyclesPerRun}`);
-  return Array.from({ length: cycles }, () => runCycle(o));
+  const out: CycleReport[] = [];
+  for (let i = 0; i < cycles; i++) {
+    if (stopReason(o.store.dir)) break; // a STOP set during a run ends it after the current cycle
+    out.push(await runCycle(o));
+  }
+  return out;
 }
 
 export function decideApproval(store: Store, id: string, approve: boolean, now = new Date()): ApprovalRequest {
@@ -143,9 +176,9 @@ export function recordActual(store: Store, ventureId: string, metrics: Evidence[
   if (!v) throw new Error(`no venture ${ventureId}`);
   if (v.status !== "launched") throw new Error(`actual results can only be recorded for a launched venture (this one is ${v.status})`);
   if (typeof source !== "string" || source.trim().length < 3) throw new Error("source: say where the numbers come from (e.g. 'payment provider dashboard 2026-11-10')");
+  if ("qualityScore" in metrics || "scores" in metrics) throw new Error("quality scores are simulated estimates, not actual results");
   for (const [k, x] of Object.entries(metrics)) if (typeof x !== "number" || !Number.isFinite(x) || x < 0 || (k !== "revenueUsd" && k !== "costUsd" && !Number.isInteger(x))) throw new Error(`${k}: must be a non-negative ${k.endsWith("Usd") ? "amount" : "whole number"}`);
   if ((metrics.signups ?? 0) > (metrics.visitors ?? Infinity)) throw new Error("signups cannot exceed visitors");
-  if ("qualityScore" in metrics) throw new Error("qualityScore is a simulated estimate, not an actual result");
   const ev: Evidence = { id: newId("ev"), kind: "actual", source: source.trim().slice(0, 200), at: now.toISOString(), metrics, notes: "Recorded by the owner." };
   const last = v.experiments.at(-1)!;
   store.saveVentures(ventures.map((x) => (x.id === ventureId ? { ...x, experiments: [...x.experiments.slice(0, -1), { ...last, evidence: [...last.evidence, ev] }], updatedAt: now.toISOString() } : x)));

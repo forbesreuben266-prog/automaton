@@ -40,8 +40,8 @@ export class Store {
   saveVentures(v: readonly Venture[]): void { writeJson(path.join(this.dir, "portfolio.json"), v); }
   approvals(): ApprovalRequest[] { return readJson<ApprovalRequest[]>(path.join(this.dir, "approvals.json"), []); }
   saveApprovals(a: readonly ApprovalRequest[]): void { writeJson(path.join(this.dir, "approvals.json"), a); }
-  state(): { cycles: number; seed: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
-  saveState(s: { cycles: number; seed: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
+  state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
+  saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {
     const fd = fs.openSync(path.join(this.dir, "audit.jsonl"), fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
     try { fs.writeSync(fd, JSON.stringify({ at: now.toISOString(), ...entry }) + "\n"); } finally { fs.closeSync(fd); }

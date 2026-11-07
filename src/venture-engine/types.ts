@@ -7,6 +7,8 @@
  * from the engine's own estimates; "actual" evidence is only what the owner records from a real, approved launch.
  */
 
+import type { ModelUse } from "./model.js";
+
 export type VentureStatus = "draft" | "built" | "awaiting-launch-approval" | "launched" | "archived" | "awaiting-shutdown-approval" | "shut-down";
 export type DecisionKind = "SCALE" | "IMPROVE" | "HOLD" | "KILL";
 export type EvidenceKind = "simulated" | "actual";
@@ -25,6 +27,8 @@ export interface Opportunity {
   readonly estimates: { readonly demand: number; readonly feasibility: number; readonly risk: number; readonly costUsd: number };
   readonly score: number;
   readonly createdAt: string;
+  /** Where the idea came from: "catalogue" or "model (<id>)". */
+  readonly source: string;
 }
 
 export interface Asset { readonly name: string; readonly bytes: number; readonly sha256: string }
@@ -36,7 +40,9 @@ export interface Evidence {
   /** For actual evidence: where the numbers came from (stated by the owner). */
   readonly source: string;
   readonly at: string;
-  readonly metrics: { readonly visitors?: number; readonly signups?: number; readonly sales?: number; readonly revenueUsd?: number; readonly costUsd?: number; readonly qualityScore?: number };
+  readonly metrics: { readonly visitors?: number; readonly signups?: number; readonly sales?: number; readonly revenueUsd?: number; readonly costUsd?: number; readonly qualityScore?: number;
+    /** Simulated only: the evaluation breakdown behind qualityScore (each 0..1). */
+    readonly scores?: Readonly<Record<string, number>> };
   readonly notes: string;
 }
 
@@ -82,15 +88,15 @@ export interface Limits {
   readonly spendLimitUsd: 0;
 }
 
-export interface Plan { readonly hypothesis: string; readonly deliverables: readonly string[]; readonly successCriteria: readonly string[] }
+export interface Plan { readonly hypothesis: string; readonly deliverables: readonly string[]; readonly successCriteria: readonly string[]; readonly fix: readonly string[] }
 
 /** A pluggable business type. Builders write only through the provided writer (confined to the venture's folder). */
 export interface VentureKind {
   readonly id: string;
-  generateOpportunities(seed: number, avoidTitles: ReadonlySet<string>, count: number): Opportunity[];
-  plan(o: Opportunity, iteration: number, lastChecks: readonly Check[]): Plan;
-  build(o: Opportunity, plan: Plan, iteration: number, write: (name: string, text: string) => void): void;
+  /** What the owner must provide or do before a public launch (shown in the launch approval request). */
+  launchRequirements(): readonly string[];
+  generateOpportunities(ctx: { readonly seed: number; readonly avoid: ReadonlySet<string>; readonly count: number; readonly model: ModelUse }): Promise<Opportunity[]>;
+  plan(o: Opportunity, iteration: number, lastChecks: readonly Check[], weaknesses: readonly string[]): Plan;
+  build(o: Opportunity, plan: Plan, iteration: number, write: (name: string, text: string) => void, model: ModelUse): Promise<{ readonly contentSource: "model" | "template" }>;
   verify(read: (name: string) => string | null, names: readonly string[]): Check[];
-  /** The engine's own estimate (always "simulated"): never presented as customer or financial results. */
-  simulate(o: Opportunity, checks: readonly Check[], iteration: number): Evidence["metrics"];
 }
