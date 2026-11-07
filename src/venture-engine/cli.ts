@@ -1,6 +1,8 @@
 /**
  * Command line (run as the operator over SSH):
- *   run [cycles]                 run 1..N cycles now (offline; no external actions); refused while stopped
+ *   run [cycles] [--paid]        run 1..N cycles now (no external actions); refused while stopped. --paid is required
+ *                                for the Claude provider and only works when config.json has model.paidUsageApproved
+ *   ledger                       paid-model spending in the local ledger (NOT a provider-enforced cap)
  *   scheduled-run                one cycle, only if schedule.enabled is set and the daily cycle budget allows
  *   stop [reason] | resume       the STOP switch: no cycle runs while it is set (a running run ends after its cycle)
  *   status | show <venture> | approvals | approve <id> | deny <id>
@@ -16,15 +18,30 @@ import { DEFAULT_CONFIG, parseConfig, resume, stop, stopReason, withLock, type E
 import { renderDashboard, totals } from "./dashboard.js";
 import { decideApproval, recordActual, runEngine, type EngineOptions } from "./engine.js";
 import { digitalProduct } from "./kinds/digital-product.js";
+import { claudeModel, type CreateMessage } from "./claude.js";
+import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
 export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
-const USAGE = "Usage: run [cycles] | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
+const USAGE = "Usage: run [cycles] [--paid] | ledger | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
-export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn }
+export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage }
+
+/** The key lives only in this file (owner-created, mode 600). It is read when a paid run starts and never printed or stored elsewhere. */
+export const keyFile = (dir: string) => path.join(dir, "anthropic.key");
+function readKey(dir: string): string {
+  const file = keyFile(dir);
+  let fd: number;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { throw new Error(`no API key: the owner puts it in ${file} (mode 600)`); }
+  try {
+    const s = fs.fstatSync(fd);
+    if (!s.isFile() || (typeof process.getuid === "function" && s.uid !== process.getuid()) || (s.mode & 0o077) !== 0) throw new Error(`${file} must be your own regular file with mode 600`);
+    return fs.readFileSync(fd, "utf8").trim();
+  } finally { fs.closeSync(fd); }
+}
 
 function loadConfig(store: Store): EngineConfig {
   const file = path.join(store.dir, "config.json");
@@ -35,11 +52,24 @@ function loadConfig(store: Store): EngineConfig {
   return parseConfig(raw);
 }
 
-function modelFor(cfg: EngineConfig, d: CliDeps): ModelClient | null {
+function modelFor(cfg: EngineConfig, d: CliDeps, store: Store, paid: boolean, now: () => Date): ModelClient | null {
   if (d.model !== undefined) return d.model;
   if (cfg.model.provider === "none" || cfg.model.maxCallsPerCycle === 0) return null;
+  if (cfg.model.provider === "claude") {
+    if (!paid) throw new Error("the model provider is claude (paid): use 'run --paid'; scheduled runs never use a paid model");
+    if (cfg.model.paidUsageApproved !== true) throw new Error("paid usage is not approved (config.json model.paidUsageApproved is false)");
+    const ledger = new Ledger(store.dir, HARD_CAP_GBP, now());
+    return claudeModel({ model: cfg.model.name, apiKey: readKey(store.dir), ledger, now, maxOutputTokens: cfg.model.maxOutputTokens ?? 4000, timeoutMs: cfg.model.timeoutMs ?? 120_000,
+      session: { startCommittedGbp: ledger.totals().committedGbp, capGbp: cfg.model.maxGbpPerRun ?? 1 }, createMessage: d.createMessage });
+  }
   const fetchFn: FetchFn = d.fetchFn ?? ((url, init) => { loopbackUrl(url); return fetch(url, init) as unknown as ReturnType<FetchFn>; });
   return ollamaModel({ baseUrl: cfg.model.baseUrl, model: cfg.model.name, fetchFn });
+}
+
+function printLedger(store: Store, d: CliDeps, now: () => Date): void {
+  if (!fs.existsSync(path.join(store.dir, "ledger.json")) && !fs.existsSync(path.join(store.dir, "ledger.journal"))) { d.out("no paid usage recorded (no ledger yet)\n"); return; }
+  const t = new Ledger(store.dir, HARD_CAP_GBP, now()).totals();
+  d.out(`local ledger (estimate; NOT a provider-enforced cap): £${t.committedGbp} committed of £${t.capGbp} (settled £${t.settledGbp}, unknown-outcome reservations £${t.unknownGbp}), £${t.remainingGbp} left, ${t.requests} request(s)\n`);
 }
 
 export async function main(argv: readonly string[], d: CliDeps): Promise<number> {
@@ -48,7 +78,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
   try {
     const store = new Store(dataDir(d.home));
     const cfg = loadConfig(store);
-    const opts = (extra: Partial<EngineOptions> = {}): EngineOptions => ({ store, kinds: KINDS, now, limits: cfg.limits, model: modelFor(cfg, d), maxModelCallsPerCycle: cfg.model.maxCallsPerCycle, ...extra });
+    const opts = (extra: Partial<EngineOptions> = {}, paid = false): EngineOptions => ({ store, kinds: KINDS, now, limits: cfg.limits, model: modelFor(cfg, d, store, paid, now), maxModelCallsPerCycle: cfg.model.maxCallsPerCycle, paidApproved: paid && cfg.model.paidUsageApproved === true, ...extra });
     const print = (rs: Awaited<ReturnType<typeof runEngine>>) => {
       for (const r of rs) {
         d.out(`cycle ${r.cycle}: ${r.created.length} new venture(s), ${r.iterations} experiment(s), ${r.modelCalls} model call(s), ${r.approvalsRequested.length} approval request(s)\n`);
@@ -56,12 +86,17 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       }
     };
     if (cmd === "run") {
-      const n = rest[0] === undefined ? 1 : Number(rest[0]);
-      const rs = await withLock(store.dir, () => runEngine(opts(), n));
+      const paid = rest.includes("--paid");
+      const args = rest.filter((a) => a !== "--paid");
+      if (args.some((a) => a.startsWith("--"))) throw new Error(`unknown option ${args.find((a) => a.startsWith("--"))}`);
+      const n = args[0] === undefined ? 1 : Number(args[0]);
+      const rs = await withLock(store.dir, () => runEngine(opts({}, paid), n));
       print(rs);
       if (rs.length < n) d.out(`stopped after ${rs.length} cycle(s): ${stopReason(store.dir)}\n`);
+      if (paid && cfg.model.provider === "claude") printLedger(store, d, now);
       return 0;
     }
+    if (cmd === "ledger") { printLedger(store, d, now); return 0; }
     if (cmd === "scheduled-run") {
       if (!cfg.schedule.enabled) { d.out("schedule is disabled (config.json schedule.enabled); nothing was run\n"); return 0; }
       const why = stopReason(store.dir);

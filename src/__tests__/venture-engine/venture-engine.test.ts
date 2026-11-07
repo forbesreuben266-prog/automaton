@@ -178,7 +178,7 @@ describe("resource limits, stop controls and scheduling", () => {
     const base = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
     expect(parseConfig(JSON.stringify(base))).toEqual(base);
     for (const [change, msg] of [
-      [{ model: { ...base.model, provider: "anthropic" } }, "separate approval"],
+      [{ model: { ...base.model, provider: "anthropic" } }, "must be \"none\", \"ollama\" or \"claude\""],
       [{ limits: { ...base.limits, maxActiveVentures: HARD_LIMITS.maxActiveVentures + 1 } }, "maxActiveVentures"],
       [{ limits: { ...base.limits, spendLimitUsd: 10 } }, "spendLimitUsd must be 0"],
       [{ schedule: { enabled: "yes", maxCyclesPerDay: 6 } }, "schedule.enabled"],
@@ -198,12 +198,12 @@ describe("resource limits, stop controls and scheduling", () => {
 });
 
 describe("isolation", () => {
-  it("imports only its own files and Node built-ins; the only network call is the loopback-checked local model in the CLI", () => {
+  it("imports only its own files and Node built-ins (plus the pinned Anthropic SDK in claude.ts only); the only raw fetch is the loopback-checked local model in the CLI", () => {
     const SRC = path.resolve(__dirname, "../..");
     const DIRS = [path.join(SRC, "venture-engine"), path.join(SRC, "venture-engine", "kinds")];
     for (const d of DIRS) for (const f of fs.readdirSync(d).filter((x) => x.endsWith(".ts"))) {
       const src = fs.readFileSync(path.join(d, f), "utf8");
-      for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]), `${f}: ${m[1]}`).toBe(true);
+      for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]) || (f === "claude.ts" && m[1] === "@anthropic-ai/sdk"), `${f}: ${m[1]}`).toBe(true);
       const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(/child_process|https?\.request|net\.connect|eval\(|new Function|wallet|solana|viem|broker|placeorder|docker|sudo/i.test(code), f).toBe(false);
       expect((code.match(/\bfetch\(/g) ?? []).length, f).toBe(f === "cli.ts" ? 1 : 0);

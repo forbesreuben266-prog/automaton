@@ -5,6 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { HARD_CAP_GBP, PRICES_USD_PER_MTOK } from "./ledger.js";
 import type { Limits } from "./types.js";
 
 /** Absolute ceilings: configuration can lower these, never raise them. */
@@ -15,14 +16,18 @@ export const HARD_LIMITS: Readonly<Limits & { maxModelCallsPerCycle: number; max
 export interface EngineConfig {
   readonly version: 1;
   readonly limits: Limits;
-  readonly model: { readonly provider: "none" | "ollama"; readonly baseUrl: string; readonly name: string; readonly maxCallsPerCycle: number };
+  readonly model: {
+    readonly provider: "none" | "ollama" | "claude"; readonly baseUrl: string; readonly name: string; readonly maxCallsPerCycle: number;
+    /** Claude only. The owner sets this to true after approving paid usage; each paid run also needs 'run --paid'. */
+    readonly paidUsageApproved?: boolean; readonly maxGbpPerRun?: number; readonly maxOutputTokens?: number; readonly timeoutMs?: number;
+  };
   readonly schedule: { readonly enabled: boolean; readonly maxCyclesPerDay: number };
 }
 
 export const DEFAULT_CONFIG: EngineConfig = Object.freeze(<EngineConfig>{
   version: 1,
   limits: { maxActiveVentures: 5, maxNewVenturesPerCycle: 2, maxIterationsPerVenture: 3, maxCyclesPerRun: 10, spendLimitUsd: 0 },
-  model: { provider: "none", baseUrl: "http://127.0.0.1:11434", name: "qwen2.5:7b", maxCallsPerCycle: 12 },
+  model: { provider: "none", baseUrl: "http://127.0.0.1:11434", name: "qwen2.5:7b", maxCallsPerCycle: 12, paidUsageApproved: false, maxGbpPerRun: 1, maxOutputTokens: 4000, timeoutMs: 120_000 },
   schedule: { enabled: false, maxCyclesPerDay: 6 },
 });
 
@@ -39,10 +44,15 @@ export function parseConfig(raw: string): EngineConfig {
     int(c.limits.maxCyclesPerRun, 1, HARD_LIMITS.maxCyclesPerRun, "limits.maxCyclesPerRun");
     if (c.limits.spendLimitUsd !== 0) p.push("limits.spendLimitUsd must be 0 (spending is not supported)");
   }
-  if (keys(c?.model, ["provider", "baseUrl", "name", "maxCallsPerCycle"], "model")) {
-    if (!["none", "ollama"].includes(c.model.provider)) p.push('model.provider must be "none" or "ollama" (a paid provider needs separate approval)');
+  if (keys(c?.model, ["provider", "baseUrl", "name", "maxCallsPerCycle", "paidUsageApproved", "maxGbpPerRun", "maxOutputTokens", "timeoutMs"], "model")) {
+    if (!["none", "ollama", "claude"].includes(c.model.provider)) p.push('model.provider must be "none", "ollama" or "claude"');
     if (typeof c.model.baseUrl !== "string" || typeof c.model.name !== "string") p.push("model.baseUrl and model.name must be text");
     int(c.model.maxCallsPerCycle, 0, HARD_LIMITS.maxModelCallsPerCycle, "model.maxCallsPerCycle");
+    if (c.model.paidUsageApproved !== undefined && typeof c.model.paidUsageApproved !== "boolean") p.push("model.paidUsageApproved must be true or false");
+    if (c.model.maxGbpPerRun !== undefined && !(typeof c.model.maxGbpPerRun === "number" && c.model.maxGbpPerRun > 0 && c.model.maxGbpPerRun <= HARD_CAP_GBP)) p.push(`model.maxGbpPerRun must be more than 0 and at most ${HARD_CAP_GBP}`);
+    if (c.model.maxOutputTokens !== undefined) int(c.model.maxOutputTokens, 256, 4000, "model.maxOutputTokens");
+    if (c.model.timeoutMs !== undefined) int(c.model.timeoutMs, 10_000, 300_000, "model.timeoutMs");
+    if (c.model.provider === "claude" && !Object.hasOwn(PRICES_USD_PER_MTOK, c.model.name)) p.push(`model.name: for claude, one of ${Object.keys(PRICES_USD_PER_MTOK).join(", ")} (others have no known price)`);
   }
   if (keys(c?.schedule, ["enabled", "maxCyclesPerDay"], "schedule")) {
     if (typeof c.schedule.enabled !== "boolean") p.push("schedule.enabled must be true or false");

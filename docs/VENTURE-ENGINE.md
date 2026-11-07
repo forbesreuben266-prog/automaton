@@ -27,7 +27,7 @@ actual results only.
 
 ## What the engine never does
 
-It never publishes, spends money, uses paid models, acts on external
+It never publishes, spends money, uses paid models on its own, acts on external
 accounts, shuts down a launched venture, or trades. Each of those becomes an
 **approval request**. When you approve one, you perform the action yourself,
 and the engine records the outcome.
@@ -54,9 +54,10 @@ and the engine records the outcome.
 
 - **Model interface (`model.ts`):** provider-independent, used for ideas,
   content and critiques.
-  - Providers: `none` (the default, deterministic) and `ollama` (local,
-    loopback only). A paid provider needs your separate approval and isn't
-    included.
+  - Providers: `none` (the default, deterministic), `ollama` (local,
+    loopback only) and `claude` (paid; see "Claude API" below). Claude is
+    used only in a run you start with `run --paid` after setting
+    `paidUsageApproved`; scheduled runs never use it.
   - Every answer must parse as JSON, pass a validator and fit size limits;
     otherwise the engine falls back to its deterministic behaviour and logs
     why.
@@ -109,3 +110,90 @@ approval.
     ve record <venture> --source "payment provider, 2026-11-10" --visitors 200 --signups 9 --sales 2 --revenue 18
     ve dashboard             # writes ~/.automaton-ventures/dashboard.html (private)
     ve stop "reason" | ve resume | ve config | ve scheduled-run | ve schedule-unit
+    ve run 1 --paid          # Claude only, when approved; prefer scripts/venture-supervised-e2e.sh
+    ve ledger                # local paid-usage ledger (an estimate, not a provider cap)
+
+## Claude API (prepared; not active)
+
+Nothing here is active until you approve paid usage, create the key and set
+the config yourself.
+
+**Limits in code**
+- Total budget £10, fixed in `ledger.ts`. A ledger's cap can be lowered,
+  never raised. Optional per-run cap: `model.maxGbpPerRun`.
+- **The ledger is the engine's own estimate, not a provider-enforced cap.**
+  The real cap is a spend limit, or prepaid credit only, in the Anthropic
+  Console.
+- Before each request, the maximum cost is written to `ledger.json` (fsync):
+  - input is bounded at 1 token per UTF-8 byte plus 1024;
+  - output is bounded by `max_tokens`, which includes thinking;
+  - list price × £1 per $1 × 1.2 VAT.
+- Each change takes an exclusive lock, is fsynced (including the folder) and
+  is appended to `ledger.journal`. If `ledger.json` disappears while the
+  journal exists, paid runs are refused rather than starting again from £0.
+  Someone with your account can still delete both files or use another
+  data folder, so the Console limit is what actually enforces the cap.
+- Requests are refused when that would pass the cap, or when the cost can't
+  be bounded (unknown model, bad `max_tokens`).
+- After a response, the entry is settled from the reported usage.
+- After a timeout, error, crash or missing usage, the full reservation stays
+  counted.
+- Each request:
+  - only Opus, Sonnet or Haiku 5.5 (known prices);
+  - 0 retries, a 10–300 s timeout and `max_tokens` up to 4000, with effort
+    `low`;
+  - no tools, caching or temperature.
+- Only a complete answer (`end_turn`) is accepted; anything else fails
+  closed. The answer must still pass the JSON validators.
+- One paid request at a time. After any failed or ambiguous request, every
+  later paid request in that run is refused.
+- The SDK is pinned to `https://api.anthropic.com` with logging off. A paid
+  run refuses to start while any `ANTHROPIC_*` environment variable is set:
+  the SDK reads them for the base URL, extra headers, profiles and
+  telemetry.
+- Key: `~/.automaton-ventures/anthropic.key`, your own file, mode 600. It is
+  never printed, logged or stored elsewhere. Don't put it in the repository
+  or the environment.
+
+**Network**
+- Only the engine process (`main.js`) talks to one host,
+  `api.anthropic.com:443`, through the pinned SDK.
+- Model output is data. It becomes text files that are validated and never
+  executed. It has no tools and no network access.
+- Research sandboxes stay `network none`. No other change is needed.
+- To narrow egress, run the engine as a dedicated user and allow only that
+  user's outbound 443 to Anthropic's published API addresses (nftables
+  `meta skuid`). Check the current addresses on Anthropic's IP-addresses
+  documentation page.
+
+**Deploy to the existing VPS (plan only; needs your approval)**
+1. Back up the data:
+   `tar -C ~ -czf ~/ve-backup-$(date +%F).tgz .automaton-ventures && chmod 600 ~/ve-backup-*.tgz`.
+2. In `~/automaton`:
+   - `git fetch origin venture-engine`;
+   - `git checkout <reviewed commit>`;
+   - check `git rev-parse HEAD`;
+   - `pnpm install --frozen-lockfile && pnpm build`.
+3. In the Anthropic Console:
+   - create a separate workspace and key;
+   - set a spend limit of at most the equivalent of £10, or buy only that
+     much prepaid credit.
+4. Create the key file: `install -m 600 /dev/stdin ~/.automaton-ventures/anthropic.key`
+   - paste the key, press Enter, then Ctrl-D;
+   - don't use `echo`, which would put the key in shell history.
+5. In `config.json`:
+   - `provider` `"claude"`, with `name` set to the model;
+   - `paidUsageApproved` `true` and `maxGbpPerRun` (for example `1`);
+   - `schedule.enabled` stays `false`.
+6. Optional: add the egress rule above.
+7. Run `scripts/venture-supervised-e2e.sh --max-gbp <approved> --i-approve-paid-usage`.
+
+**Rollback**
+1. `ve stop "rollback"`.
+2. Set `paidUsageApproved` to `false`, or `provider` to `"none"`.
+3. Revoke the key in the Console, then `shred -u ~/.automaton-ventures/anthropic.key`.
+4. `git checkout 6b0e507f && pnpm install --frozen-lockfile && pnpm build`.
+5. If needed, restore the backup:
+   `tar -C ~ -xzf ~/ve-backup-<date>.tgz` (after moving the current folder aside).
+6. Keep `ledger.json` as the record of spending, and remove any egress rule
+   you added.

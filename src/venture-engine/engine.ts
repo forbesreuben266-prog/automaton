@@ -27,7 +27,7 @@ const ACTIVE: ReadonlySet<Venture["status"]> = new Set(["draft", "built", "await
 
 export interface EngineOptions {
   readonly store: Store; readonly kinds: readonly VentureKind[]; readonly limits?: Limits; readonly now?: () => Date;
-  readonly model?: ModelClient | null; readonly maxModelCallsPerCycle?: number; readonly maxCyclesPerDay?: number;
+  readonly model?: ModelClient | null; readonly maxModelCallsPerCycle?: number; readonly paidApproved?: boolean; readonly maxCyclesPerDay?: number;
 }
 export interface CycleReport { readonly cycle: number; readonly created: string[]; readonly decisions: { venture: string; kind: DecisionKind; basis: string; reason: string }[]; readonly approvalsRequested: string[]; iterations: number; modelCalls: number }
 
@@ -87,7 +87,7 @@ export async function runCycle(o: EngineOptions): Promise<CycleReport> {
   let ventures = store.ventures();
   let approvals = store.approvals();
   const budget = new ModelBudget(o.maxModelCallsPerCycle ?? 0);
-  const model: ModelUse = { client: o.model ?? null, budget, log: (e) => store.audit(e, now) };
+  const model: ModelUse = { client: o.model ?? null, budget, log: (e) => store.audit(e, now), paidApproved: o.paidApproved === true };
   const report: CycleReport = { cycle: state.cycles + 1, created: [], decisions: [], approvalsRequested: [], iterations: 0, modelCalls: 0 };
   const kindOf = (id: string) => { const k = o.kinds.find((x) => x.id === id); if (!k) throw new Error(`no module for venture kind ${id}`); return k; };
   const set = (id: string, change: (v: Venture) => Venture) => { ventures = ventures.map((v) => (v.id === id ? { ...change(v), updatedAt: now.toISOString() } : v)); };

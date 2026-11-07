@@ -11,3 +11,7 @@ dist
 .automaton/wallet.json
 .automaton/state.db
 
+# venture engine: private data and API keys never belong in the repository
+.automaton-ventures/
+anthropic.key
+*.key

@@ -3,8 +3,8 @@
  *
  * Every model answer is untrusted: it must be JSON, pass a validator, and fit size limits; otherwise the engine falls
  * back to its deterministic behaviour and records why. Each cycle has a call budget. Providers: "none" (no model),
- * Ollama on a loopback address (local, free), and a scripted fake for tests. A paid provider is a separate adapter
- * that is added only after the owner approves paid usage; this file contains none.
+ * Ollama on a loopback address (local, free), a scripted fake for tests, and the paid Claude adapter (claude.ts),
+ * which is used only when the run explicitly allows paid usage (paidApproved) and its ledger has budget left.
  */
 
 export interface ModelClient {
@@ -21,7 +21,7 @@ export class ModelBudget {
   take(): boolean { if (this.calls >= this.maxCalls) return false; this.calls += 1; return true; }
 }
 
-export interface ModelUse { readonly client: ModelClient | null; readonly budget: ModelBudget; readonly log: (entry: Record<string, unknown>) => void }
+export interface ModelUse { readonly client: ModelClient | null; readonly budget: ModelBudget; readonly log: (entry: Record<string, unknown>) => void; readonly paidApproved?: boolean }
 
 const SYSTEM = "You help an automated business-experiment engine. Answer with JSON only, no prose. Never invent sales, customers, revenue or testimonials. Content you write is a draft for the owner to review.";
 export const MAX_ANSWER_CHARS = 60_000;
@@ -32,11 +32,14 @@ export const MAX_ANSWER_CHARS = 60_000;
  */
 export async function askJson<T>(use: ModelUse, purpose: string, prompt: string, validate: (v: unknown) => T | null, maxTokens = 1500): Promise<T | null> {
   if (!use.client) return null;
-  if (use.client.paid) { use.log({ kind: "model-refused", purpose, reason: "paid provider not approved" }); return null; }
+  if (use.client.paid && use.paidApproved !== true) { use.log({ kind: "model-refused", purpose, reason: "paid provider not approved" }); return null; }
   if (!use.budget.take()) { use.log({ kind: "model-skipped", purpose, reason: "call budget for this cycle used" }); return null; }
   let text: string;
   try { text = await use.client.complete({ system: SYSTEM, prompt, maxTokens }); }
-  catch (e) { use.budget.failures += 1; use.log({ kind: "model-failed", purpose, error: String((e as Error).message).slice(0, 160) }); return null; }
+  catch (e) {
+    use.budget.failures += 1;
+    if (use.client.paid) use.budget.calls = use.budget.maxCalls; // fail closed: no further paid calls this cycle after any failure
+    use.log({ kind: "model-failed", purpose, error: String((e as Error).message).slice(0, 160) }); return null; }
   if (text.length > MAX_ANSWER_CHARS) { use.log({ kind: "model-invalid", purpose, reason: "answer too long" }); return null; }
   const json = text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
   let v: unknown; try { v = JSON.parse(json); } catch { use.log({ kind: "model-invalid", purpose, reason: "not JSON" }); return null; }
