@@ -50,6 +50,9 @@ if [ -f "$DATA/ledger.json" ]; then
   ' "$DATA/ledger.json" "$MAX"
 fi
 
+# Free check first (no tokens, nothing reserved): the key is accepted and the model is available to it.
+node "$APP" claude-check || { echo "refused: claude-check failed; nothing was spent" >&2; exit 2; }
+
 read -r -p "Type RUN to make up to £$MAX of paid Claude calls now: " answer
 [ "$answer" = RUN ] || { echo "cancelled; nothing was run"; exit 0; }
 

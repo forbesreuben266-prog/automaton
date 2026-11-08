@@ -112,6 +112,7 @@ approval.
     ve stop "reason" | ve resume | ve config | ve scheduled-run | ve schedule-unit
     ve run 1 --paid          # Claude only, when approved; prefer scripts/venture-supervised-e2e.sh
     ve ledger                # local paid-usage ledger (an estimate, not a provider cap)
+    ve claude-check          # free (no tokens): key accepted and model available? Also run by the supervised script
 
 ## Claude API (prepared; not active)
 
@@ -145,6 +146,10 @@ the config yourself.
   - no tools, caching or temperature.
 - Only a complete answer (`end_turn`) is accepted; anything else fails
   closed. The answer must still pass the JSON validators.
+- Failures are reported as HTTP status, Anthropic error type, request id
+  and a sanitised explanation (for example: rejected key, model not
+  available, insufficient credit, rate limit, network error). Headers,
+  request contents and anything shaped like a key are never shown.
 - One paid request at a time. After any failed or ambiguous request, every
   later paid request in that run is refused.
 - The SDK is pinned to `https://api.anthropic.com` with logging off. A paid

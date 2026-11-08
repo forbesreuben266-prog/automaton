@@ -14,9 +14,11 @@
  *    whole run, not only the cycle).
  *  - The SDK client is pinned to api.anthropic.com, logging off, and refuses to start while ANTHROPIC_* variables are set.
  *  - The API key comes from a private key file; it is never logged or written anywhere else.
+ *  - Failures are reported as HTTP status, Anthropic error type, request id and a sanitised explanation; headers,
+ *    request contents and anything shaped like a key are never included.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIConnectionError, APIConnectionTimeoutError, APIError, APIUserAbortError } from "@anthropic-ai/sdk";
 import { Ledger, LedgerRefused, PRICES_USD_PER_MTOK, TAX_MULTIPLIER, USD_TO_GBP } from "./ledger.js";
 import type { ModelClient } from "./model.js";
 
@@ -40,6 +42,82 @@ export interface ClaudeOptions {
   readonly session?: { readonly startCommittedGbp: number; readonly capGbp: number };
   /** Tests inject a fake; the default is the SDK. */
   readonly createMessage?: CreateMessage;
+  /** Tests only: the real SDK client with this fetch instead of the network. */
+  readonly fetchForTests?: typeof fetch;
+}
+
+/** The one place the SDK client is built: pinned host, no retries, logging off, no ANTHROPIC_* overrides. */
+function sdkClient(apiKey: string, timeoutMs: number, fetchForTests?: typeof fetch): Anthropic {
+  const vars = anthropicEnvVars();
+  if (vars.length) throw new Error(`refusing a paid client while ${vars.join(", ")} is set (it could redirect the key or change billing); unset it`);
+  return new Anthropic({ apiKey, baseURL: API_BASE_URL, maxRetries: 0, timeout: timeoutMs, logLevel: "off", ...(fetchForTests ? { fetch: fetchForTests } : {}) });
+}
+
+export interface ApiFailure { readonly status: number | null; readonly type: string; readonly requestId: string | null; readonly detail: string; readonly hint: string; readonly rejected: boolean }
+
+const scrub = (s: string, apiKey?: string) => {
+  let t = s;
+  if (apiKey && apiKey.length >= 8) t = t.split(apiKey).join("[redacted]");
+  return t.replace(/sk-ant-[A-Za-z0-9_-]+/g, "[redacted]").replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200);
+};
+
+/**
+ * Turns an SDK (or other) error into a safe description. Note: the SDK's error classes do not set Error.name, so
+ * every API failure used to be logged as just "Error". `rejected` means the API answered with an error status
+ * (normally not billed); the local ledger still keeps the full reservation counted.
+ */
+export function describeApiFailure(e: unknown, ctx: { model: string; timeoutMs: number; apiKey?: string }): ApiFailure {
+  if (e instanceof APIConnectionTimeoutError) return { status: null, type: "timeout", requestId: null, detail: "", hint: `no answer within ${Math.round(ctx.timeoutMs / 1000)} s; the request may still have been processed`, rejected: false };
+  if (e instanceof APIUserAbortError) return { status: null, type: "aborted", requestId: null, detail: "", hint: "the request was aborted", rejected: false };
+  if (e instanceof APIConnectionError) {
+    const c = (e as { cause?: { code?: unknown; cause?: { code?: unknown } } }).cause;
+    const code = [c?.code, c?.cause?.code].find((x): x is string => typeof x === "string" && /^[A-Z0-9_]{2,40}$/.test(x)) ?? "unknown";
+    return { status: null, type: "network_error", requestId: null, detail: code, hint: `could not reach ${API_BASE_URL} (${code}): check the VPS's outbound HTTPS, DNS and firewall`, rejected: false };
+  }
+  if (e instanceof APIError) {
+    const status = typeof e.status === "number" ? e.status : null;
+    const body = (e.error ?? {}) as { error?: { type?: unknown; message?: unknown; details?: { error_code?: unknown } } };
+    const type = typeof e.type === "string" ? e.type : typeof body.error?.type === "string" ? body.error.type : "unknown";
+    const detail = typeof body.error?.message === "string" ? scrub(body.error.message, ctx.apiKey) : "";
+    const requestId = typeof e.requestID === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(e.requestID) ? e.requestID : null;
+    const code = typeof body.error?.details?.error_code === "string" ? body.error.details.error_code : "";
+    const hint =
+      status === 401 ? "the API key was rejected: check anthropic.key holds the whole key, that the key is active, and that it belongs to the workspace with the spend limit"
+      : status === 403 ? "this key's organisation or workspace may not use this model or operation (see the message)"
+      : status === 404 ? `model "${ctx.model}" is not available to this account, or the ID is wrong`
+      : status === 400 && /credit balance/i.test(detail) ? "insufficient credit: add prepaid credit in Console > Billing"
+      : status === 400 && /usage limits/i.test(detail) ? "a Console spend limit has been reached"
+      : status === 400 ? "the API rejected the request as invalid (see the message)"
+      : status === 413 ? "the request was too large"
+      : status === 429 && code === "enforced_spend_limit_reached" ? "the organisation's monthly spend cap has been reached"
+      : status === 429 ? "rate limited: wait and try again later"
+      : status === 529 || type === "overloaded_error" ? "Anthropic is temporarily overloaded: try again later"
+      : status !== null && status >= 500 ? "Anthropic server error: try again later"
+      : "unexpected API response";
+    return { status, type, requestId, detail, hint, rejected: status !== null && status < 500 };
+  }
+  const name = e instanceof Error ? e.constructor.name : typeof e;
+  return { status: null, type: "client_error", requestId: null, detail: e instanceof Error ? scrub(e.message, ctx.apiKey) : "", hint: `unexpected ${name} before or while sending`, rejected: false };
+}
+
+export function formatApiFailure(f: ApiFailure): string {
+  return [f.status !== null ? `HTTP ${f.status}` : null, f.type, f.hint, f.detail ? `message: "${f.detail}"` : null, f.requestId ? `request ${f.requestId}` : null].filter(Boolean).join("; ");
+}
+
+/** Free check (no tokens, no ledger): is the key accepted and is the model available to it? Uses GET /v1/models/{id}. */
+export async function checkClaudeAccess(o: { apiKey: string; model: string; timeoutMs?: number; fetchForTests?: typeof fetch }): Promise<{ ok: boolean; text: string }> {
+  if (!PRICES_USD_PER_MTOK[o.model]) return { ok: false, text: `model ${o.model}: not one of ${Object.keys(PRICES_USD_PER_MTOK).join(", ")}` };
+  if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(o.apiKey)) return { ok: false, text: "the API key is missing or not in the expected format" };
+  const timeoutMs = o.timeoutMs ?? 30_000;
+  try {
+    const m = await sdkClient(o.apiKey, timeoutMs, o.fetchForTests).models.retrieve(o.model, null, { timeout: timeoutMs, maxRetries: 0 });
+    const id = typeof m?.id === "string" ? scrub(m.id) : "?";
+    if (id !== o.model) return { ok: false, text: `the API answered for model "${id}", not "${o.model}"` };
+    return { ok: true, text: `key accepted; model ${id}${typeof m.display_name === "string" ? ` (${scrub(m.display_name)})` : ""} is available to it. This check does not show the credit balance: see Console > Billing.` };
+  } catch (e) {
+    if (e instanceof Error && /refusing a paid client/.test(e.message)) return { ok: false, text: e.message };
+    return { ok: false, text: formatApiFailure(describeApiFailure(e, { model: o.model, timeoutMs, apiKey: o.apiKey })) };
+  }
 }
 
 export const toGbp = (usd: number) => usd * USD_TO_GBP * TAX_MULTIPLIER;
@@ -58,9 +136,7 @@ export function claudeModel(o: ClaudeOptions): ModelClient {
   if (!(o.maxOutputTokens >= 256 && o.maxOutputTokens <= MAX_OUTPUT_TOKENS)) throw new Error(`maxOutputTokens: 256 to ${MAX_OUTPUT_TOKENS}`);
   if (!(o.timeoutMs >= 10_000 && o.timeoutMs <= 300_000)) throw new Error("timeoutMs: 10000 to 300000");
   const create: CreateMessage = o.createMessage ?? (() => {
-    const vars = anthropicEnvVars();
-    if (vars.length) throw new Error(`refusing a paid client while ${vars.join(", ")} is set (it could redirect the key or change billing); unset it`);
-    const client = new Anthropic({ apiKey: o.apiKey, baseURL: API_BASE_URL, maxRetries: 0, timeout: o.timeoutMs, logLevel: "off" });
+    const client = sdkClient(o.apiKey, o.timeoutMs, o.fetchForTests);
     return (params, opts) => client.messages.create(params, opts) as unknown as ReturnType<CreateMessage>;
   })();
   const price = PRICES_USD_PER_MTOK[o.model];
@@ -78,8 +154,11 @@ export function claudeModel(o: ClaudeOptions): ModelClient {
     try {
       res = await create({ model: o.model, max_tokens: maxTokens, system: req.system, messages: [{ role: "user", content: req.prompt }], output_config: { effort: "low" } }, { timeout: o.timeoutMs, maxRetries: 0 });
     } catch (e) {
-      o.ledger.unknown(id, `request failed after it may have been sent: ${(e as Error).name}`); // full reservation stays counted
-      throw new Error(`Claude request failed (${(e as Error).name}); its maximum cost stays counted in the ledger`);
+      const f = describeApiFailure(e, { model: o.model, timeoutMs: o.timeoutMs, apiKey: o.apiKey });
+      const note = [f.status !== null ? `HTTP ${f.status}` : null, f.type, f.requestId].filter(Boolean).join(" ");
+      // The full reservation stays counted, also when the API rejected the request (normally not billed): fail closed.
+      o.ledger.unknown(id, `${f.rejected ? "rejected by the API" : "outcome unknown"}: ${note}`);
+      throw new Error(`Claude request failed: ${formatApiFailure(f)}. Its maximum cost stays counted in the local ledger${f.rejected ? " (an API error response is normally not billed; check Console > Usage)" : ""}`);
     }
     const u = res?.usage;
     if (!u || !Number.isInteger(u.input_tokens) || !Number.isInteger(u.output_tokens)) { o.ledger.unknown(id, "no usage in the response"); throw new Error("Claude response without usage; maximum cost counted"); }

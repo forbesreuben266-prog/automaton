@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { anthropicEnvVars, claudeModel, maxCostGbp, type CreateMessage } from "../../venture-engine/claude.js";
+import { APIConnectionTimeoutError } from "@anthropic-ai/sdk";
+import { anthropicEnvVars, checkClaudeAccess, claudeModel, describeApiFailure, maxCostGbp, type CreateMessage } from "../../venture-engine/claude.js";
 import { main } from "../../venture-engine/cli.js";
 import { DEFAULT_CONFIG, parseConfig } from "../../venture-engine/control.js";
 import { HARD_CAP_GBP, Ledger, LedgerRefused, PRICES_USD_PER_MTOK } from "../../venture-engine/ledger.js";
@@ -191,6 +192,117 @@ describe("hardening", () => {
     expect(fs.statSync(path.join(DIR, "ledger.journal")).mode & 0o777).toBe(0o600);
     fs.rmSync(path.join(DIR, "ledger.json"));
     expect(() => new Ledger(DIR, 10, NOW)).toThrow(/never resets itself/);
+  });
+});
+
+// --- Real SDK, fake network: the exact request and the API's error responses (no request leaves the process) ---
+const withoutAnthropicEnv = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const saved = Object.fromEntries(anthropicEnvVars().map((k) => [k, process.env[k]]));
+  for (const k of Object.keys(saved)) delete process.env[k];
+  try { return await fn(); } finally { Object.assign(process.env, saved); }
+};
+interface Seen { url: string; method: string; headers: Record<string, string>; body: string }
+const apiFetch = (status: number, body: unknown, seen: Seen[] = []): typeof fetch => (async (url: string | URL | Request, init?: RequestInit) => {
+  seen.push({ url: String(url), method: String(init?.method), headers: (() => { const h: Record<string, string> = {}; new Headers(init?.headers).forEach((v, k) => { h[k] = v; }); return h; })(), body: String(init?.body ?? "") });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "request-id": "req_test_0001" } });
+}) as typeof fetch;
+const errBody = (type: string, message: string, extra: Record<string, unknown> = {}) => ({ type: "error", error: { type, message, ...extra }, request_id: "req_test_0001" });
+const OK_MESSAGE = { id: "msg_1", type: "message", role: "assistant", model: "claude-haiku-5-5", content: [{ type: "text", text: '{"ok":1}' }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 40, output_tokens: 10 } };
+const sdkClientFor = (l: Ledger, f: typeof fetch) => claudeModel({ model: "claude-haiku-5-5", apiKey: KEY, ledger: l, maxOutputTokens: 4000, timeoutMs: 60_000, now: () => NOW, fetchForTests: f });
+
+describe("API failures are reported safely (real SDK, fake network)", () => {
+  it("sends exactly the expected request: endpoint, model ID, parameters, auth header", async () => {
+    const seen: Seen[] = [];
+    const l = new Ledger(DIR, 10, NOW);
+    expect(await withoutAnthropicEnv(() => sdkClientFor(l, apiFetch(200, OK_MESSAGE, seen)).complete(REQ))).toBe('{"ok":1}');
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("https://api.anthropic.com/v1/messages");
+    expect(seen[0].method).toBe("POST");
+    expect(JSON.parse(seen[0].body)).toEqual({ model: "claude-haiku-5-5", max_tokens: 4000, system: REQ.system, messages: [{ role: "user", content: REQ.prompt }], output_config: { effort: "low" } });
+    expect(seen[0].headers.authorization).toBe(`Bearer ${KEY}`); // SDK 1.x sends API keys as Authorization: Bearer
+    expect(seen[0].headers["anthropic-version"]).toBe("2026-10-21");
+    expect(l.entries()[0].status).toBe("settled");
+  });
+
+  const cases: [string, number, unknown, RegExp[]][] = [
+    ["failed authentication", 401, errBody("authentication_error", "invalid x-api-key"), [/HTTP 401/, /authentication_error/, /API key was rejected/, /request req_test_0001/]],
+    ["invalid model", 404, errBody("not_found_error", "model: claude-haiku-5-5"), [/HTTP 404/, /not_found_error/, /model "claude-haiku-5-5" is not available to this account/]],
+    ["rate limit", 429, errBody("rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit"), [/HTTP 429/, /rate_limit_error/, /rate limited/]],
+    ["monthly spend cap", 429, errBody("rate_limit_error", "spend cap reached", { details: { error_code: "enforced_spend_limit_reached" } }), [/HTTP 429/, /monthly spend cap/]],
+    ["insufficient credits", 400, errBody("invalid_request_error", "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."), [/HTTP 400/, /invalid_request_error/, /insufficient credit/]],
+    ["workspace spend limit", 400, errBody("invalid_request_error", "You have reached your specified workspace API usage limits."), [/HTTP 400/, /spend limit has been reached/]],
+    ["overloaded", 529, errBody("overloaded_error", "Overloaded"), [/HTTP 529/, /overloaded/]],
+  ];
+  for (const [name, status, body, expected] of cases) {
+    it(`${name}: HTTP status, error type and explanation; key never shown; reservation stays counted`, async () => {
+      const l = new Ledger(DIR, 10, NOW);
+      const err = await withoutAnthropicEnv(() => sdkClientFor(l, apiFetch(status, body)).complete(REQ).then(() => null, (e: Error) => e));
+      expect(err).toBeInstanceOf(Error);
+      for (const re of expected) expect(err!.message).toMatch(re);
+      expect(err!.message).not.toContain(KEY);
+      expect(err!.message).not.toMatch(/Bearer|x-api-key:|Propose 3 opportunities/); // no headers, no request contents
+      const e = l.entries()[0];
+      expect(e.status).toBe("unknown");
+      expect(e.note).toMatch(new RegExp(`^${status < 500 ? "rejected by the API" : "outcome unknown"}: HTTP ${status} `));
+      expect(l.totals().committedGbp).toBe(e.reservedGbp);
+      expect(JSON.stringify(l.entries())).not.toContain(KEY);
+    });
+  }
+
+  it("network errors name the cause; timeouts are reported as possibly processed", async () => {
+    const l = new Ledger(DIR, 10, NOW);
+    const down = (async () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.anthropic.com"), { code: "ENOTFOUND" }) }); }) as typeof fetch;
+    const err = await withoutAnthropicEnv(() => sdkClientFor(l, down).complete(REQ).then(() => null, (e: Error) => e));
+    expect(err!.message).toMatch(/network_error/);
+    expect(err!.message).toMatch(/ENOTFOUND/);
+    expect(err!.message).toMatch(/outbound HTTPS/);
+    expect(l.entries()[0].note).toMatch(/^outcome unknown: network_error/);
+    const t = describeApiFailure(new APIConnectionTimeoutError(), { model: "claude-haiku-5-5", timeoutMs: 120_000 });
+    expect(t).toMatchObject({ status: null, type: "timeout", rejected: false });
+    expect(t.hint).toMatch(/120 s; the request may still have been processed/);
+  });
+
+  it("anything shaped like a key in an API message is redacted", async () => {
+    const l = new Ledger(DIR, 10, NOW);
+    const body = errBody("authentication_error", `invalid key ${KEY} and sk-ant-other-key-1234567890abcdefgh, Bearer abc.def`);
+    const err = await withoutAnthropicEnv(() => sdkClientFor(l, apiFetch(401, body)).complete(REQ).then(() => null, (e: Error) => e));
+    expect(err!.message).not.toContain(KEY);
+    expect(err!.message).not.toContain("sk-ant-other");
+    expect(err!.message).not.toContain("abc.def");
+    expect(err!.message).toContain("[redacted]");
+  });
+
+  it("checkClaudeAccess: free model lookup; reports success, wrong key and unknown model without spending", async () => {
+    const seen: Seen[] = [];
+    const ok = await withoutAnthropicEnv(() => checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5-5", fetchForTests: apiFetch(200, { type: "model", id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5", created_at: "2026-10-01T00:00:00Z" }, seen) }));
+    expect(ok.ok).toBe(true); expect(ok.text).toMatch(/model claude-haiku-5-5 \(Claude Haiku 5.5\) is available/);
+    expect(seen[0].url).toBe("https://api.anthropic.com/v1/models/claude-haiku-5-5"); expect(seen[0].method).toBe("GET");
+    const bad = await withoutAnthropicEnv(() => checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5-5", fetchForTests: apiFetch(401, errBody("authentication_error", "invalid x-api-key")) }));
+    expect(bad).toMatchObject({ ok: false }); expect(bad.text).toMatch(/HTTP 401; authentication_error; the API key was rejected/); expect(bad.text).not.toContain(KEY);
+    const missing = await withoutAnthropicEnv(() => checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5-5", fetchForTests: apiFetch(404, errBody("not_found_error", "model: claude-haiku-5-5")) }));
+    expect(missing.text).toMatch(/HTTP 404; not_found_error/);
+    expect((await checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5" })).text).toMatch(/not one of/);
+  });
+
+  it("CLI: the failure reason reaches the audit log and claude-check, never the key", async () => {
+    const data = path.join(DIR, ".automaton-ventures");
+    let out = "";
+    const fetch401 = apiFetch(401, errBody("authentication_error", "invalid x-api-key"));
+    const cli = (...a: string[]) => withoutAnthropicEnv(async () => { out = ""; return main(a, { home: DIR, out: (s) => { out += s; }, now: () => NOW, sdkFetchForTests: fetch401 }); });
+    expect(await cli("config")).toBe(0);
+    const c = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf8"));
+    fs.writeFileSync(path.join(data, "config.json"), JSON.stringify({ ...c, model: { ...c.model, provider: "claude", name: "claude-haiku-5-5", maxCallsPerCycle: 3, paidUsageApproved: true, maxGbpPerRun: 0.5 } }));
+    fs.writeFileSync(path.join(data, "anthropic.key"), KEY + "\n", { mode: 0o600 });
+    expect(await cli("claude-check")).toBe(1); expect(out).toMatch(/claude-check FAILED: HTTP 401; authentication_error/);
+    expect(await cli("run", "--paid")).toBe(0);
+    const audit = fs.readFileSync(path.join(data, "audit.jsonl"), "utf8");
+    expect(audit).toMatch(/"kind":"model-failed"[^\n]*HTTP 401; authentication_error; the API key was rejected/);
+    expect(audit.match(/"kind":"model-failed"/g)).toHaveLength(1); // the first failure stops all further paid calls
+    for (const f of fs.readdirSync(data).filter((x) => x !== "anthropic.key")) {
+      const p = path.join(data, f);
+      if (fs.statSync(p).isFile()) expect(fs.readFileSync(p, "utf8"), f).not.toContain(KEY);
+    }
+    expect(out).not.toContain(KEY);
   });
 });
 

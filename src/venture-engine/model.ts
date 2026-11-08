@@ -39,7 +39,7 @@ export async function askJson<T>(use: ModelUse, purpose: string, prompt: string,
   catch (e) {
     use.budget.failures += 1;
     if (use.client.paid) use.budget.calls = use.budget.maxCalls; // fail closed: no further paid calls this cycle after any failure
-    use.log({ kind: "model-failed", purpose, error: String((e as Error).message).slice(0, 160) }); return null; }
+    use.log({ kind: "model-failed", purpose, error: String((e as Error).message).slice(0, 600) }); return null; }
   if (text.length > MAX_ANSWER_CHARS) { use.log({ kind: "model-invalid", purpose, reason: "answer too long" }); return null; }
   const json = text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
   let v: unknown; try { v = JSON.parse(json); } catch { use.log({ kind: "model-invalid", purpose, reason: "not JSON" }); return null; }
