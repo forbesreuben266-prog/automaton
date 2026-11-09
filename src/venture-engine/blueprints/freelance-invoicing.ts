@@ -89,8 +89,10 @@ Common choices are 7, 14 or 30 days. Shorter terms are easier to agree at the st
 > If an invoice is not paid by its due date, [[describe what you have agreed: for example a reminder schedule, a
 > late-payment charge, or pausing further work until the account is up to date]].
 
-Many countries have rules about charging interest or fees on late business payments, and some set specific rates or
-compensation amounts. Check what applies where you and your client are based before you put a figure in your terms.
+Whether you can charge interest or fees on a late payment depends on the rules that apply where you and your client
+are based and on what you both agreed in writing. Rules differ between countries, and some set specific rates or
+compensation amounts. Include a charge in your terms only if those rules allow it, and apply only what your agreement
+says.
 
 ## 6. Questions about an invoice
 
@@ -99,7 +101,11 @@ compensation amounts. Check what applies where you and your client are based bef
 
 ## 7. Pausing work
 
-> If an invoice is more than [[14]] days overdue, work on the project may be paused until it is paid.
+> If an invoice is more than [[14]] days overdue, and where this agreement and the applicable rules permit it, work on
+> the project may be paused until it is paid.
+
+Pause work only if your contract allows it and the rules that apply to you and your client permit it. Check before
+you rely on this clause.
 
 ## Important
 
