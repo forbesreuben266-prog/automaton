@@ -268,3 +268,49 @@ launch.
   venture is launched.
 - `report` keeps real evidence and simulated estimates in separate sections,
   and takes decisions from real evidence only.
+
+## Review and repair (offline)
+
+`review.ts` reduces manual checking. It never publishes, contacts anyone, calls
+a model or spends money.
+
+    ve product review <product>      # inspect; repair safe issues as a NEW version; report
+    ve product review-all            # the latest version of every venture's product
+    ve product sign-off <product> --note "read qa-report.md; price OK"
+
+1. **Inspect**: the full product QA, plus three more checks: the price shown
+   matches the price recorded, the invoice calculator is exactly the reviewed
+   one, and the version still matches its reviewed blueprint.
+2. **Repair** (only if something failed or the blueprint has improved):
+   - regenerate the files from the reviewed blueprint;
+   - apply deterministic text fixes: external Markdown links become plain
+     text, CSV formula cells are neutralised, and a missing disclaimer is
+     added;
+   - QA runs again after each pass, for at most 3 passes.
+3. If every check passes, the repaired files are saved as a **new version**.
+   Existing versions and venture records are never modified. If checks still
+   fail, nothing is written and the review stops, saying why.
+4. **Never decided automatically**: misleading or commercial claims, legal
+   positions stated as fact, the legal/tax/financial passages and the proposed
+   price. These are listed under "needs owner decision". `request-launch` is
+   refused until the owner signs off the current version. A sign-off stops
+   counting if the reviewed wording or the price changes.
+
+Each report has three parts: **fixed automatically**, **passed** and
+**needs owner decision**, plus a stop reason when relevant. Live and archived
+versions are reported, never repaired.
+
+### Running it automatically later (not enabled)
+
+The review is offline and deterministic, so it could later run unattended on
+the VPS. That needs the owner's approval, and nothing here installs it.
+- A systemd user timer, for example once a day, would run
+  `node ~/automaton/dist/venture-engine/main.js product review-all`.
+- The service would have `PrivateNetwork=yes`, `NoNewPrivileges=yes` and
+  `PrivateTmp=yes`, so it can't reach the network.
+- The output would be appended to a private log, mode 600.
+
+Even then, it could only create new versions and reports. It can't sign off,
+request a launch, publish, change the config or spend money; those stay with
+the owner. A timer would follow the same rules as the engine's own schedule:
+off by default, and respecting the STOP switch.

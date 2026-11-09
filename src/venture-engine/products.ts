@@ -57,6 +57,8 @@ export interface Product {
   readonly archivedReason: string | null;
   readonly live: { readonly url: string; readonly at: string; readonly approvalId: string } | null;
   readonly validation: readonly ValidationRecord[];
+  /** The owner's sign-off on the legal, tax and financial passages and the proposed price (needed before a launch request). */
+  readonly signOff?: { readonly at: string; readonly reviewHash: string; readonly note: string } | null;
 }
 
 // ---------------------------------------------------------------- inputs
@@ -317,35 +319,67 @@ ${review.length ? review.map((r) => `- ${r.replace(/\|/g, "/")}`).join("\n") : "
 const cents = (x: number) => Math.abs(x * 100 - Math.round(x * 100)) < 1e-6;
 const parseMoney = (s: string | undefined, what: string) => { const x = Number(s); if (s === undefined || !/^\d+(\.\d{1,2})?$/.test(s) || x <= 0 || x > 1000) throw new Error(`${what}: an amount from 0.01 to 1000, at most 2 decimals`); return x; };
 
-export function buildProduct(store: Store, ventureId: string, opts: { now: Date; price?: number; currency?: Currency; previous?: Product | null }): Product {
+/** A product version generated in memory (nothing written yet). */
+export interface GeneratedVersion {
+  readonly id: string; readonly ventureId: string; readonly version: number; readonly blueprint: string; readonly name: string;
+  readonly price: number; readonly currency: Currency;
+  /** Deliverables, landing.html and tracking-plan.json, in write order. */
+  readonly files: { name: string; text: string; template: boolean }[];
+  readonly deliverables: readonly string[];
+}
+
+export function generateVersion(store: Store, ventureId: string, opts: { price?: number; currency?: Currency; previous?: Product | null }): GeneratedVersion {
   const v = store.ventures().find((x) => x.id === ventureId);
   if (!v) throw new Error(`no venture ${ventureId}`);
   if (v.status === "shut-down") throw new Error(`${ventureId} is shut down`);
-  const all = store.products();
   const b = BLUEPRINTS.find((x) => x.matches(v.opportunity))!;
   const currency = opts.currency ?? opts.previous?.currency ?? "USD";
   if (!CURRENCIES.includes(currency)) throw new Error(`currency: one of ${CURRENCIES.join(", ")}`);
   const price = opts.price ?? opts.previous?.price ?? b.defaultPrice;
   const input: BlueprintInput = { opportunity: v.opportunity, outline: latestOutline(store, v), price, currency };
   const id = newId("prd");
-  const version = all.filter((p) => p.ventureId === ventureId).length + 1;
+  const version = store.products().filter((p) => p.ventureId === ventureId).length + 1;
   const name = b.productName(input);
   const deliverables = b.files(input);
-  const manifest = [...deliverables.map((f) => ({ name: f.name, template: f.template })), { name: "landing.html", template: false }, { name: "tracking-plan.json", template: false }];
-  const dir = store.assetDir(ventureId, id);
+  return { id, ventureId, version, blueprint: b.id, name, price, currency, deliverables: deliverables.map((f) => f.name),
+    files: [...deliverables.map((f) => ({ name: f.name, text: f.text, template: f.template })),
+      { name: "landing.html", text: landingPage(name, input, b, deliverables), template: false },
+      { name: "tracking-plan.json", text: trackingPlan(id, version, money(input)), template: false }] };
+}
+
+/** QA of a generated version, in memory. */
+export const qaGenerated = (g: GeneratedVersion) => qa((n) => g.files.find((f) => f.name === n)?.text ?? null, g.files.map((f) => ({ name: f.name, template: f.template })), null);
+
+/** Writes a generated version as a new product (exclusive create: never overwrites) and records it. */
+export function writeVersion(store: Store, g: GeneratedVersion, opts: { now: Date; previous?: Product | null }): Product {
+  const { checks, review } = qaGenerated(g);
   const written: Asset[] = [];
-  const write = store.writer(dir, written);
-  for (const f of deliverables) write(f.name, f.text);
-  write("landing.html", landingPage(name, input, b, deliverables));
-  write("tracking-plan.json", trackingPlan(id, version, money(input)));
-  const { checks, review } = qa(store.reader(dir), manifest, null);
-  write("qa-report.md", qaReport({ id, version, name }, checks, review));
+  const write = store.writer(store.assetDir(g.ventureId, g.id), written);
+  for (const f of g.files) write(f.name, f.text);
+  write("qa-report.md", qaReport({ id: g.id, version: g.version, name: g.name }, checks, review));
   const at = opts.now.toISOString();
-  const p: Product = { id, ventureId, version, previous: opts.previous?.id ?? null, blueprint: b.id, name, status: checks.every((x) => x.passed) ? "ready" : "needs-work",
-    price, currency, files: written, deliverables: deliverables.map((f) => f.name), templates: deliverables.filter((f) => f.template).map((f) => f.name), checks, review, createdAt: at, updatedAt: at, archivedReason: null, live: null, validation: [] };
-  store.saveProducts([...all, p]);
-  store.audit({ kind: "product-built", product: id, venture: ventureId, version, blueprint: b.id, status: p.status, failed: checks.filter((x) => !x.passed).map((x) => x.name) }, opts.now);
+  const p: Product = { id: g.id, ventureId: g.ventureId, version: g.version, previous: opts.previous?.id ?? null, blueprint: g.blueprint, name: g.name, status: checks.every((x) => x.passed) ? "ready" : "needs-work",
+    price: g.price, currency: g.currency, files: written, deliverables: g.deliverables, templates: g.files.filter((f) => f.template).map((f) => f.name), checks, review, createdAt: at, updatedAt: at, archivedReason: null, live: null, validation: [], signOff: null };
+  store.saveProducts([...store.products(), p]);
+  store.audit({ kind: "product-built", product: p.id, venture: p.ventureId, version: p.version, blueprint: p.blueprint, status: p.status, previous: p.previous, failed: checks.filter((x) => !x.passed).map((x) => x.name) }, opts.now);
   return p;
+}
+
+export function buildProduct(store: Store, ventureId: string, opts: { now: Date; price?: number; currency?: Currency; previous?: Product | null }): Product {
+  return writeVersion(store, generateVersion(store, ventureId, opts), opts);
+}
+
+export const reviewHash = (p: Pick<Product, "review" | "price" | "currency">) => sha256(JSON.stringify({ review: p.review, price: p.price, currency: p.currency }));
+
+/** The owner has read the legal, tax and financial passages and accepts the proposed price. */
+export function signOff(store: Store, id: string, note: string, now: Date): Product {
+  const p = getProduct(store, id);
+  if (p.status !== "ready") throw new Error(`${id} is ${p.status}: only a product that passed every check can be signed off`);
+  if (note.trim().length < 3) throw new Error("sign-off needs a short note (for example: read qa-report.md; price OK)");
+  const next: Product = { ...p, signOff: { at: now.toISOString(), reviewHash: reviewHash(p), note: note.trim().slice(0, 200) }, updatedAt: now.toISOString() };
+  saveProduct(store, next);
+  store.audit({ kind: "product-signed-off", product: id, passages: p.review.length, price: `${p.currency} ${p.price}` }, now);
+  return next;
 }
 
 function getProduct(store: Store, id: string): Product {
@@ -380,6 +414,7 @@ export function archiveProduct(store: Store, id: string, reason: string, now: Da
 export function requestLaunch(store: Store, id: string, now: Date): ApprovalRequest {
   const p = getProduct(store, id);
   if (p.status !== "ready") throw new Error(`${id} is ${p.status}: only a product that passed every check can be proposed for launch`);
+  if (!p.signOff || p.signOff.reviewHash !== reviewHash(p)) throw new Error(`${id} has no owner sign-off for its ${p.review.length} legal, tax or financial passage(s) and proposed price: read qa-report.md, then run 'product sign-off ${id} --note "..."'`);
   const approvals = store.approvals();
   const open = approvals.find((a) => a.ventureId === p.ventureId && a.action === "launch-public" && a.status === "pending");
   if (open) return open;
@@ -499,7 +534,7 @@ function flags(args: readonly string[], allowed: readonly string[]): Record<stri
 }
 const int = (s: string | undefined, what: string) => { if (s === undefined || !/^\d+$/.test(s)) throw new Error(`${what}: a whole number`); return Number(s); };
 const summary = (p: Product) => `${p.id} v${p.version} ${p.status.padEnd(10)} ${p.blueprint.padEnd(18)} ${p.currency} ${p.price}  ${p.checks.filter((c) => c.passed).length}/${p.checks.length} checks  venture ${p.ventureId}  ${p.name}`;
-export const PRODUCT_USAGE = "product build <venture> [--price N] [--currency USD|GBP|EUR] | improve <product> [--price N] | check <product> | archive <product> --reason <text> | list [venture] | show <product> | request-launch <product> | mark-live <product> --url <https://...> | record <product> --period YYYY-MM-DD..YYYY-MM-DD --visits N --signups N --sales N --revenue X --source <text> [--evidence <file>] | report <product>";
+export const PRODUCT_USAGE = "product build <venture> [--price N] [--currency USD|GBP|EUR] | review <product> | review-all | sign-off <product> --note <text> | improve <product> [--price N] | check <product> | archive <product> --reason <text> | list [venture] | show <product> | request-launch <product> | mark-live <product> --url <https://...> | record <product> --period YYYY-MM-DD..YYYY-MM-DD --visits N --signups N --sales N --revenue X --source <text> [--evidence <file>] | report <product>";
 
 export async function productCli(args: readonly string[], ctx: { store: Store; out: (s: string) => void; now: () => Date }): Promise<number> {
   const [sub, id, ...rest] = args;

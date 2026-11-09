@@ -4,6 +4,9 @@
  *                                for the Claude provider and only works when config.json has model.paidUsageApproved
  *   ledger                       paid-model spending in the local ledger (NOT a provider-enforced cap)
  *   product <subcommand> ...     product builds, QA, launch gate and real validation records (see products.ts; never publishes)
+ *   product review <product> | review-all | sign-off <product> --note <text>
+ *                                offline review and repair (review.ts): safe fixes become a new version; the rest is
+ *                                listed for the owner, whose sign-off is needed before a launch request
  *   claude-check [--x-api-key]   free check (no tokens): is the API key accepted and the configured model available to it;
  *                                --x-api-key sends the key in the legacy X-Api-Key header instead of Authorization: Bearer
  *   scheduled-run                one cycle, only if schedule.enabled is set and the daily cycle budget allows
@@ -24,7 +27,8 @@ import { digitalProduct } from "./kinds/digital-product.js";
 import { checkClaudeAccess, claudeModel, keyProfile, type CreateMessage } from "./claude.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
-import { PRODUCT_USAGE, productCli } from "./products.js";
+import { PRODUCT_USAGE, productCli, signOff } from "./products.js";
+import { formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
@@ -102,6 +106,15 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       return 0;
     }
     if (cmd === "ledger") { printLedger(store, d, now); return 0; }
+    if (cmd === "product" && rest[0] === "review") { const r = await withLock(store.dir, async () => reviewProduct(store, String(rest[1]), now())); d.out(formatReview(r)); return r.stopped ? 1 : 0; }
+    if (cmd === "product" && rest[0] === "review-all") { const rs = await withLock(store.dir, async () => reviewAll(store, now())); for (const r of rs) d.out(formatReview(r) + "\n"); if (!rs.length) d.out("no products\n"); return rs.some((r) => r.stopped) ? 1 : 0; }
+    if (cmd === "product" && rest[0] === "sign-off") {
+      const [, id, flag, note] = rest;
+      if (flag !== "--note" || note === undefined || rest.length !== 4) throw new Error('product sign-off <product> --note "<what you checked>"');
+      const p = await withLock(store.dir, async () => signOff(store, String(id), note, now()));
+      d.out(`${p.id} signed off: ${p.review.length} legal/tax/financial passage(s) and proposed price ${p.currency} ${p.price} accepted ("${p.signOff!.note}"). Nothing was published.\n`);
+      return 0;
+    }
     if (cmd === "product") return await productCli(rest, { store, out: d.out, now });
     if (cmd === "claude-check") {
       if (cfg.model.provider !== "claude") { d.out('claude-check: config.json model.provider is not "claude"\n'); return 1; }
