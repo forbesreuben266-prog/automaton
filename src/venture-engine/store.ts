@@ -43,6 +43,9 @@ export class Store {
   /** Product builds (see products.ts); kept apart from portfolio.json so that building never rewrites venture records. */
   products<T = import("./products.js").Product>(): T[] { return readJson<T[]>(path.join(this.dir, "products.json"), []); }
   saveProducts(p: readonly unknown[]): void { writeJson(path.join(this.dir, "products.json"), p); }
+  /** Marketing campaigns (see campaign.ts): drafts, approvals, published links and verified results. */
+  campaigns<T = import("./campaign.js").Campaign>(): T[] { return readJson<T[]>(path.join(this.dir, "campaigns.json"), []); }
+  saveCampaigns(c: readonly unknown[]): void { writeJson(path.join(this.dir, "campaigns.json"), c); }
   state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
   saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {

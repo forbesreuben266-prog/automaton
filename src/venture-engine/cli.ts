@@ -9,6 +9,8 @@
  *                                are never overwritten (adopt keeps them, --discard-edits regenerates them on request)
  *   product marketing <product>  marketing pack DRAFTS (3 social posts, email, pitch, 7-day plan) saved locally; nothing is
  *                                posted, sent or scheduled (marketing.ts)
+ *   campaign <subcommand> ...    approval-gated LinkedIn/Facebook campaigns (campaign.ts): drafts, per-post approval,
+ *                                published links and verified results; nothing is published automatically
  *   product sign-off <product> [--confirm CODE --price "GBP 12" --note <text>]
  *                                without options: shows the numbered items and a confirmation code; with them (from an
  *                                interactive terminal only): records the owner's approval, needed before a launch request
@@ -33,6 +35,7 @@ import { checkClaudeAccess, claudeModel, keyProfile, type CreateMessage } from "
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
 import { changedFiles, confirmationCode, PRODUCT_USAGE, productCli, signOff, signOffItems } from "./products.js";
+import { CAMPAIGN_USAGE, campaignCli } from "./campaign.js";
 import { generateMarketing } from "./marketing.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
@@ -40,7 +43,7 @@ import type { Evidence, VentureKind } from "./types.js";
 
 export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
-const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
+const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | " + CAMPAIGN_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
 export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch;
   /** Whether a person is at an interactive terminal (default: stdin and stdout are TTYs). Sign-off requires it. */
@@ -127,6 +130,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       d.out(`${p.id} (version ${p.version}) created from your edits in ${p.previous}; ${p.previous} is unchanged. Adopted files are kept in later repairs: ${(p.customised ?? []).join(", ")}.\n`);
       return 0;
     }
+    if (cmd === "campaign") return await campaignCli(rest, { store, out: d.out, now, interactive: d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true) });
     if (cmd === "product" && rest[0] === "marketing") {
       if (rest.length !== 2) throw new Error("product marketing <product>");
       const m = await withLock(store.dir, async () => generateMarketing(store, String(rest[1]), now()));

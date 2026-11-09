@@ -364,3 +364,63 @@ offer, benefits, contents and proposed price.
 - Product files and records are not changed.
 - A product with an edited landing page is refused until it has been
   reviewed or adopted.
+
+## Marketing campaigns (approval-gated; nothing is published automatically)
+
+    ve campaign create <product> --url https://payhip.com/b/<code> [--start YYYY-MM-DD]
+    ve campaign show <campaign>                    # schedule, statuses, published links, verified results
+    ve campaign post <campaign> <post>             # the full text of one post
+    ve campaign approve <campaign> <post> [--note "..."]    # interactive terminal only
+    ve campaign reject <campaign> <post> --note "what is wrong"
+    ve campaign published <campaign> <post> --url <link of the post you published>
+    ve campaign record <campaign> <post> --period 2026-11-10..2026-11-16 --impressions N --reactions N \
+        --comments N --shares N --clicks N --source "LinkedIn post analytics" [--evidence export.csv]
+    ve campaign list
+
+- **Create.** The product must have passed every check and have your current
+  sign-off. `--url` must be your real Payhip product link,
+  `https://payhip.com/b/<code>`; nothing is guessed. The command drafts seven
+  days of posts: LinkedIn on days 1, 3, 5 and 7, Facebook on days 2, 4 and 6.
+  - The text comes only from the product's checked landing page.
+  - The drafts use the product QA's misleading-claim rules.
+  - The only link allowed is the Payhip URL.
+  - Posts stay within per-platform length limits.
+  - Drafts are stored in `campaigns.json`.
+- **Approve or reject** one post at a time, from an interactive terminal only;
+  automated jobs can't decide. An approval is tied to the post's exact text
+  and URL, and a changed post is no longer approved.
+- **Published.** You publish an approved post yourself, then record its link.
+  This is accepted only once the product is live through the approved launch
+  (`product mark-live`) and its recorded live URL is the campaign's Payhip
+  URL. The link must be an https link on that platform.
+- **Results.** Record only numbers read from the platform's own analytics,
+  for a period after publication, not in the future and not overlapping, with
+  a source. An evidence export is hashed (SHA-256), not copied. Nothing is
+  estimated. Sales stay in `product record`, from Payhip.
+
+No social-media passwords or tokens are requested or stored. No network,
+model or payment calls are made.
+
+### Future step: connecting accounts for approved publishing (not built)
+
+Publishing for you would need the platforms' official APIs and your explicit
+approval. It would never scrape or automate a browser.
+- **LinkedIn:** a LinkedIn developer app with the "Share on LinkedIn" product
+  (`w_member_social` scope), or Community Management API access for a company
+  page. You authorise it through OAuth in your browser, which gives an access
+  token; your password is never given to Automaton. LinkedIn tokens expire,
+  typically after 60 days, and need re-authorisation.
+- **Facebook:** a Facebook Page (posting to personal profiles through the API
+  isn't allowed) and a Meta developer app with the `pages_manage_posts` and
+  `pages_read_engagement` permissions, which need Meta's app review. You then
+  get a Page access token through OAuth.
+- **Storage:** each token would sit in a private file like the Anthropic key
+  (mode 600, owner-only, never printed). Network access would be limited to
+  `api.linkedin.com` and `graph.facebook.com`.
+- **Code:** a small publisher that posts only posts that are `approved` with
+  an unchanged content hash, for a live product, on or after their scheduled
+  date. It would record the link the platform returns, and fill results only
+  from the platforms' analytics endpoints.
+- **Your approval:** you'd approve enabling it (a config flag, off by default),
+  each account connection, and each publishing run, from an interactive
+  terminal. That would add `external-account-action` approvals.
