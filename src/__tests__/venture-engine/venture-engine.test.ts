@@ -200,7 +200,7 @@ describe("resource limits, stop controls and scheduling", () => {
 describe("isolation", () => {
   it("imports only its own files and Node built-ins (plus the pinned Anthropic SDK in claude.ts only); the only raw fetch is the loopback-checked local model in the CLI", () => {
     const SRC = path.resolve(__dirname, "../..");
-    const DIRS = [path.join(SRC, "venture-engine"), path.join(SRC, "venture-engine", "kinds")];
+    const DIRS = [path.join(SRC, "venture-engine"), path.join(SRC, "venture-engine", "kinds"), path.join(SRC, "venture-engine", "blueprints")];
     for (const d of DIRS) for (const f of fs.readdirSync(d).filter((x) => x.endsWith(".ts"))) {
       const src = fs.readFileSync(path.join(d, f), "utf8");
       for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]) || (f === "claude.ts" && m[1] === "@anthropic-ai/sdk"), `${f}: ${m[1]}`).toBe(true);

@@ -202,3 +202,69 @@ the config yourself.
    `tar -C ~ -xzf ~/ve-backup-<date>.tgz` (after moving the current folder aside).
 6. Keep `ledger.json` as the record of spending, and remove any egress rule
    you added.
+
+## Products: from venture to a usable product, ready for real validation
+
+`products.ts` turns one venture into a complete digital product and prepares it
+for customer validation. It never publishes, contacts anyone, spends or calls a
+model. Builds are deterministic, from blueprints in `blueprints/`:
+
+- `freelance-invoicing`: an editable printable invoice, an invoice tracker and
+  a client register (CSV), payment-terms wording, four reminder emails, a
+  workflow checklist and setup instructions.
+- `generic` (any venture): a guide, a checklist and an action tracker built
+  from the venture's own outline. A thin or placeholder outline fails QA
+  rather than being padded with invented content.
+
+Each build is a new version in `ventures/<venture>/<product>/` (mode 600 files,
+never overwritten). It also includes:
+
+- `landing.html`: a static page with the offer, a proposed price labelled as a
+  hypothesis, signup and pre-order actions (`data-conversion=...`), and a
+  pre-launch notice. It has no scripts and no external links.
+- `tracking-plan.json`: what each conversion action is measured by, and the
+  decision rules, set before any data exists.
+- `qa-report.md`: the check results, plus every passage on legal, tax or
+  financial topics, for you to read.
+
+**QA checks:**
+- files present and unchanged since the build (hash);
+- links point to anchors or files in the package;
+- no scripts or external resources;
+- complete content: no placeholders, no empty sections, consistent CSVs,
+  at least 15 concrete points;
+- CSV formula safety;
+- no misleading claims: guarantees, invented numbers, rankings, testimonials,
+  scarcity, income claims or statistics;
+- sensitive advice is disclaimed and never stated as fact;
+- the landing page is complete;
+- the tracking plan is present;
+- `start-here.md` explains every file.
+
+A product that fails any check is `needs-work` and can't be proposed for
+launch.
+
+**Commands** (`ve product ...`):
+
+    ve product build <venture> [--price 12] [--currency GBP]   # a new version + QA
+    ve product check <product>      # re-run QA; detects changed or missing files
+    ve product improve <product>    # next version; earlier versions stay as they are
+    ve product archive <product> --reason "..."   # files are kept
+    ve product list [venture] | show <product> | report <product>
+    ve product request-launch <product>   # creates an approval request; publishes nothing
+    ve product mark-live <product> --url https://...   # after you approved AND published it yourself
+    ve product record <product> --period 2026-11-10..2026-11-16 --visits N --signups N --sales N --revenue X \
+        --source "where you read the numbers" [--evidence provider-export.csv]
+
+**Real evidence only.**
+- `record` works only for a live product, and only for periods that start
+  after it went live and don't end in the future or overlap.
+- It needs a source. Signups can't exceed visits, and there can't be revenue
+  without sales.
+- With `--evidence`, the provider's export is hashed (SHA-256; the file isn't
+  copied) and the record counts as *verified by evidence file*. Otherwise it is
+  *owner-reported*.
+- Totals are mirrored into the engine's existing actual evidence once the
+  venture is launched.
+- `report` keeps real evidence and simulated estimates in separate sections,
+  and takes decisions from real evidence only.

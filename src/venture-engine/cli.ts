@@ -3,6 +3,7 @@
  *   run [cycles] [--paid]        run 1..N cycles now (no external actions); refused while stopped. --paid is required
  *                                for the Claude provider and only works when config.json has model.paidUsageApproved
  *   ledger                       paid-model spending in the local ledger (NOT a provider-enforced cap)
+ *   product <subcommand> ...     product builds, QA, launch gate and real validation records (see products.ts; never publishes)
  *   claude-check [--x-api-key]   free check (no tokens): is the API key accepted and the configured model available to it;
  *                                --x-api-key sends the key in the legacy X-Api-Key header instead of Authorization: Bearer
  *   scheduled-run                one cycle, only if schedule.enabled is set and the daily cycle budget allows
@@ -23,12 +24,13 @@ import { digitalProduct } from "./kinds/digital-product.js";
 import { checkClaudeAccess, claudeModel, keyProfile, type CreateMessage } from "./claude.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
+import { PRODUCT_USAGE, productCli } from "./products.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
 export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
-const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
+const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
 export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch }
 
@@ -100,6 +102,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       return 0;
     }
     if (cmd === "ledger") { printLedger(store, d, now); return 0; }
+    if (cmd === "product") return await productCli(rest, { store, out: d.out, now });
     if (cmd === "claude-check") {
       if (cfg.model.provider !== "claude") { d.out('claude-check: config.json model.provider is not "claude"\n'); return 1; }
       const legacyHeader = rest.includes("--x-api-key");
