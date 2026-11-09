@@ -1,41 +1,12 @@
 /**
- * Blueprint: freelance invoicing kit. A complete, editable pack: printable invoice, invoice tracker and client
+ * Blueprint: freelance invoicing kit. A complete, editable pack: printable invoice with automatic totals, invoice tracker and client
  * register (CSV, opens in any spreadsheet), payment-terms wording, reminder emails, a workflow checklist and setup
  * instructions. Currency-neutral; no country-specific legal or tax claims (see DISCLAIMER).
  */
 
 import { type Blueprint, csv, DISCLAIMER, type ProductFile, words } from "./common.js";
+import { invoiceHtml } from "./invoice-template.js";
 
-const INVOICE_HTML = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Invoice [[Invoice number]]</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem;color:#111;line-height:1.4}
-h1{font-size:1.8rem;margin:0}.muted{color:#555}.row{display:flex;justify-content:space-between;gap:2rem;margin:1.5rem 0}
-table{width:100%;border-collapse:collapse;margin:1rem 0}th,td{border-bottom:1px solid #ccc;padding:.4rem;text-align:left}td.n,th.n{text-align:right}
-[contenteditable]{outline:1px dashed #9ab;outline-offset:2px}.tot td{font-weight:600}.note{font-size:.9rem}
-@media print{[contenteditable]{outline:none}.howto{display:none}}
-</style></head><body>
-<p class="howto muted"><small>How to use: click any dashed field to edit it in your browser, then print to PDF (Ctrl/Cmd + P). Or open this file in a text editor and replace each [[field]]. Dashed outlines do not print.</small></p>
-<div class="row"><div><h1 contenteditable="true">INVOICE</h1><p class="muted" contenteditable="true">[[Your name or business name]]<br>[[Your address]]<br>[[Your email]]<br>[[Business or tax registration number, if you have one]]</p></div>
-<div><p><strong>Invoice number:</strong> <span contenteditable="true">[[Invoice number, e.g. 2026-014]]</span><br><strong>Issue date:</strong> <span contenteditable="true">[[Issue date]]</span><br><strong>Due date:</strong> <span contenteditable="true">[[Due date]]</span><br><strong>Purchase order:</strong> <span contenteditable="true">[[Client PO number, if any]]</span></p></div></div>
-<p><strong>Bill to:</strong><br><span contenteditable="true">[[Client company name]]<br>[[Client contact name]]<br>[[Client billing address]]</span></p>
-<table><thead><tr><th>Description</th><th class="n">Quantity</th><th class="n">Rate</th><th class="n">Amount</th></tr></thead><tbody>
-<tr><td contenteditable="true">[[Work item, e.g. Website copy, 5 pages]]</td><td class="n" contenteditable="true">[[1]]</td><td class="n" contenteditable="true">[[Rate]]</td><td class="n" contenteditable="true">[[Amount]]</td></tr>
-<tr><td contenteditable="true">[[Work item]]</td><td class="n" contenteditable="true">[[Qty]]</td><td class="n" contenteditable="true">[[Rate]]</td><td class="n" contenteditable="true">[[Amount]]</td></tr>
-<tr><td contenteditable="true">[[Work item]]</td><td class="n" contenteditable="true">[[Qty]]</td><td class="n" contenteditable="true">[[Rate]]</td><td class="n" contenteditable="true">[[Amount]]</td></tr>
-</tbody><tfoot>
-<tr><td colspan="3" class="n">Subtotal</td><td class="n" contenteditable="true">[[Subtotal]]</td></tr>
-<tr><td colspan="3" class="n" contenteditable="true">[[Tax name and rate, or delete this row]]</td><td class="n" contenteditable="true">[[Tax amount]]</td></tr>
-<tr><td colspan="3" class="n" contenteditable="true">[[Deposit already paid, or delete this row]]</td><td class="n" contenteditable="true">[[Deposit amount]]</td></tr>
-<tr class="tot"><td colspan="3" class="n">Total due ([[Currency]])</td><td class="n" contenteditable="true">[[Total due]]</td></tr>
-</tfoot></table>
-<p><strong>Payment details:</strong> <span contenteditable="true">[[Bank name, account name, account number or IBAN, sort code or SWIFT, or your payment link]]</span><br>
-<strong>Payment reference:</strong> please quote <span contenteditable="true">[[Invoice number]]</span>.</p>
-<p class="note" contenteditable="true">Payment terms: payment is due within [[number]] days of the issue date, by [[Due date]]. [[Your late-payment terms, as agreed in your contract; see payment-terms.md]]</p>
-<p class="note" contenteditable="true">Thank you for your business. Questions about this invoice: [[Your email or phone]].</p>
-</body></html>
-`;
 
 const files = (): ProductFile[] => [
   { name: "start-here.md", template: false, description: "Start here: what is included and a 20-minute setup", text: `# Freelance invoicing kit: start here
@@ -47,7 +18,7 @@ ready-to-adapt payment terms and reminder emails, and a checklist for each stage
 
 | File | What it is | Open it with |
 |---|---|---|
-| \`invoice-template.html\` | Printable invoice with editable fields | Any web browser (edit, then print to PDF) or a text editor |
+| \`invoice-template.html\` | Printable invoice that adds up line amounts, subtotal, optional tax and deposit, and total due | Any web browser (edit, then print to PDF) |
 | \`invoice-tracker.csv\` | One row per invoice: amounts, due dates, reminders, payment | Excel, Google Sheets, Numbers or LibreOffice |
 | \`client-register.csv\` | One row per client: billing contact, agreed terms, deposit, PO rules | Any spreadsheet |
 | \`payment-terms.md\` | Wording to adapt for quotes and contracts | Any text editor or word processor |
@@ -58,7 +29,10 @@ ready-to-adapt payment terms and reminder emails, and a checklist for each stage
 
 1. Open \`client-register.csv\` in your spreadsheet and add one row for each current client. Delete the example row.
 2. Open \`invoice-template.html\` in your browser. Click the dashed fields and fill in your own details once.
-   Save a copy as your master invoice (print to PDF or save the edited file under a new name).
+   Type a quantity and a rate on each line: the line amounts, subtotal and total due are calculated for you.
+   Tax rate and deposit are optional: fill them in only if they apply to this invoice (check which tax, if any, you
+   must charge). Print to PDF to send it. Edits are not saved automatically: keep the PDF as your record, and use
+   your browser's "Save page as" (or edit the file in a text editor) to keep a master copy with your details.
 3. Choose an invoice numbering scheme, for example \`2026-001\`, \`2026-002\`, and never reuse a number.
 4. Read \`payment-terms.md\`, choose the wording that fits how you work, and add it to your next quote or contract.
 5. Open \`invoice-tracker.csv\`, delete the example row, and add every invoice you have not yet been paid for.
@@ -76,7 +50,7 @@ ready-to-adapt payment terms and reminder emails, and a checklist for each stage
 
 ${DISCLAIMER}
 ` },
-  { name: "invoice-template.html", template: true, description: "Printable invoice with editable fields (browser: edit, then print to PDF)", text: INVOICE_HTML },
+  { name: "invoice-template.html", template: true, description: "Printable invoice with automatic totals, optional tax and deposit (browser: edit, then print to PDF)", text: invoiceHtml() },
   { name: "invoice-tracker.csv", template: true, description: "Invoice tracker: amounts, due dates, reminders and payments", text: csv([
     ["Invoice number", "Client", "Project", "Issue date", "Due date", "Amount", "Currency", "Status", "Reminder 1 sent", "Reminder 2 sent", "Final notice sent", "Date paid", "Notes"],
     ["EXAMPLE-001", "Example Client Ltd", "Brochure copywriting", "2026-01-05", "2026-01-19", 450, "GBP", "Paid", "", "", "", "2026-01-18", "Example row: delete it when you add your own invoices"],
@@ -242,7 +216,7 @@ export const freelanceInvoicing: Blueprint = {
   productName: () => "Freelance invoicing kit",
   pitch: (i) => ({
     headline: "A complete invoicing routine for freelancers, ready in 20 minutes",
-    subheadline: `For ${i.opportunity.audience}: ${i.opportunity.problem.replace(/\.$/, "")}. An editable invoice, a tracker, payment-terms wording, reminder emails and a step-by-step checklist.`,
+    subheadline: `For ${i.opportunity.audience}: ${i.opportunity.problem.replace(/\.$/, "")}. An invoice that adds up its own totals, a tracker, payment-terms wording, reminder emails and a step-by-step checklist.`,
     benefits: [
       "Send a clear, professional invoice the day the work is delivered",
       "See every unpaid invoice and its due date in one tracker",

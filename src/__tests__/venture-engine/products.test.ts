@@ -62,13 +62,16 @@ describe("product build: freelance invoicing (first test case)", () => {
     expect(store.products()).toHaveLength(1);
   });
 
-  it("files are usable: the invoice is editable without scripts; CSVs open safely; every file is explained", () => {
+  it("files are usable: the invoice is editable and calculates offline (one CSP-locked script); CSVs open safely; every file is explained", () => {
     store.saveVentures([invoicingVenture()]);
     const p = buildProduct(store, "ven-9e27315f", { now: NOW });
     const inv = read(p, "invoice-template.html");
     expect(inv).toMatch(/contenteditable="true"/);
     expect(inv).toMatch(/@media print/);
-    expect(inv).not.toMatch(/<script|\son[a-z]+=/i);
+    expect(inv.match(/<script/g)).toHaveLength(1);
+    expect(inv).toMatch(/<meta http-equiv="Content-Security-Policy" content="default-src 'none';/);
+    expect(inv).not.toMatch(/\son[a-z]+=|<script src|https?:\/\//i);
+    expect(p.checks.find((c) => c.name === "no-scripts-or-external-resources")!.detail).toMatch(/invoice-template\.html: one inline calculator, no network or storage APIs, CSP-locked by hash/);
     for (const n of p.deliverables.filter((x) => x !== "start-here.md")) expect(read(p, "start-here.md")).toContain(n);
     expect(read(p, "payment-terms.md")).toContain(DISCLAIMER);
     expect(read(p, "reminder-emails.md").match(/^## \d\./gm)).toHaveLength(4);

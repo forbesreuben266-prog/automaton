@@ -142,6 +142,28 @@ export function trackingPlan(productId: string, version: number, price: string):
 // ---------------------------------------------------------------- QA
 
 const NO_SCRIPTS = /<script|javascript:|\son[a-z]+\s*=|src=["']?https?:|href=["']?https?:|action=["']?https?:|@import|<iframe|<object|<embed/i;
+/** APIs a buyer-side calculator never needs: network, storage, navigation, dynamic code, HTML injection, other windows. */
+const FORBIDDEN_JS = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|Worker|SharedWorker|ServiceWorker|serviceWorker|eval|Function|setTimeout|setInterval|innerHTML|outerHTML|insertAdjacentHTML|write|writeln|location|open|postMessage|localStorage|sessionStorage|indexedDB|cookie|caches|Image|navigator|import)\b|https?:|\/\/[a-z0-9.-]+\.[a-z]{2,}/;
+
+/**
+ * HTML safety. The landing page and every non-template page: no scripts and no external resources at all. A template
+ * page (a buyer's tool, such as the invoice) may carry ONE inline script, only if it uses none of FORBIDDEN_JS and the
+ * page's Content-Security-Policy blocks all network access (default-src 'none') and allows only that script by hash.
+ */
+export function htmlSafety(name: string, html: string, template: boolean): string[] {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  if (!template || name === "landing.html" || scripts.length === 0) return NO_SCRIPTS.test(html) ? [`${name}: scripts or external resources`] : [];
+  const out: string[] = [];
+  if (scripts.length > 1 || (html.match(/<script/gi) ?? []).length !== scripts.length) out.push(`${name}: at most one inline script, without attributes`);
+  const js = scripts[0][1];
+  const bad = FORBIDDEN_JS.exec(js);
+  if (bad) out.push(`${name}: the script uses "${bad[0]}" (not allowed in a buyer's file)`);
+  const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(html)?.[1] ?? "";
+  const hash = `'sha256-${createHash("sha256").update(js, "utf8").digest("base64")}'`;
+  if (!/(^|;)\s*default-src 'none'\s*(;|$)/.test(csp) || !csp.includes(`script-src ${hash}`) || /unsafe-eval|unsafe-inline'[^;]*script|script-src[^;]*(https?:|\*|'unsafe)/.test(csp)) out.push(`${name}: the Content-Security-Policy must block all network access and allow only this script by hash`);
+  if (NO_SCRIPTS.test(html.replace(scripts[0][0], ""))) out.push(`${name}: scripts or external resources outside the one allowed script`);
+  return out;
+}
 const INCOMPLETE = [/\b(TODO|TBD|FIXME|XXX)\b/, /lorem ipsum/i, /^\s*- (Key points to write|Example)\s*$/im, /\binsert (text|content) here\b/i];
 const MISLEADING: readonly [RegExp, string][] = [
   [/\b(we|it|this kit|this product)\s+(guarantee|guarantees)\b|\bguaranteed (results?|payment|income|to)\b/i, "guaranteed outcome"],
@@ -169,7 +191,7 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
-const visible = (html: string) => html.replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&[a-z#0-9]+;/gi, " ");
+const visible = (html: string) => html.replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&[a-z#0-9]+;/gi, " ");
 
 /** Runs every product check on the stored files. `expected` are the recorded hashes (null at build time). */
 export function qa(read: (name: string) => string | null, manifest: readonly { name: string; template: boolean }[], expected: readonly Asset[] | null): { checks: Check[]; review: string[] } {
@@ -207,8 +229,9 @@ export function qa(read: (name: string) => string | null, manifest: readonly { n
   });
   checks.push(c("links", broken.length === 0, broken.length ? broken.join("; ") : "every link points to an anchor or a file in the package"));
 
-  const unsafe = problems((n, t) => (n.endsWith(".html") && NO_SCRIPTS.test(t) ? [n] : []));
-  checks.push(c("no-scripts-or-external-resources", unsafe.length === 0, unsafe.length ? `in ${unsafe.join(", ")}` : "all pages are static and self-contained"));
+  const unsafe = problems((n, t) => (n.endsWith(".html") ? htmlSafety(n, t, !!manifest.find((m) => m.name === n)?.template) : []));
+  const calculators = [...text].filter(([n, t]) => n.endsWith(".html") && n !== "landing.html" && /<script>/.test(t)).map(([n]) => n);
+  checks.push(c("no-scripts-or-external-resources", unsafe.length === 0, unsafe.length ? unsafe.join("; ") : `no external resources; landing page has no scripts${calculators.length ? `; ${calculators.join(", ")}: one inline calculator, no network or storage APIs, CSP-locked by hash` : ""}`));
 
   const incomplete = problems((n, t) => {
     const out: string[] = [];
