@@ -7,7 +7,7 @@ import { main } from "../../venture-engine/cli.js";
 import { decideApproval, runCycle } from "../../venture-engine/engine.js";
 import { digitalProduct } from "../../venture-engine/kinds/digital-product.js";
 import { fakeModel } from "../../venture-engine/model.js";
-import { archiveProduct, buildProduct, checkProduct, markLive, parseCsv, parseOutline, productReport, qa, realDecision, recordValidation, requestLaunch, signOff, type Product } from "../../venture-engine/products.js";
+import { archiveProduct, buildProduct, checkProduct, confirmationCode, markLive, parseCsv, parseOutline, productReport, qa, realDecision, recordValidation, requestLaunch, signOff, type Product } from "../../venture-engine/products.js";
 import { Store } from "../../venture-engine/store.js";
 import type { Venture } from "../../venture-engine/types.js";
 
@@ -33,6 +33,8 @@ const invoicingVenture = (status: Venture["status"] = "built"): Venture => ({
 const dirOf = (p: Product) => path.join(store.dir, "ventures", p.ventureId, p.id);
 const read = (p: Product, n: string) => fs.readFileSync(path.join(dirOf(p), n), "utf8");
 const portfolioBytes = () => fs.readFileSync(path.join(store.dir, "portfolio.json"));
+/** The owner's approval, as typed at an interactive terminal. */
+const approve = (id: string) => { const p = store.products().find((x) => x.id === id)!; return signOff(store, id, { confirm: confirmationCode(p), price: `${p.currency} ${p.price}`, note: "read qa-report.md; price OK", interactive: true }, NOW); };
 
 describe("product build: freelance invoicing (first test case)", () => {
   it("builds a complete, editable kit, a landing page and a tracking plan that pass every check", () => {
@@ -187,9 +189,9 @@ describe("launch gate and real validation: no evidence can be invented", () => {
     const p = buildProduct(store, "ven-9e27315f", { now: NOW });
     expect(() => markLive(store, p.id, "https://example.com/kit", NOW)).toThrow(/no approved launch/);
     expect(() => recordValidation(store, p.id, { periodStart: "2026-11-09", periodEnd: "2026-11-09", visits: 1, signups: 0, sales: 0, revenue: 0, source: "hosting dashboard" }, NOW)).toThrow(/not live/);
-    expect(() => requestLaunch(store, p.id, NOW)).toThrow(/no owner sign-off/);
-    expect(() => signOff(store, p.id, "", NOW)).toThrow(/note/);
-    signOff(store, p.id, "read qa-report.md; price OK", NOW);
+    expect(() => requestLaunch(store, p.id, NOW)).toThrow(/no current owner sign-off/);
+    expect(() => signOff(store, p.id, { confirm: confirmationCode(p), price: "USD 12", note: "", interactive: true }, NOW)).toThrow(/note/);
+    approve(p.id);
     const req = requestLaunch(store, p.id, NOW);
     expect(req).toMatchObject({ action: "launch-public", status: "pending", ventureId: "ven-9e27315f" });
     expect(req.summary).toMatch(/Approving does not publish anything/);
@@ -252,7 +254,7 @@ describe("launch gate and real validation: no evidence can be invented", () => {
     store.saveVentures(store.ventures().map((x) => (x.id === v.id ? { ...x, opportunity: { ...x.opportunity, title: "Template pack: freelance invoicing for freelancers", problem: "getting paid on time with clear terms" } } : x)));
     const p = buildProduct(store, v.id, { now: NOW });
     expect(p.status).toBe("ready");
-    signOff(store, p.id, "read qa-report.md; price OK", NOW);
+    approve(p.id);
     decideApproval(store, requestLaunch(store, p.id, NOW).id, true, NOW);
     markLive(store, p.id, "https://example.com/kit", NOW);
     recordValidation(store, p.id, { periodStart: "2026-11-10", periodEnd: "2026-11-12", visits: 40, signups: 2, sales: 0, revenue: 0, source: "hosting dashboard" }, LATER);

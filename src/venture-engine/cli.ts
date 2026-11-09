@@ -4,9 +4,12 @@
  *                                for the Claude provider and only works when config.json has model.paidUsageApproved
  *   ledger                       paid-model spending in the local ledger (NOT a provider-enforced cap)
  *   product <subcommand> ...     product builds, QA, launch gate and real validation records (see products.ts; never publishes)
- *   product review <product> | review-all | sign-off <product> --note <text>
- *                                offline review and repair (review.ts): safe fixes become a new version; the rest is
- *                                listed for the owner, whose sign-off is needed before a launch request
+ *   product review <product> [--discard-edits] | review-all | adopt <product>
+ *                                offline review and repair (review.ts): safe fixes become a new version; edited files
+ *                                are never overwritten (adopt keeps them, --discard-edits regenerates them on request)
+ *   product sign-off <product> [--confirm CODE --price "GBP 12" --note <text>]
+ *                                without options: shows the numbered items and a confirmation code; with them (from an
+ *                                interactive terminal only): records the owner's approval, needed before a launch request
  *   claude-check [--x-api-key]   free check (no tokens): is the API key accepted and the configured model available to it;
  *                                --x-api-key sends the key in the legacy X-Api-Key header instead of Authorization: Bearer
  *   scheduled-run                one cycle, only if schedule.enabled is set and the daily cycle budget allows
@@ -27,8 +30,8 @@ import { digitalProduct } from "./kinds/digital-product.js";
 import { checkClaudeAccess, claudeModel, keyProfile, type CreateMessage } from "./claude.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
-import { PRODUCT_USAGE, productCli, signOff } from "./products.js";
-import { formatReview, reviewAll, reviewProduct } from "./review.js";
+import { changedFiles, confirmationCode, PRODUCT_USAGE, productCli, signOff, signOffItems } from "./products.js";
+import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
@@ -36,7 +39,9 @@ export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
 const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
-export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch }
+export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch;
+  /** Whether a person is at an interactive terminal (default: stdin and stdout are TTYs). Sign-off requires it. */
+  readonly isInteractive?: () => boolean }
 
 /** The key lives only in this file (owner-created, mode 600). It is read when a paid run starts and never printed or stored elsewhere. */
 export const keyFile = (dir: string) => path.join(dir, "anthropic.key");
@@ -106,13 +111,38 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       return 0;
     }
     if (cmd === "ledger") { printLedger(store, d, now); return 0; }
-    if (cmd === "product" && rest[0] === "review") { const r = await withLock(store.dir, async () => reviewProduct(store, String(rest[1]), now())); d.out(formatReview(r)); return r.stopped ? 1 : 0; }
+    if (cmd === "product" && rest[0] === "review") {
+      const discard = rest.includes("--discard-edits");
+      if (rest.length !== (discard ? 3 : 2) || (rest[2] !== undefined && !discard)) throw new Error("product review <product> [--discard-edits]");
+      const r = await withLock(store.dir, async () => reviewProduct(store, String(rest[1]), now(), { discardEdits: discard }));
+      d.out(formatReview(r)); return r.stopped ? 1 : 0;
+    }
     if (cmd === "product" && rest[0] === "review-all") { const rs = await withLock(store.dir, async () => reviewAll(store, now())); for (const r of rs) d.out(formatReview(r) + "\n"); if (!rs.length) d.out("no products\n"); return rs.some((r) => r.stopped) ? 1 : 0; }
+    if (cmd === "product" && rest[0] === "adopt") {
+      if (rest.length !== 2) throw new Error("product adopt <product>");
+      const p = await withLock(store.dir, async () => adoptEdits(store, String(rest[1]), now()));
+      d.out(`${p.id} (version ${p.version}) created from your edits in ${p.previous}; ${p.previous} is unchanged. Adopted files are kept in later repairs: ${(p.customised ?? []).join(", ")}.\n`);
+      return 0;
+    }
     if (cmd === "product" && rest[0] === "sign-off") {
-      const [, id, flag, note] = rest;
-      if (flag !== "--note" || note === undefined || rest.length !== 4) throw new Error('product sign-off <product> --note "<what you checked>"');
-      const p = await withLock(store.dir, async () => signOff(store, String(id), note, now()));
-      d.out(`${p.id} signed off: ${p.review.length} legal/tax/financial passage(s) and proposed price ${p.currency} ${p.price} accepted ("${p.signOff!.note}"). Nothing was published.\n`);
+      const id = String(rest[1]);
+      if (rest.length === 2) {
+        const p = store.products().find((x) => x.id === id);
+        if (!p) throw new Error(`no product ${id}`);
+        const changed = changedFiles(store, p);
+        if (changed.length) throw new Error(`files changed since the build (${changed.join(", ")}): run 'product review ${id}' first`);
+        const items = signOffItems(p);
+        d.out(`Items to approve for ${p.id} (${p.name}, version ${p.version}); read qa-report.md in the product folder first:\n${items.map((x, i) => `  ${i + 1}. ${x}`).join("\n")}\n` +
+          `To approve all ${items.length} items, run this yourself in an interactive terminal:\n  product sign-off ${p.id} --confirm ${confirmationCode(p)} --price "${p.currency} ${p.price}" --note "<what you checked>"\n` +
+          `The code is valid only for exactly these items and files; any change makes it stale.\n`);
+        return 0;
+      }
+      const f: Record<string, string> = {};
+      for (let i = 2; i < rest.length; i += 2) { if (!["--confirm", "--price", "--note"].includes(rest[i]) || rest[i + 1] === undefined) throw new Error('product sign-off <product> [--confirm CODE --price "GBP 12" --note "<what you checked>"]'); f[rest[i]] = rest[i + 1]; }
+      for (const k of ["--confirm", "--price", "--note"]) if (f[k] === undefined) throw new Error(`product sign-off: ${k} is required (run 'product sign-off ${id}' to see the items and code)`);
+      const interactive = (d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true))();
+      const p = await withLock(store.dir, async () => signOff(store, id, { confirm: f["--confirm"], price: f["--price"], note: f["--note"], interactive }, now()));
+      d.out(`${p.id} signed off: ${p.signOff!.items} item(s) approved, including the proposed price ${p.currency} ${p.price} (code ${p.signOff!.code}, "${p.signOff!.note}"). Nothing was published.\n`);
       return 0;
     }
     if (cmd === "product") return await productCli(rest, { store, out: d.out, now });

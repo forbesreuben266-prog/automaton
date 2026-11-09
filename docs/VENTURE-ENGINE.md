@@ -274,9 +274,11 @@ launch.
 `review.ts` reduces manual checking. It never publishes, contacts anyone, calls
 a model or spends money.
 
-    ve product review <product>      # inspect; repair safe issues as a NEW version; report
+    ve product review <product> [--discard-edits]   # inspect; repair safe issues as a NEW version; report
     ve product review-all            # the latest version of every venture's product
-    ve product sign-off <product> --note "read qa-report.md; price OK"
+    ve product adopt <product>       # keep your edits as a new version (only if QA passes)
+    ve product sign-off <product>    # shows the numbered items and a confirmation code
+    ve product sign-off <product> --confirm CODE --price "GBP 12" --note "what you checked"   # interactive terminal only
 
 1. **Inspect**: the full product QA, plus three more checks: the price shown
    matches the price recorded, the invoice calculator is exactly the reviewed
@@ -292,9 +294,32 @@ a model or spends money.
    fail, nothing is written and the review stops, saying why.
 4. **Never decided automatically**: misleading or commercial claims, legal
    positions stated as fact, the legal/tax/financial passages and the proposed
-   price. These are listed under "needs owner decision". `request-launch` is
-   refused until the owner signs off the current version. A sign-off stops
-   counting if the reviewed wording or the price changes.
+   price. These are listed under "needs owner decision".
+
+**Your edits are never overwritten.**
+- A product file (not the generated `qa-report.md` or `tracking-plan.json`)
+  that differs from its recorded hash counts as your customisation, not
+  damage. The review flags it and regenerates nothing, including in an
+  unattended `review-all`.
+- You choose what happens next:
+  - `product adopt` saves the edits as a new version, but only if every QA and
+    consistency check passes. External forms or links, scripts, a changed
+    price or a changed calculator are never adopted. Adopted files are
+    remembered and kept in later repairs and blueprint updates.
+  - `product review <product> --discard-edits` regenerates the files on
+    purpose. The edited version stays as it was.
+
+**Sign-off takes two steps.**
+1. `product sign-off <product>` lists the numbered items (the proposed price,
+   then each legal, tax or financial passage) and a confirmation code.
+2. You approve with that code and the price typed back exactly.
+
+The code is tied to exactly those items and the version's file contents, so
+any change makes it stale. Sign-off works only from an interactive terminal:
+timers, scripts and the engine can't sign off. Each approval is recorded in
+the audit log with the code, the number of items and the price.
+`request-launch` is refused without a current sign-off, or if files changed
+after it.
 
 Each report has three parts: **fixed automatically**, **passed** and
 **needs owner decision**, plus a stop reason when relevant. Live and archived
@@ -310,7 +335,8 @@ the VPS. That needs the owner's approval, and nothing here installs it.
   `PrivateTmp=yes`, so it can't reach the network.
 - The output would be appended to a private log, mode 600.
 
-Even then, it could only create new versions and reports. It can't sign off,
-request a launch, publish, change the config or spend money; those stay with
-the owner. A timer would follow the same rules as the engine's own schedule:
+Even then, it could only create new versions and reports. It never overwrites
+your edits, and it can't sign off (it has no interactive terminal), adopt
+edits, request a launch, publish, change the config or spend money; those stay
+with the owner. A timer would follow the same rules as the engine's own schedule:
 off by default, and respecting the STOP switch.
