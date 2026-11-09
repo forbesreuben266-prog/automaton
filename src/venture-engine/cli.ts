@@ -7,6 +7,8 @@
  *   product review <product> [--discard-edits] | review-all | adopt <product>
  *                                offline review and repair (review.ts): safe fixes become a new version; edited files
  *                                are never overwritten (adopt keeps them, --discard-edits regenerates them on request)
+ *   product marketing <product>  marketing pack DRAFTS (3 social posts, email, pitch, 7-day plan) saved locally; nothing is
+ *                                posted, sent or scheduled (marketing.ts)
  *   product sign-off <product> [--confirm CODE --price "GBP 12" --note <text>]
  *                                without options: shows the numbered items and a confirmation code; with them (from an
  *                                interactive terminal only): records the owner's approval, needed before a launch request
@@ -31,6 +33,7 @@ import { checkClaudeAccess, claudeModel, keyProfile, type CreateMessage } from "
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./model.js";
 import { changedFiles, confirmationCode, PRODUCT_USAGE, productCli, signOff, signOffItems } from "./products.js";
+import { generateMarketing } from "./marketing.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
@@ -122,6 +125,12 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       if (rest.length !== 2) throw new Error("product adopt <product>");
       const p = await withLock(store.dir, async () => adoptEdits(store, String(rest[1]), now()));
       d.out(`${p.id} (version ${p.version}) created from your edits in ${p.previous}; ${p.previous} is unchanged. Adopted files are kept in later repairs: ${(p.customised ?? []).join(", ")}.\n`);
+      return 0;
+    }
+    if (cmd === "product" && rest[0] === "marketing") {
+      if (rest.length !== 2) throw new Error("product marketing <product>");
+      const m = await withLock(store.dir, async () => generateMarketing(store, String(rest[1]), now()));
+      d.out(`marketing pack ${m.id} for ${m.product} (drafts only: nothing posted, sent or scheduled)\n${m.dir}\n${m.files.map((f) => `  ${f.name}`).join("\n")}\n`);
       return 0;
     }
     if (cmd === "product" && rest[0] === "sign-off") {

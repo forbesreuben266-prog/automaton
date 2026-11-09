@@ -340,3 +340,27 @@ your edits, and it can't sign off (it has no interactive terminal), adopt
 edits, request a launch, publish, change the config or spend money; those stay
 with the owner. A timer would follow the same rules as the engine's own schedule:
 off by default, and respecting the STOP switch.
+
+## Marketing pack (drafts only)
+
+    ve product marketing <product>
+
+This writes ready-to-use **drafts** for a product that passed every QA check:
+- `social-posts.md`: 3 posts, two of them short (up to 280 characters);
+- `email.md`: a promotional email draft, for opted-in contacts only;
+- `pitch.md`: a short product pitch;
+- `seven-day-plan.md`: a seven-day organic promotion plan.
+
+Each run saves a new private folder, `ventures/<venture>/mkt-…/` (mode 600
+files, never overwritten), together with a `pack.json` manifest.
+
+The text comes only from the product's own checked landing page: headline,
+offer, benefits, contents and proposed price.
+- It is checked with the same misleading-claim rules as the product QA, and
+  it must contain no links. You add your page link in place of
+  `[[link to your page]]`, after an approved launch.
+- Nothing is posted, sent, scheduled or published, and no network or model
+  is used.
+- Product files and records are not changed.
+- A product with an edited landing page is refused until it has been
+  reviewed or adopted.

@@ -180,6 +180,8 @@ const MISLEADING: readonly [RegExp, string][] = [
   [/["“][^"”\n]{12,}["”]\s*[—–-]\s*[A-Z][a-z]+/, "testimonial (none exist yet)"],
   [/\b\d+(\.\d+)?% (faster|more|of (customers|freelancers|users))\b/i, "unsupported statistic"],
 ];
+/** The misleading-claim patterns found in a text (the same rules as the product QA). */
+export const misleadingClaims = (text: string): string[] => MISLEADING.filter(([r]) => r.test(text)).map(([, why]) => why);
 const SENSITIVE = /\b(legal(ly)?|law(s|yer)?|solicitor|attorney|court|sue|lawsuit|statutory|legislation|contract|tax(es)?|VAT|GST|HMRC|IRS|interest|debt|invest(ment|ing)?|pension|insurance|medical|diagnos)/i;
 const DIRECTIVE = /\b(you are (legally )?entitled to|you must (legally )?(charge|pay|claim)|you can always (sue|charge)|this is legally binding|will (definitely )?(win|be enforced))\b/i;
 const DISCLAIMED = /not legal, tax or financial advice/i;
@@ -562,7 +564,7 @@ function flags(args: readonly string[], allowed: readonly string[]): Record<stri
 }
 const int = (s: string | undefined, what: string) => { if (s === undefined || !/^\d+$/.test(s)) throw new Error(`${what}: a whole number`); return Number(s); };
 const summary = (p: Product) => `${p.id} v${p.version} ${p.status.padEnd(10)} ${p.blueprint.padEnd(18)} ${p.currency} ${p.price}  ${p.checks.filter((c) => c.passed).length}/${p.checks.length} checks  venture ${p.ventureId}  ${p.name}`;
-export const PRODUCT_USAGE = "product build <venture> [--price N] [--currency USD|GBP|EUR] | review <product> [--discard-edits] | review-all | adopt <product> | sign-off <product> [--confirm CODE --price \"GBP 12\" --note <text>] | improve <product> [--price N] | check <product> | archive <product> --reason <text> | list [venture] | show <product> | request-launch <product> | mark-live <product> --url <https://...> | record <product> --period YYYY-MM-DD..YYYY-MM-DD --visits N --signups N --sales N --revenue X --source <text> [--evidence <file>] | report <product>";
+export const PRODUCT_USAGE = "product build <venture> [--price N] [--currency USD|GBP|EUR] | review <product> [--discard-edits] | review-all | adopt <product> | marketing <product> | sign-off <product> [--confirm CODE --price \"GBP 12\" --note <text>] | improve <product> [--price N] | check <product> | archive <product> --reason <text> | list [venture] | show <product> | request-launch <product> | mark-live <product> --url <https://...> | record <product> --period YYYY-MM-DD..YYYY-MM-DD --visits N --signups N --sales N --revenue X --source <text> [--evidence <file>] | report <product>";
 
 export async function productCli(args: readonly string[], ctx: { store: Store; out: (s: string) => void; now: () => Date }): Promise<number> {
   const [sub, id, ...rest] = args;
