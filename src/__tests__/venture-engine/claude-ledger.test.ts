@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APIConnectionTimeoutError } from "@anthropic-ai/sdk";
-import { anthropicEnvVars, checkClaudeAccess, claudeModel, describeApiFailure, maxCostGbp, type CreateMessage } from "../../venture-engine/claude.js";
+import { anthropicEnvVars, checkClaudeAccess, claudeModel, describeApiFailure, keyProfile, maxCostGbp, type CreateMessage } from "../../venture-engine/claude.js";
 import { main } from "../../venture-engine/cli.js";
 import { DEFAULT_CONFIG, parseConfig } from "../../venture-engine/control.js";
 import { HARD_CAP_GBP, Ledger, LedgerRefused, PRICES_USD_PER_MTOK } from "../../venture-engine/ledger.js";
@@ -220,6 +220,8 @@ describe("API failures are reported safely (real SDK, fake network)", () => {
     expect(seen[0].method).toBe("POST");
     expect(JSON.parse(seen[0].body)).toEqual({ model: "claude-haiku-5-5", max_tokens: 4000, system: REQ.system, messages: [{ role: "user", content: REQ.prompt }], output_config: { effort: "low" } });
     expect(seen[0].headers.authorization).toBe(`Bearer ${KEY}`); // SDK 1.x sends API keys as Authorization: Bearer
+    expect(seen[0].headers["x-api-key"]).toBeUndefined();
+    expect(Object.keys(seen[0].headers).filter((h) => /authorization|api-key/i.test(h))).toEqual(["authorization"]); // exactly one credential
     expect(seen[0].headers["anthropic-version"]).toBe("2026-10-21");
     expect(l.entries()[0].status).toBe("settled");
   });
@@ -303,6 +305,61 @@ describe("API failures are reported safely (real SDK, fake network)", () => {
       if (fs.statSync(p).isFile()) expect(fs.readFileSync(p, "utf8"), f).not.toContain(KEY);
     }
     expect(out).not.toContain(KEY);
+  });
+});
+
+describe("authentication header (offline regression)", () => {
+  const credHeaders = (h: Record<string, string>) => Object.fromEntries(Object.entries(h).filter(([k]) => /authorization|api-key/i.test(k)));
+  const MODEL = { type: "model", id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5", created_at: "2026-10-01T00:00:00Z" };
+  it("default: exactly one credential, Authorization: Bearer <exact key>, for both the models check and messages", async () => {
+    const seen: Seen[] = [];
+    await withoutAnthropicEnv(() => checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5-5", fetchForTests: apiFetch(200, MODEL, seen) }));
+    const l = new Ledger(DIR, 10, NOW);
+    await withoutAnthropicEnv(() => sdkClientFor(l, apiFetch(200, OK_MESSAGE, seen)).complete(REQ));
+    expect(seen.map((x) => x.url)).toEqual(["https://api.anthropic.com/v1/models/claude-haiku-5-5", "https://api.anthropic.com/v1/messages"]);
+    for (const x of seen) expect(credHeaders(x.headers)).toEqual({ authorization: `Bearer ${KEY}` });
+  });
+  it("claude-check --x-api-key: exactly one credential, X-Api-Key: <exact key>, no Authorization header", async () => {
+    const seen: Seen[] = [];
+    const r = await withoutAnthropicEnv(() => checkClaudeAccess({ apiKey: KEY, model: "claude-haiku-5-5", fetchForTests: apiFetch(200, MODEL, seen), legacyHeader: true }));
+    expect(r.ok).toBe(true);
+    expect(credHeaders(seen[0].headers)).toEqual({ "x-api-key": KEY });
+  });
+  it("keyProfile reports only the public type prefix, length and paste problems, never the secret part", () => {
+    const body = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    const api = `sk-ant-api03-${body}`;
+    const p = keyProfile(api + "\n");
+    expect(p).toBe(`key file: type prefix sk-ant-api03 (Console API key), ${api.length} characters; surrounding whitespace/newline trimmed (normal)`);
+    expect(p).not.toContain(body.slice(0, 8));
+    expect(keyProfile(`sk-ant-admin01-${body}`)).toMatch(/Admin API key: manages the organisation, cannot call the Messages or Models API/);
+    expect(keyProfile(`sk-ant-oat01-${body}`)).toMatch(/OAuth access token, not a Console API key/);
+    expect(keyProfile(api + api)).toMatch(/contains "sk-ant-" 2 times \(pasted more than once\?\)/);
+    expect(keyProfile(`sk-${body}`)).toMatch(/type prefix \(none\) \(unrecognised/);
+    expect(keyProfile(`sk-ant-api03-ab cd`)).toMatch(/contains spaces or non-ASCII/);
+  });
+  it("CLI claude-check prints the key profile and the header used, never the key; rejects unknown options", async () => {
+    const data = path.join(DIR, ".automaton-ventures");
+    let out = "";
+    const seen: Seen[] = [];
+    const cli = (...a: string[]) => withoutAnthropicEnv(async () => { out = ""; return main(a, { home: DIR, out: (s) => { out += s; }, now: () => NOW, sdkFetchForTests: apiFetch(401, errBody("authentication_error", "invalid x-api-key"), seen) }); });
+    expect(await cli("config")).toBe(0);
+    const c = JSON.parse(fs.readFileSync(path.join(data, "config.json"), "utf8"));
+    fs.writeFileSync(path.join(data, "config.json"), JSON.stringify({ ...c, model: { ...c.model, provider: "claude", name: "claude-haiku-5-5" } }));
+    fs.writeFileSync(path.join(data, "anthropic.key"), KEY + "\n", { mode: 0o600 });
+    const before = fs.readFileSync(path.join(data, "config.json"), "utf8");
+    expect(await cli("claude-check")).toBe(1);
+    expect(out).toMatch(/^key file: type prefix sk-ant-TESTONLY|^key file: type prefix \(none\)/m);
+    expect(out).toMatch(/authentication header: Authorization: Bearer \(SDK default\)/);
+    expect(out).toMatch(/claude-check FAILED: HTTP 401; authentication_error/);
+    expect(await cli("claude-check", "--x-api-key")).toBe(1);
+    expect(out).toMatch(/authentication header: X-Api-Key \(legacy fallback\)/);
+    expect(credHeaders(seen[0].headers)).toEqual({ authorization: `Bearer ${KEY}` });
+    expect(credHeaders(seen[1].headers)).toEqual({ "x-api-key": KEY });
+    expect(await cli("claude-check", "--bogus")).toBe(1); expect(out).toMatch(/unknown option --bogus/);
+    expect(seen).toHaveLength(2);
+    expect(out).not.toContain(KEY);
+    expect(fs.readFileSync(path.join(data, "config.json"), "utf8")).toBe(before); // claude-check changes nothing
+    expect(fs.existsSync(path.join(data, "ledger.json"))).toBe(false); // and reserves nothing
   });
 });
 

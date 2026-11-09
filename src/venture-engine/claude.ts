@@ -46,11 +46,37 @@ export interface ClaudeOptions {
   readonly fetchForTests?: typeof fetch;
 }
 
-/** The one place the SDK client is built: pinned host, no retries, logging off, no ANTHROPIC_* overrides. */
-function sdkClient(apiKey: string, timeoutMs: number, fetchForTests?: typeof fetch): Anthropic {
+/**
+ * The one place the SDK client is built: pinned host, no retries, logging off, no ANTHROPIC_* overrides.
+ * SDK 1.x sends the key as "Authorization: Bearer <key>", which the API documents as its primary method.
+ * legacyHeader sends it as "X-Api-Key" instead (the documented fallback: defaultHeaders with Authorization: null);
+ * it is used only by the free claude-check, to tell a header problem from a rejected key.
+ */
+function sdkClient(apiKey: string, timeoutMs: number, fetchForTests?: typeof fetch, legacyHeader = false): Anthropic {
   const vars = anthropicEnvVars();
   if (vars.length) throw new Error(`refusing a paid client while ${vars.join(", ")} is set (it could redirect the key or change billing); unset it`);
-  return new Anthropic({ apiKey, baseURL: API_BASE_URL, maxRetries: 0, timeout: timeoutMs, logLevel: "off", ...(fetchForTests ? { fetch: fetchForTests } : {}) });
+  return new Anthropic({ apiKey, baseURL: API_BASE_URL, maxRetries: 0, timeout: timeoutMs, logLevel: "off", ...(fetchForTests ? { fetch: fetchForTests } : {}),
+    ...(legacyHeader ? { defaultHeaders: { "X-Api-Key": apiKey, Authorization: null } } : {}) });
+}
+
+/**
+ * What the key file holds, without revealing it: only the public type prefix (for example "sk-ant-api03"), the length,
+ * how many keys it seems to contain, and whether whitespace was trimmed. Never any of the secret part.
+ */
+export function keyProfile(rawFile: string): string {
+  const key = rawFile.trim();
+  const prefix = /^sk-ant-[a-z]+[0-9]{0,2}/.exec(key)?.[0] ?? "(none)";
+  const kind = prefix.startsWith("sk-ant-api") ? "Console API key"
+    : prefix.startsWith("sk-ant-admin") ? "Admin API key: manages the organisation, cannot call the Messages or Models API"
+    : prefix.startsWith("sk-ant-oat") ? "OAuth access token, not a Console API key"
+    : "unrecognised: not an Anthropic API key prefix";
+  const count = key.split("sk-ant-").length - 1;
+  const notes = [
+    count > 1 ? `contains "sk-ant-" ${count} times (pasted more than once?)` : null,
+    rawFile !== key ? "surrounding whitespace/newline trimmed (normal)" : null,
+    /[^\x21-\x7e]/.test(key) ? "contains spaces or non-ASCII characters" : null,
+  ].filter(Boolean);
+  return `key file: type prefix ${prefix} (${kind}), ${key.length} characters${notes.length ? `; ${notes.join("; ")}` : ""}`;
 }
 
 export interface ApiFailure { readonly status: number | null; readonly type: string; readonly requestId: string | null; readonly detail: string; readonly hint: string; readonly rejected: boolean }
@@ -105,12 +131,12 @@ export function formatApiFailure(f: ApiFailure): string {
 }
 
 /** Free check (no tokens, no ledger): is the key accepted and is the model available to it? Uses GET /v1/models/{id}. */
-export async function checkClaudeAccess(o: { apiKey: string; model: string; timeoutMs?: number; fetchForTests?: typeof fetch }): Promise<{ ok: boolean; text: string }> {
+export async function checkClaudeAccess(o: { apiKey: string; model: string; timeoutMs?: number; fetchForTests?: typeof fetch; legacyHeader?: boolean }): Promise<{ ok: boolean; text: string }> {
   if (!PRICES_USD_PER_MTOK[o.model]) return { ok: false, text: `model ${o.model}: not one of ${Object.keys(PRICES_USD_PER_MTOK).join(", ")}` };
   if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(o.apiKey)) return { ok: false, text: "the API key is missing or not in the expected format" };
   const timeoutMs = o.timeoutMs ?? 30_000;
   try {
-    const m = await sdkClient(o.apiKey, timeoutMs, o.fetchForTests).models.retrieve(o.model, null, { timeout: timeoutMs, maxRetries: 0 });
+    const m = await sdkClient(o.apiKey, timeoutMs, o.fetchForTests, o.legacyHeader === true).models.retrieve(o.model, null, { timeout: timeoutMs, maxRetries: 0 });
     const id = typeof m?.id === "string" ? scrub(m.id) : "?";
     if (id !== o.model) return { ok: false, text: `the API answered for model "${id}", not "${o.model}"` };
     return { ok: true, text: `key accepted; model ${id}${typeof m.display_name === "string" ? ` (${scrub(m.display_name)})` : ""} is available to it. This check does not show the credit balance: see Console > Billing.` };
