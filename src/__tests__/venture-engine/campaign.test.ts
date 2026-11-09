@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { campaignStatus, createCampaign, decidePost, PLATFORM_MAX, recordPublished, recordResults, type Campaign } from "../../venture-engine/campaign.js";
+import { campaignStatus, createCampaign, decidePost, exportHandoff, PLATFORM_MAX, recordPublished, recordResults, revisePost, type Campaign } from "../../venture-engine/campaign.js";
 import { main } from "../../venture-engine/cli.js";
 import { decideApproval } from "../../venture-engine/engine.js";
 import { buildProduct, confirmationCode, markLive, misleadingClaims, requestLaunch, signOff, type Product } from "../../venture-engine/products.js";
@@ -135,6 +135,46 @@ describe("approval, publishing record and verified results", () => {
   });
 });
 
+describe("revise and export (Meta Business Suite handoff)", () => {
+  const ready = (): { p: Product; c: Campaign } => { const p = signedProduct(); return { p, c: createCampaign(store, p.id, { url: URL, start: "2026-11-10", now: NOW }) }; };
+  const better = `Still building invoices from scratch? Freelance invoicing kit: an invoice that adds up its own totals, a tracker for every unpaid invoice and reminder emails. £12, one-off: ${URL}`;
+
+  it("a revision of an approved post becomes a new draft needing approval; the old version is kept; checks still apply", () => {
+    const { c } = ready();
+    const fb = c.posts[1];
+    decidePost(store, c.id, fb.id, { approve: true, note: "", ...me }, NOW);
+    const r = revisePost(store, c.id, fb.id, better, LATER);
+    expect(r).toMatchObject({ status: "draft", decision: null, text: better });
+    expect(r.history).toEqual([{ at: LATER.toISOString(), text: fb.text, status: "approved", decision: expect.objectContaining({ note: "" }) }]);
+    expect(fs.readFileSync(path.join(store.dir, "audit.jsonl"), "utf8")).toMatch(/"kind":"campaign-post-revised".*"previousStatus":"approved"/);
+    for (const [text, why] of [
+      [`We guarantee you will be paid on time. ${URL}`, /guaranteed outcome/],
+      [`Great kit, see https://example.com and ${URL}`, /link other than the campaign URL/],
+      ["Great kit, no link", /must contain the campaign URL/],
+      [`${"x".repeat(PLATFORM_MAX.facebook)} ${URL}`, /over 600 for facebook/],
+      [better, /same as the current text/],
+    ] as [string, RegExp][]) expect(() => revisePost(store, c.id, fb.id, text, LATER), text.slice(0, 30)).toThrow(why);
+  });
+
+  it("export lists the platform's posts with exact text, the real URL and which are ready; it schedules nothing", () => {
+    const { c } = ready();
+    const [, fb2, , fb4] = c.posts;
+    decidePost(store, c.id, fb2.id, { approve: true, note: "", ...me }, NOW);
+    revisePost(store, c.id, fb4.id, better, NOW);
+    const doc = exportHandoff(store.campaigns()[0], "facebook");
+    expect(doc).toMatch(/^# Meta Business Suite handoff: facebook posts for campaign cmp-/);
+    expect(doc).toMatch(/Status: 1 of 3 facebook post\(s\) approved and ready to schedule\. This document schedules nothing/);
+    expect(doc.match(/^## Day [246], /gm)).toHaveLength(3);
+    expect(doc).not.toMatch(/linkedin/i);
+    expect(doc).toContain("APPROVED: ready to schedule");
+    expect(doc).toContain("DRAFT: approve it in Automaton before scheduling");
+    expect(doc).toContain("```text\n" + better + "\n```");
+    expect(doc.split(URL).length - 1).toBeGreaterThanOrEqual(4);
+    expect(doc).toMatch(/campaign published cmp-[0-9a-f]{8} pst-[0-9a-f]{8} --url <link of the published post>/);
+    expect(doc).not.toMatch(/password|cookie|token/i);
+  });
+});
+
 describe("CLI", () => {
   it("create, review, approve (terminal only), published, record, show", async () => {
     const p = signedProduct();
@@ -156,6 +196,14 @@ describe("CLI", () => {
     expect(await cli("campaign", "show", c.id)).toBe(0);
     expect(out).toMatch(/5 draft, 0 approved, 1 rejected, 1 published[\s\S]*impressions 50/);
     expect(await cli("campaign", "list")).toBe(0); expect(out).toMatch(/1\/7 published/);
+    const tf = path.join(DIR, "post.txt"); fs.writeFileSync(tf, `Reworded for Facebook. Freelance invoicing kit, £12: ${URL}\n`);
+    expect(await cli("campaign", "revise", c.id, c.posts[3].id, "--text-file", tf)).toBe(0); expect(out).toMatch(/now a DRAFT and needs your approval again/);
+    expect(await cli("campaign", "export", c.id, "--platform", "facebook")).toBe(0); expect(out).toMatch(/Meta Business Suite handoff/);
+    expect(await cli("campaign", "export", c.id, "--platform", "facebook", "--save")).toBe(0);
+    const saved = out.split("\n")[0];
+    expect(saved).toMatch(/facebook-handoff-\d{8}t\d{6}\.md$/);
+    expect(fs.statSync(saved).mode & 0o777).toBe(0o600);
+    expect(await cli("campaign", "export", c.id, "--platform", "myspace")).toBe(1); expect(out).toMatch(/--platform: facebook or linkedin/);
     expect(await cli("campaign")).toBe(2); expect(out).toMatch(/Usage: campaign create/);
   });
 });

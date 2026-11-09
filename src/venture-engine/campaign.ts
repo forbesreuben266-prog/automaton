@@ -9,6 +9,11 @@
  *                     An approval is bound to the post's exact text and URL.
  *   published         the owner records the link of a post THEY published, only after the approved launch: the
  *                     product must be live and its recorded live URL must be the campaign URL.
+ *   revise            reworded text for an unpublished post becomes a NEW draft: its approval is cleared and the
+ *                     previous text, status and decision are kept in the post's history. Same checks as create.
+ *   export            a copy-ready handoff document for scheduling in the platform's own tool (for Facebook: Meta
+ *                     Business Suite), with the schedule, each post's status and exact text. Exporting schedules
+ *                     nothing; only approved posts are marked ready.
  *   record            verified results for a published post: numbers the owner read from the platform's own
  *                     analytics for a stated period (after publication, not in the future, not overlapping), with a
  *                     source and an optional hashed evidence export. Nothing is estimated.
@@ -38,6 +43,8 @@ export interface Post {
   readonly decision: { readonly at: string; readonly contentHash: string; readonly note: string } | null;
   readonly published: { readonly url: string; readonly at: string } | null;
   readonly results: readonly PostResult[];
+  /** Earlier versions of this post (text, status and decision at the time it was revised). */
+  readonly history?: readonly { readonly at: string; readonly text: string; readonly status: PostStatus; readonly decision: Post["decision"] }[];
 }
 export interface Campaign {
   readonly id: string; readonly productId: string; readonly productVersion: number; readonly productUrl: string;
@@ -69,6 +76,17 @@ export function draftPosts(productName: string, landing: string, url: string, le
   ];
 }
 
+/** The checks every post text must pass (create and revise). */
+export function postProblems(d: { day: number; platform: Platform; text: string }, url: string): string[] {
+  return [
+    ...misleadingClaims(d.text).map((why) => `day ${d.day}: ${why}`),
+    ...(d.text.replaceAll(url, "").match(/https?:\/\/|www\./i) ? [`day ${d.day}: contains a link other than the campaign URL`] : []),
+    ...(!d.text.includes(url) ? [`day ${d.day}: must contain the campaign URL ${url}`] : []),
+    ...(d.text.length > PLATFORM_MAX[d.platform] ? [`day ${d.day}: ${d.text.length} characters, over ${PLATFORM_MAX[d.platform]} for ${d.platform}`] : []),
+    ...(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(d.text) || !d.text.trim() ? [`day ${d.day}: empty text or control characters`] : []),
+  ];
+}
+
 const getCampaign = (store: Store, id: string) => { const c = store.campaigns().find((x) => x.id === id); if (!c) throw new Error(`no campaign ${id}`); return c; };
 const getPost = (c: Campaign, id: string) => { const p = c.posts.find((x) => x.id === id); if (!p) throw new Error(`no post ${id} in ${c.id}`); return p; };
 const savePost = (store: Store, c: Campaign, post: Post) => store.saveCampaigns(store.campaigns().map((x) => (x.id === c.id ? { ...x, posts: x.posts.map((p) => (p.id === post.id ? post : p)) } : x)));
@@ -87,11 +105,7 @@ export function createCampaign(store: Store, productId: string, opts: { url: str
   const landing = store.reader(store.assetDir(p.ventureId, p.id))("landing.html");
   if (landing === null) throw new Error(`${productId}: landing.html is missing`);
   const drafts = draftPosts(p.name, landing, opts.url, p.review.length > 0);
-  const problems = drafts.flatMap((d) => [
-    ...misleadingClaims(d.text).map((why) => `day ${d.day}: ${why}`),
-    ...(d.text.replaceAll(opts.url, "").match(/https?:\/\/|www\./i) ? [`day ${d.day}: contains a link other than the campaign URL`] : []),
-    ...(d.text.length > PLATFORM_MAX[d.platform] ? [`day ${d.day}: ${d.text.length} characters, over ${PLATFORM_MAX[d.platform]} for ${d.platform}`] : []),
-  ]);
+  const problems = drafts.flatMap((d) => postProblems(d, opts.url));
   if (problems.length) throw new Error(`campaign not created: ${problems.join("; ")}`);
   const c: Campaign = { id: newId("cmp"), productId: p.id, productVersion: p.version, productUrl: opts.url, startDate: start, createdAt: opts.now.toISOString(),
     posts: drafts.map((d) => ({ id: newId("pst"), ...d, date: addDays(start, d.day - 1), status: "draft", decision: null, published: null, results: [] })) };
@@ -111,6 +125,53 @@ export function decidePost(store: Store, campaignId: string, postId: string, a: 
   savePost(store, c, next);
   store.audit({ kind: a.approve ? "campaign-post-approved" : "campaign-post-rejected", campaign: c.id, post: p.id, platform: p.platform, day: p.day, note: next.decision!.note, interactive: true }, now);
   return next;
+}
+
+/** Reworded text for an unpublished post becomes a new draft that needs approval again; the old version is kept. */
+export function revisePost(store: Store, campaignId: string, postId: string, text: string, now: Date): Post {
+  const c = getCampaign(store, campaignId);
+  const p = getPost(c, postId);
+  if (p.status === "published") throw new Error(`${postId} is already published: published posts are not revised`);
+  const t = text.replace(/\r\n/g, "\n").trim();
+  if (t === p.text) throw new Error(`${postId}: the new text is the same as the current text`);
+  const problems = postProblems({ day: p.day, platform: p.platform, text: t }, c.productUrl);
+  if (problems.length) throw new Error(`revision not saved: ${problems.join("; ")}`);
+  const next: Post = { ...p, text: t, status: "draft", decision: null, history: [...(p.history ?? []), { at: now.toISOString(), text: p.text, status: p.status, decision: p.decision }] };
+  savePost(store, c, next);
+  store.audit({ kind: "campaign-post-revised", campaign: c.id, post: p.id, previousStatus: p.status, newDraftHash: contentHash(next, c.productUrl) }, now);
+  return next;
+}
+
+/** A copy-ready handoff for scheduling in the platform's own tool. Schedules nothing. */
+export function exportHandoff(c: Campaign, platform: Platform): string {
+  const tool = platform === "facebook" ? "Meta Business Suite" : "LinkedIn";
+  const posts = c.posts.filter((p) => p.platform === platform);
+  const ready = (p: Post) => p.status === "approved" && !!p.decision && p.decision.contentHash === contentHash(p, c.productUrl);
+  const label = (p: Post) => (p.status === "published" ? `PUBLISHED (${p.published?.url})` : ready(p) ? "APPROVED: ready to schedule" : p.status === "rejected" ? "REJECTED: do not schedule" : "DRAFT: approve it in Automaton before scheduling");
+  return [
+    `# ${tool} handoff: ${platform} posts for campaign ${c.id}`,
+    "",
+    `Product ${c.productId} (version ${c.productVersion}). Link in every post: ${c.productUrl}`,
+    `Status: ${posts.filter(ready).length} of ${posts.length} ${platform} post(s) approved and ready to schedule. This document schedules nothing; you schedule the posts yourself in ${tool}.`,
+    "",
+    "## Schedule",
+    "",
+    "| Day | Date | Post | Status |",
+    "|---|---|---|---|",
+    ...posts.map((p) => `| ${p.day} | ${p.date} | ${p.id} (${p.theme}) | ${label(p)} |`),
+    "",
+    ...posts.flatMap((p) => [`## Day ${p.day}, ${p.date}: ${p.id} (${label(p)})`, "", `${p.text.length} characters. Copy everything between the lines:`, "", "```text", p.text, "```", ""]),
+    "## After each post goes out",
+    "",
+    "Open the published post, copy its link, and record it (only approved posts can be recorded):",
+    "",
+    ...posts.map((p) => `    campaign published ${c.id} ${p.id} --url <link of the published post>`),
+    "",
+    "Later, record the post's numbers from the platform's own insights (never estimates):",
+    "",
+    `    campaign record ${c.id} <post> --period YYYY-MM-DD..YYYY-MM-DD --impressions N --reactions N --comments N --shares N --clicks N --source "${platform === "facebook" ? "Meta Business Suite insights" : "LinkedIn post analytics"}"`,
+    "",
+  ].join("\n");
 }
 
 /** The owner records the link of a post they published themselves on the platform. */
@@ -177,7 +238,7 @@ const flags = (args: readonly string[], allowed: readonly string[]) => {
   return out;
 };
 const int = (s: string | undefined, k: string) => { if (s === undefined || !/^\d+$/.test(s)) throw new Error(`${k}: a whole number`); return Number(s); };
-export const CAMPAIGN_USAGE = "campaign create <product> --url https://payhip.com/b/<code> [--start YYYY-MM-DD] | list | show <campaign> | post <campaign> <post> | approve <campaign> <post> [--note <text>] | reject <campaign> <post> --note <text> | published <campaign> <post> --url <post link> | record <campaign> <post> --period YYYY-MM-DD..YYYY-MM-DD --impressions N --reactions N --comments N --shares N --clicks N --source <text> [--evidence <file>]";
+export const CAMPAIGN_USAGE = "campaign create <product> --url https://payhip.com/b/<code> [--start YYYY-MM-DD] | list | show <campaign> | post <campaign> <post> | revise <campaign> <post> --text-file <file> | export <campaign> --platform facebook|linkedin [--save] | approve <campaign> <post> [--note <text>] | reject <campaign> <post> --note <text> | published <campaign> <post> --url <post link> | record <campaign> <post> --period YYYY-MM-DD..YYYY-MM-DD --impressions N --reactions N --comments N --shares N --clicks N --source <text> [--evidence <file>]";
 
 export async function campaignCli(args: readonly string[], ctx: { store: Store; out: (s: string) => void; now: () => Date; interactive: () => boolean }): Promise<number> {
   const [sub, a, b, ...rest] = args;
@@ -187,6 +248,34 @@ export async function campaignCli(args: readonly string[], ctx: { store: Store; 
   if (sub === "list") { const cs = store.campaigns(); out(cs.length ? cs.map((c) => `${c.id} ${c.productId} ${c.startDate} ${c.posts.filter((p) => p.status === "published").length}/${c.posts.length} published`).join("\n") + "\n" : "no campaigns\n"); return 0; }
   if (sub === "show") { out(campaignStatus(getCampaign(store, String(a)))); return 0; }
   if (sub === "post") { const c = getCampaign(store, String(a)); const p = getPost(c, String(b)); out(`${p.id} day ${p.day} ${p.date} ${p.platform} ${p.status}\n---\n${p.text}\n---\n${p.text.length} characters\n`); return 0; }
+  if (sub === "revise") {
+    const f = flags(rest, ["--text-file"]);
+    if (!f["--text-file"]) throw new Error("campaign revise <campaign> <post> --text-file <file>");
+    let fd: number;
+    try { fd = fs.openSync(f["--text-file"], fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { throw new Error("--text-file: cannot open the file (links are not followed)"); }
+    let text: string;
+    try { const st = fs.fstatSync(fd); if (!st.isFile() || st.size > 20_000) throw new Error("--text-file: a regular file up to 20 KB"); text = fs.readFileSync(fd, "utf8"); } finally { fs.closeSync(fd); }
+    const p = await locked(() => revisePost(store, String(a), String(b), text, ctx.now()));
+    out(`${p.id} revised: it is now a DRAFT and needs your approval again ('campaign approve ${a} ${p.id}'); the previous version is kept in its history\n`);
+    return 0;
+  }
+  if (sub === "export") {
+    const save = rest.includes("--save");
+    const f = flags([b, ...rest].filter((x) => x !== undefined && x !== "--save"), ["--platform"]);
+    const platform = f["--platform"];
+    if (platform !== "facebook" && platform !== "linkedin") throw new Error("--platform: facebook or linkedin");
+    const c = getCampaign(store, String(a));
+    const doc = exportHandoff(c, platform);
+    if (!save) { out(doc); return 0; }
+    const product = store.products().find((x) => x.id === c.productId);
+    if (!product) throw new Error(`no product ${c.productId}`);
+    const dir = store.assetDir(product.ventureId, c.id);
+    const name = `${platform}-handoff-${ctx.now().toISOString().replace(/[-:]/g, "").slice(0, 15).toLowerCase()}.md`;
+    await locked(() => store.writer(dir, [])(name, doc));
+    store.audit({ kind: "campaign-exported", campaign: c.id, platform, file: name }, ctx.now());
+    out(`${path.join(dir, name)}\n(nothing was scheduled or published)\n`);
+    return 0;
+  }
   if (sub === "approve" || sub === "reject") { const f = flags(rest, ["--note"]); const p = await locked(() => decidePost(store, String(a), String(b), { approve: sub === "approve", note: f["--note"] ?? "", interactive: ctx.interactive() }, ctx.now())); out(`${p.id} ${p.status}${p.status === "approved" ? ": publish it yourself on " + p.platform + ", then record the link with 'campaign published'" : ""}\n`); return 0; }
   if (sub === "published") { const f = flags(rest, ["--url"]); const p = await locked(() => recordPublished(store, String(a), String(b), f["--url"] ?? "", ctx.now())); out(`${p.id} recorded as published at ${p.published!.url} (by you; nothing was posted by Automaton)\n`); return 0; }
   if (sub === "record") {
