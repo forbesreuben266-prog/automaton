@@ -22,6 +22,7 @@ import { renderDashboard } from "./dashboard.js";
 import { changedFiles, realTotals, reviewHash, type Product } from "./products.js";
 import { ensurePrivateDir, type Store } from "./store.js";
 import { aiReadiness, type Readiness } from "./ai-factory.js";
+import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 
 export const TIMEZONE = "Europe/London";
 const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" });
@@ -51,6 +52,12 @@ export interface DailyReport {
   readonly factory: readonly { readonly id: string; readonly date: string; readonly mode: string; readonly status: string; readonly concept: string | null; readonly productId: string | null; readonly productStatus: string | null }[];
   /** AI provider readiness from local checks only (no network, no tokens). */
   readonly aiProvider: Readiness | null;
+  /** Paid-model spending from the local ledger (an estimate, not a provider bill). null = no paid usage recorded. */
+  readonly spending: { readonly committedGbp: number; readonly settledGbp: number; readonly unknownGbp: number; readonly remainingGbp: number; readonly capGbp: number; readonly requests: number } | null;
+  /** The single most important thing for the owner to do next (null = nothing). */
+  readonly nextAction: Item | null;
+  /** One short paragraph: what Automaton did and what needs the owner. */
+  readonly summary: string;
   readonly engagement: readonly { readonly campaignId: string; readonly postsWithResults: number; readonly impressions: number | null; readonly clicks: number | null }[];
   readonly actions: readonly Item[]; readonly blocked: readonly Item[]; readonly approvals: readonly Item[]; readonly problems: readonly Item[];
   readonly checked: readonly string[]; readonly completed: readonly string[]; readonly errors: readonly string[]; readonly limitations: readonly string[];
@@ -78,7 +85,7 @@ export function clearBlocker(store: Store, scope: string, now: Date): boolean {
 }
 
 /** Inspects everything and builds the report. Read-only: each section that fails is reported, the rest still runs. */
-export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyReport, "completed" | "errors"> & { completed: string[]; errors: string[] } {
+export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyReport, "completed" | "errors" | "problems"> & { completed: string[]; errors: string[]; problems: Item[] } {
   const today = londonDate(now);
   const actions: Item[] = [], blocked: Item[] = [], approvals: Item[] = [], problems: Item[] = [], errors: string[] = [], checked: string[] = [];
   const limitations: string[] = [
@@ -137,6 +144,10 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
     const mode = r.mode ?? "offline-template";
     if (r.date === today) actions.push({ priority: 2, ref: r.id, text: `new factory run (${mode}, ${r.status}${r.concept ? `: ${r.concept}` : ""}): read its review package${mode === "mock-demo" ? " (MOCK DEMONSTRATION, not real AI)" : ""}`, command: `factory show ${r.id}` });
     if (r.status === "failed-validation" || r.status === "needs-repair") problems.push({ priority: 2, ref: r.id, text: `factory product ${r.productId} needs repair: failed ${r.failedChecks.join(", ")}`, command: `factory show ${r.id}` });
+    if (r.status === "ai-failed" && !store.factoryRuns().some((x) => x.recoveredFrom === r.id)) {
+      if (store.reader(r.dir)("model-answers.json") !== null) actions.push({ priority: 2, ref: r.id, text: "failed AI run with saved answers: recover it locally (no model call, free)", command: `factory recover ${r.id}` });
+      else if (r.date === today) problems.push({ priority: 2, ref: r.id, text: "failed AI run without saved answers: it cannot be recovered; a new AI run needs your approval", command: `factory show ${r.id}` });
+    }
     if (r.status === "ai-failed" && r.date === today) problems.push({ priority: 2, ref: r.id, text: `AI factory run failed: ${(r.reason ?? "").slice(0, 200)}`, command: `factory show ${r.id}` });
     if (r.productId && !p) problems.push({ priority: 2, ref: r.id, text: `its product ${r.productId} is missing from products.json` });
     return { id: r.id, date: r.date, mode, status: r.status, concept: r.concept, productId: r.productId, productStatus: p ? (p.status === "ready" && p.signOff ? "ready, signed off" : p.status === "ready" ? "ready, awaiting your review and sign-off" : p.status) : null };
@@ -180,8 +191,13 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   for (const b of blocks) if (!["facebook", "linkedin", "payhip"].includes(b.scope) && !campaigns.some((c) => c.id === b.scope || c.posts.some((p) => p.id === b.scope)) && !allProducts.some((p) => p.id === b.scope)) problems.push({ priority: 3, ref: b.scope, text: "blocker for an unknown scope", command: `operations unblock ${b.scope}` });
   for (const b of blocks.filter((x) => x.scope === "payhip")) blocked.push({ priority: 1, ref: "payhip", text: `Payhip: ${b.reason}` });
 
+  const spending = section("paid-model spending (local ledger)", () => {
+    if (!fs.existsSync(path.join(store.dir, "ledger.json"))) return null;
+    const t = new Ledger(store.dir, HARD_CAP_GBP, now).totals();
+    return { committedGbp: t.committedGbp, settledGbp: t.settledGbp, unknownGbp: t.unknownGbp, remainingGbp: t.remainingGbp, capGbp: t.capGbp, requests: t.requests };
+  }, null);
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
-  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, engagement,
+  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, nextAction: null, summary: "", engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };
 }
 
@@ -195,6 +211,9 @@ export function renderReport(r: DailyReport): string {
     `# Automaton daily operations: ${r.date}`, "",
     `- Run status: **${r.status.toUpperCase()}**, generated ${londonTime(new Date(r.generatedAt))} on ${r.date} (${r.timezone})`,
     `- Health: ${health}`,
+    `- Summary: ${r.summary}`,
+    `- Next action: ${r.nextAction ? `${r.nextAction.text}${r.nextAction.command ? ` (\`${r.nextAction.command}\`)` : ""}` : "none"}`,
+    `- Paid AI spending (local ledger estimate): ${r.spending ? `£${r.spending.committedGbp} committed of £${r.spending.capGbp} (${r.spending.requests} request(s), £${r.spending.remainingGbp} left)` : "none recorded"}`,
     `- ${NEVER}`, "",
     "## Business", "",
     b ? `- Ventures: ${b.ventures} (${Object.entries(b.venturesByStatus).map(([k, v]) => `${v} ${k}`).join(", ") || "none"})\n- Pending approval requests: ${b.pendingApprovals}\n- STOP switch: ${b.stopped ? `set (${b.stopped})` : "not set"}\n- Engine schedule: ${b.engineSchedule ? "enabled" : "disabled"}; model provider: ${b.modelProvider}; paid usage approved: ${b.paidUsageApproved ? "yes" : "no"}` : "- unknown (could not be read)", "",
@@ -227,8 +246,22 @@ function writePrivate(file: string, text: string): void {
 export const reportDir = (store: Store) => path.join(store.dir, "reports");
 
 /** The daily run: inspect, allowlisted maintenance, then the report files and an audit entry. */
-export function runDaily(store: Store, cfg: EngineConfig, now: Date): { report: DailyReport; files: string[] } {
+/** The owner's next action: problems first, then approvals, then actions, by priority. */
+export function nextAction(r: Pick<DailyReport, "problems" | "approvals" | "actions">): Item | null {
+  return [...r.problems, ...r.approvals, ...r.actions].sort((a, b) => a.priority - b.priority)[0] ?? null;
+}
+export function summarise(r: Pick<DailyReport, "problems" | "approvals" | "actions" | "blocked" | "completed" | "errors">): string {
+  const human = r.problems.length + r.approvals.length + r.actions.length;
+  return `Automaton completed ${r.completed.length} task(s)${r.errors.length ? ` with ${r.errors.length} error(s)` : ""}. ${human ? `${human} item(s) need you (${r.approvals.length} approval(s), ${r.actions.length} action(s), ${r.problems.length} problem(s))` : "Nothing needs you"}${r.blocked.length ? `; ${r.blocked.length} blocked by outside blockers` : ""}.`;
+}
+
+/** Extra work done before the report (autopilot): shown under completed, and problems it could not resolve. */
+export interface DailyExtra { readonly completed?: readonly string[]; readonly problems?: readonly Item[] }
+
+export function runDaily(store: Store, cfg: EngineConfig, now: Date, extra: DailyExtra = {}): { report: DailyReport; files: string[] } {
   const r = inspect(store, cfg, now);
+  r.completed.push(...(extra.completed ?? []));
+  r.problems.push(...(extra.problems ?? []));
   if (r.business?.stopped) r.completed.push("maintenance skipped: STOP is set");
   else {
     try { writePrivate(path.join(store.dir, "dashboard.html"), renderDashboard(store.ventures(), store.approvals(), now)); r.completed.push("dashboard.html regenerated"); }
@@ -238,14 +271,16 @@ export function runDaily(store: Store, cfg: EngineConfig, now: Date): { report: 
   const dir = reportDir(store);
   ensurePrivateDir(dir);
   const base = path.join(dir, `daily-${report.date}`);
-  const done: DailyReport = { ...report, completed: [...report.completed, `report saved: reports/daily-${report.date}.md and .json`] };
+  const completed = [...report.completed, `report saved: reports/daily-${report.date}.md and .json, owner dashboard: reports/owner-dashboard.html`];
+  const done: DailyReport = { ...report, completed, nextAction: nextAction(report), summary: summarise({ ...report, completed }) };
   writePrivate(`${base}.json`, JSON.stringify(done, null, 2) + "\n");
   writePrivate(`${base}.md`, renderReport(done));
+  writePrivate(path.join(dir, "owner-dashboard.html"), renderOwnerDashboard(done));
   store.audit({ kind: "operations-daily", date: done.date, status: done.status, actions: done.actions.length, blocked: done.blocked.length, approvals: done.approvals.length, problems: done.problems.length, errors: done.errors.length }, now);
   return { report: done, files: [`${base}.md`, `${base}.json`] };
 }
 
-export const OPERATIONS_USAGE = "operations daily [--json] | operations block <scope> --reason <text> | operations unblock <scope> | operations blockers | operations unit";
+export const OPERATIONS_USAGE = "operations daily [--json] | operations autopilot | operations block <scope> --reason <text> | operations unblock <scope> | operations blockers | operations unit";
 
 export function systemdUnits(): string {
   return `# Review, then install yourself as your own user (not root). Installing does not enable it.
@@ -298,4 +333,40 @@ export async function operationsCli(args: readonly string[], ctx: { store: Store
   if (sub === "unit") { out(systemdUnits()); return 0; }
   out(`Usage: ${OPERATIONS_USAGE}\n`);
   return 2;
+}
+
+const h = (s: unknown) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+const items = (xs: readonly Item[], none: string) => (xs.length ? `<ul>${xs.map((x) => `<li><b>P${x.priority}</b> <code>${h(x.ref)}</code> ${h(x.text)}${x.command ? `<br><code>${h(x.command)}</code>` : ""}</li>`).join("")}</ul>` : `<p>${h(none)}</p>`);
+
+/** A private, self-contained owner dashboard (no scripts, no external resources) built from the daily report. */
+export function renderOwnerDashboard(r: DailyReport): string {
+  const sold = r.sales.filter((s) => s.periods);
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Automaton owner dashboard ${h(r.date)}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:60rem;margin:1rem auto;padding:0 1rem;color:#111;background:#fff}h2{margin-top:1.6rem;border-bottom:1px solid #ddd}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:.3rem .5rem;text-align:left;font-size:.92rem}.box{background:#f4f6f8;padding:.7rem 1rem;border-radius:.4rem}
+code{font-size:.85rem}@media (prefers-color-scheme:dark){body{background:#111;color:#eee}.box{background:#222}td,th{border-color:#444}}</style>
+</head><body>
+<h1>Automaton: ${h(r.date)}</h1>
+<div class="box"><p><b>${h(r.summary)}</b></p><p>Next action: ${r.nextAction ? `${h(r.nextAction.text)}${r.nextAction.command ? ` <code>${h(r.nextAction.command)}</code>` : ""}` : "none"}</p>
+<p>Run status: ${h(r.status)}. Generated ${h(londonTime(new Date(r.generatedAt)))} (${h(r.timezone)}). ${h(NEVER)}</p></div>
+<h2>Needs you</h2>
+<h3>Approvals and reviews</h3>${items(r.approvals, "Nothing waiting for approval.")}
+<h3>Actions</h3>${items(r.actions, "No actions.")}
+<h3>Problems</h3>${items(r.problems, "No problems found.")}
+<h3>Blocked</h3>${items(r.blocked, "Nothing blocked.")}
+<h2>Automaton completed</h2><ul>${r.completed.map((c) => `<li>${h(c)}</li>`).join("")}</ul>
+<h2>Products</h2><table><tr><th>Product</th><th>Version</th><th>Status</th><th>Price</th><th>Sign-off</th><th>Live URL</th></tr>
+${r.products.map((p) => `<tr><td>${h(p.id)} ${h(p.name)}</td><td>${p.version}</td><td>${h(p.supersededBy ? `superseded by ${p.supersededBy}` : p.status)}</td><td>${h(p.price)}</td><td>${h(p.signOff)}</td><td>${h(p.liveUrl ?? "not live")}</td></tr>`).join("")}</table>
+<h2>Factory runs</h2><table><tr><th>Run</th><th>Date</th><th>Mode</th><th>Status</th><th>Product</th></tr>
+${r.factory.map((x) => `<tr><td>${h(x.id)}</td><td>${h(x.date)}</td><td>${h(x.mode)}</td><td>${h(x.status)}</td><td>${h(x.productId ?? "-")} ${h(x.productStatus ?? "")}</td></tr>`).join("")}</table>
+<p>AI provider: ${r.aiProvider ? `${h(r.aiProvider.provider)}, ${r.aiProvider.ready ? "ready" : "not ready"}` : "unknown"}. Paid AI runs only when you run them with --paid.</p>
+<h2>Campaigns</h2>${r.campaigns.map((c) => `<p><b>${h(c.id)}</b> for ${h(c.productId)}</p><table><tr><th>Date</th><th>Platform</th><th>Post</th><th>State</th></tr>${c.posts.map((p) => `<tr><td>${h(p.date)}</td><td>${h(p.platform)}</td><td>${h(p.id)}</td><td>${h(p.state)}</td></tr>`).join("")}</table>`).join("") || "<p>No campaigns.</p>"}
+<h2>Recorded sales (owner-recorded only)</h2>${sold.length ? `<ul>${sold.map((s) => `<li>${h(s.productId)}: sales ${s.sales}, revenue ${h(s.currency)} ${s.revenue}, visits ${s.visits} (${s.periods} period(s), latest ending ${h(s.lastPeriodEnd)})</li>`).join("")}</ul>` : "<p>Not recorded: sales and revenue are unknown, not zero.</p>"}
+<h2>Spending</h2><p>${r.spending ? `Paid AI (local ledger estimate): £${r.spending.committedGbp} committed of the £${r.spending.capGbp} cap, £${r.spending.remainingGbp} left, ${r.spending.requests} request(s).` : "No paid AI usage recorded."} Automaton has no way to buy anything else.</p>
+<h2>Limits of this data</h2><ul>${r.limitations.map((l) => `<li>${h(l)}</li>`).join("")}</ul>
+</body></html>
+`;
 }

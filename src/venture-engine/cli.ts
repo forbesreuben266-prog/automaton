@@ -45,6 +45,7 @@ import { generateMarketing } from "./marketing.js";
 import { OPERATIONS_USAGE, operationsCli } from "./operations.js";
 import { FACTORY_USAGE, factoryCli } from "./factory.js";
 import { loadStoredConcepts } from "./blueprints/toolkit.js";
+import { autopilotCli } from "./autopilot.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
@@ -140,6 +141,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       return 0;
     }
     if (cmd === "factory") return await factoryCli(rest, { store, cfg, out: d.out, now, model: (paid) => modelFor(cfg, d, store, paid, now) });
+    if (cmd === "operations" && rest[0] === "autopilot") return await autopilotCli(rest.slice(1), { store, cfg, out: d.out, now });
     if (cmd === "operations") return await operationsCli(rest, { store, cfg, out: d.out, now });
     if (cmd === "campaign") return await campaignCli(rest, { store, out: d.out, now, interactive: d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true) });
     if (cmd === "product" && rest[0] === "marketing") {

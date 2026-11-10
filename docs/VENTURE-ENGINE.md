@@ -510,3 +510,21 @@ Every run (offline or AI) writes a ZIP of exactly the deliverables, a
 review` rebuilds the same files. The daily report shows the latest runs, the AI
 provider's readiness (local checks only) and runs needing repair; unattended AI
 generation is not enabled.
+
+## Autopilot and owner dashboard
+
+    ve operations autopilot      # one bounded offline workflow, then the daily report and dashboard
+    ve factory recover <run>     # rebuild a failed AI run from its saved answers (local, no model call)
+
+`operations autopilot` (1) recovers at most one `ai-failed` run whose model
+answers were saved, using the current validators and local repairs, with no
+model call; (2) prepares at most one offline product draft (ZIP, listing,
+marketing) when fewer than 2 factory products wait for review and none was
+prepared today; (3) runs the daily checks. It never calls a model, retries,
+approves, publishes, schedules, lists, sends or spends, and only reports while
+STOP is set. It is not scheduled: the 08:00 timer still runs `operations daily`.
+
+Every daily run also writes `reports/owner-dashboard.html` (private, no
+scripts): a summary, the next action, what needs you (approvals, actions,
+problems, blocked), what Automaton completed, products, factory runs,
+campaigns, owner-recorded sales and paid-AI spending from the local ledger.

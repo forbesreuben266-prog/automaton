@@ -161,7 +161,7 @@ describe("operations daily: runs, failures and timezone", () => {
     expect(b.files).toEqual(a.files);
     const strip = (s: string) => ({ ...JSON.parse(s), generatedAt: "-" });
     expect(strip(fs.readFileSync(b.files[1], "utf8"))).toEqual(strip(first));
-    expect(fs.readdirSync(path.join(store.dir, "reports")).sort()).toEqual(["daily-2026-11-12.json", "daily-2026-11-12.md"]);
+    expect(fs.readdirSync(path.join(store.dir, "reports")).sort()).toEqual(["daily-2026-11-12.json", "daily-2026-11-12.md", "owner-dashboard.html"]);
     expect(fs.readFileSync(path.join(store.dir, "audit.jsonl"), "utf8").match(/"kind":"operations-daily"/g)).toHaveLength(2);
   });
 

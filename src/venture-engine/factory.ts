@@ -51,6 +51,8 @@ export interface FactoryRun {
   readonly concept: string | null; readonly ventureId: string | null; readonly productId: string | null; readonly score: number | null;
   readonly failedChecks: readonly string[]; readonly dir: string; readonly files: readonly Asset[];
   readonly model?: string | null; readonly modelCalls?: number; readonly reason?: string | null; readonly zip?: string | null;
+  /** Set when this run was rebuilt locally from an earlier run's saved model answers (no model call). */
+  readonly recoveredFrom?: string;
 }
 
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -364,13 +366,64 @@ export async function runAiFactory(store: Store, cfg: EngineConfig, now: Date, o
   if (!EXTRA_CONCEPTS.some((x) => x.id === c.id)) EXTRA_CONCEPTS.push(c);
   r.write("model-log.json", JSON.stringify({ model: client.id, calls, log, rejectedIdeas: rejected }, null, 2) + "\n");
   keep();
-  const dropped = spec.dropped ?? [], repairs = spec.repairs ?? [];
-  const outputCheck: Check = { name: "model-output-complete", passed: dropped.length === 0,
-    detail: (dropped.length ? `left out (could not be repaired safely): ${dropped.join("; ")}` : "every file the model wrote was usable") + (repairs.length ? `; safe repairs: ${repairs.join("; ")}` : "") };
-  return { run: produce(store, now, r, { date, mode, model: client.id, modelCalls: calls }, c, pick, scores, [outputCheck]), reused: false, scores };
+  return { run: produce(store, now, r, { date, mode, model: client.id, modelCalls: calls }, c, pick, scores, [outputCheck(spec)]), reused: false, scores };
 }
 
-export const FACTORY_USAGE = "factory run --offline | factory run --ai [--paid] | factory run --ai --mock | factory preflight | factory list | factory show <run>";
+const outputCheck = (spec: ProductSpec): Check => {
+  const dropped = spec.dropped ?? [], repairs = spec.repairs ?? [];
+  return { name: "model-output-complete", passed: dropped.length === 0,
+    detail: ((dropped.length ? `left out (could not be repaired safely): ${dropped.join("; ")}` : "every file the model wrote was usable") + (repairs.length ? `; safe repairs: ${repairs.join("; ")}` : "")).slice(0, 400) };
+};
+
+/** Runs whose saved model answers could be rebuilt locally: ai-failed, answers kept, not yet recovered. */
+export function recoverable(store: Store): FactoryRun[] {
+  const runs = store.factoryRuns();
+  return runs.filter((r) => r.status === "ai-failed" && !runs.some((x) => x.recoveredFrom === r.id) && store.reader(r.dir)("model-answers.json") !== null);
+}
+
+/**
+ * Rebuilds a failed AI run from its SAVED model answers with the current validators and local repairs. No model is
+ * called, so it costs nothing; the result goes through the full QA and stays in review (or needs repair).
+ */
+export function recoverRun(store: Store, now: Date, runId: string): FactoryResult {
+  const why = stopReason(store.dir);
+  if (why) throw new Error(`STOP is set (${why}): nothing was recovered`);
+  const runs = store.factoryRuns();
+  const old = runs.find((r) => r.id === runId);
+  if (!old) throw new Error(`no factory run ${runId}`);
+  if (old.status !== "ai-failed") throw new Error(`${runId} is ${old.status}: only ai-failed runs are recovered (needs-repair runs already have a product to edit)`);
+  const done = runs.find((r) => r.recoveredFrom === runId);
+  if (done) throw new Error(`${runId} was already recovered in ${done.id}`);
+  const raw = store.reader(old.dir)("model-answers.json");
+  if (raw === null) throw new Error(`${runId} has no saved model answers (runs before the CSV fix did not keep them): it cannot be recovered without a new model call, which needs your approval`);
+  let answers: { ideas?: unknown; product?: unknown };
+  try { answers = JSON.parse(raw); } catch { throw new Error(`${runId}: model-answers.json is not valid JSON`); }
+  const ideas = validateIdeas(answers.ideas)?.ideas;
+  if (!ideas) throw new Error(`${runId}: the saved ideas are still unusable`);
+  const v = validateSpec(answers.product);
+  if ("problems" in v) throw new Error(`${runId}: the saved product is still unusable after local repairs (${v.problems.slice(0, 4).join("; ")})`);
+  const prefix = old.mode === "mock-demo" ? "mock" : "ai";
+  const scores = scoreCandidates(store, ideas.map((i) => ({ id: `${prefix}-${i.slug}`, name: i.name, problem: i.problem, ai: true, needsAdvice: ideaNeedsAdvice(i),
+    ratings: { usefulness: i.usefulness, simplicity: { low: 0.85, medium: 0.65, high: 0.4 }[i.complexity], monetisation: i.monetisation },
+    reasons: { usefulness: i.usefulnessRationale, simplicity: `${i.complexity} complexity (owner rule: low 0.85, medium 0.65, high 0.4)`, monetisation: i.monetisationRationale } })));
+  const pick = scores.find((s) => s.eligible && ideas.find((i) => `${prefix}-${i.slug}` === s.concept)?.name === v.spec.name) ?? scores.find((s) => s.eligible);
+  if (!pick) throw new Error(`${runId}: no saved idea is eligible any more (${scores.map((s) => `${s.name}: ${s.excluded}`).join("; ")})`);
+  const idea = ideas.find((i) => `${prefix}-${i.slug}` === pick.concept)!;
+  const r = newRunDir(store);
+  r.write("model-answers.json", raw);
+  const model = `${old.model ?? "model"} (recovered from saved answers of ${runId})`;
+  const c = specToConcept(v.spec, idea, pick.concept, { mode: prefix === "mock" ? "mock-demo" : "ai", model, run: r.id });
+  store.saveAiConcepts([...store.aiConcepts().filter((x) => x.id !== c.id), c]);
+  if (!EXTRA_CONCEPTS.some((x) => x.id === c.id)) EXTRA_CONCEPTS.push(c);
+  const run = produce(store, now, r, { date: londonDate(now), mode: old.mode, model, modelCalls: 0 }, c, pick, scores, [outputCheck(v.spec)]);
+  const all = store.factoryRuns();
+  const tagged = { ...run, recoveredFrom: runId };
+  store.saveFactoryRuns(all.map((x) => (x.id === run.id ? tagged : x)));
+  store.audit({ kind: "factory-recovered", run: run.id, from: runId, status: run.status, modelCalls: 0 }, now);
+  return { run: tagged, reused: false, scores };
+}
+
+export const FACTORY_USAGE = "factory run --offline | factory run --ai [--paid] | factory run --ai --mock | factory recover <run> | factory preflight | factory list | factory show <run>";
 
 export async function factoryCli(args: readonly string[], ctx: { store: Store; cfg: EngineConfig; out: (s: string) => void; now: () => Date; model: (paid: boolean) => ModelClient | null }): Promise<number> {
   const [sub, ...rest] = args;
@@ -394,6 +447,12 @@ export async function factoryCli(args: readonly string[], ctx: { store: Store; c
     if (x.failedChecks.length) out(`failed checks: ${x.failedChecks.join(", ")}\n`);
     out(`review package: ${path.join(x.dir, x.productId ? "review-package.md" : "summary.json")}\nNothing was published, listed, scheduled, sent, approved or bought.\n`);
     return x.status === "review-ready" || x.status === "no-eligible-concept" ? 0 : 1;
+  }
+  if (sub === "recover") {
+    if (rest.length !== 1) throw new Error("factory recover <run>");
+    const { run: x } = await withLock(store.dir, async () => recoverRun(store, ctx.now(), rest[0]));
+    out(`recovered ${rest[0]} locally (no model call) as ${x.id}: ${x.status}, product ${x.productId}${x.failedChecks.length ? `; failed checks: ${x.failedChecks.join(", ")}` : ""}\nreview package: ${path.join(x.dir, "review-package.md")}\nNothing was published, listed, scheduled, sent, approved or bought.\n`);
+    return x.status === "review-ready" ? 0 : 1;
   }
   if (sub === "preflight") {
     const r = aiReadiness(store, cfg, ctx.now());
