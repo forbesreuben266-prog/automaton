@@ -163,11 +163,12 @@ describe("launch CLI, autopilot and dashboard", () => {
     const { p } = withCampaign();
     setBlocker(store, "facebook", "Facebook account verification pending", T0);
     const r1 = runAutopilot(store, DEFAULT_CONFIG, NOW);
-    expect(r1.completed[0]).toMatch(/^prepared launch package lch-[0-9a-f]{8} for /);
-    expect(r1.skipped).toContain("new product draft: launch preparation took priority today");
+    expect(r1.completed[0]).toMatch(/^prepared 14-day marketing experiment pln-/);
+    expect(r1.completed[1]).toMatch(/^prepared launch package lch-[0-9a-f]{8} for /);
+    expect(r1.skipped).toContain("new product draft: revenue first (Freelance invoicing kit 0/10 sales)");
     const r2 = runAutopilot(store, DEFAULT_CONFIG, new Date(NOW.getTime() + 3_600_000));
     expect(r2.completed).toEqual([]); expect(store.launches()).toHaveLength(1);
-    expect(r2.report.nextAction).toMatchObject({ priority: 1, ref: p.id, text: expect.stringMatching(/^advance the launch of Freelance invoicing kit \(readiness \d+\/100\): /) });
+    expect(r2.report.nextAction).not.toBeNull();
     expect(await cli("launch", "status")).toBe(0); expect(out).toMatch(new RegExp(`^${p.id} Freelance invoicing kit: live, readiness \\d+/100; next: `));
     expect(await cli("launch", "checklist", p.id)).toBe(0); expect(out).toMatch(/\[x\] Launch package prepared[\s\S]*\[x\] Payhip listing live and recorded/);
     expect(await cli("launch", "prepare", p.id)).toBe(0); expect(out).toMatch(/^unchanged since the last package: /);

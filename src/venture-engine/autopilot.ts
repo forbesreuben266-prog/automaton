@@ -18,6 +18,8 @@ import { recoverable, recoverRun, runFactory } from "./factory.js";
 import { londonDate, renderReport, runDaily, type DailyReport, type Item } from "./operations.js";
 import { stopReason, withLock } from "./control.js";
 import { approved, prepareLaunch } from "./launch.js";
+import { activePlan, createPlan } from "./audience.js";
+import { goals } from "./revenue.js";
 import type { Store } from "./store.js";
 
 /** New drafts are prepared only while fewer than this many factory products wait for the owner's review. */
@@ -39,6 +41,18 @@ export function runAutopilot(store: Store, cfg: EngineConfig, now: Date): Autopi
       catch (e) { unresolved.push({ priority: 2, ref: old.id, text: `could not recover locally: ${(e as Error).message.slice(0, 240)}`, command: `factory show ${old.id}` }); }
       if (todo.length > 1) skipped.push(`recovery: ${todo.length - 1} more run(s) left for tomorrow (one per run)`);
     }
+    // 0. Revenue first: a live product short of its first-sales goal gets an active 14-day experiment (at most one new plan a day).
+    const day = londonDate(now);
+    const short = goals(store).filter((g) => g.remaining > 0);
+    const planned = store.audiencePlans().some((pl) => londonDate(new Date(pl.createdAt)) === day);
+    for (const g of short) {
+      if (activePlan(store, g.productId, day)) continue;
+      if (planned) { skipped.push(`audience plan for ${g.productId}: one plan was already prepared today`); break; }
+      try { const { plan } = createPlan(store, g.productId, now); completed.push(`prepared 14-day marketing experiment ${plan.id} for ${g.name} (${plan.start} to ${plan.end}; channels ${plan.channels.join(", ")}); content waits for your approval`); }
+      catch (e) { unresolved.push({ priority: 2, ref: g.productId, text: `could not prepare the marketing experiment: ${(e as Error).message.slice(0, 240)}`, command: `audience plan ${g.productId}` }); }
+      break;
+    }
+    if (!short.length) skipped.push("marketing experiment: no live product is short of its first-sales goal");
     // 2a. Launch preparation for approved products comes before any new draft.
     let launched = false;
     const current = store.products().filter((p) => p.status !== "archived" && !store.products().some((x) => x.previous === p.id) && approved(p));
@@ -51,7 +65,8 @@ export function runAutopilot(store: Store, cfg: EngineConfig, now: Date): Autopi
     const products = store.products();
     const waiting = store.factoryRuns().filter((r) => r.productId && products.some((p) => p.id === r.productId && p.status === "ready" && !p.signOff)).length;
     const today = londonDate(now);
-    if (launched || store.launches().some((l) => londonDate(new Date(l.createdAt)) === today)) skipped.push("new product draft: launch preparation took priority today");
+    if (short.length) skipped.push(`new product draft: revenue first (${short.map((g) => `${g.name} ${g.sales}/${g.target} sales`).join(", ")})`);
+    else if (launched || store.launches().some((l) => londonDate(new Date(l.createdAt)) === today)) skipped.push("new product draft: launch preparation took priority today");
     else if (waiting >= REVIEW_BACKLOG_LIMIT) skipped.push(`new product draft: ${waiting} factory product(s) already wait for your review (limit ${REVIEW_BACKLOG_LIMIT})`);
     else if (store.factoryRuns().some((r) => r.date === today && (r.mode ?? "offline-template") === "offline-template")) skipped.push("new product draft: one was already prepared today");
     else {

@@ -556,3 +556,31 @@ refunds cannot exceed the order; fees are "not recorded" unless given. The
 daily report and owner dashboard show launch stages, readiness and verified
 orders. The autopilot refreshes at most one launch package per day before it
 considers any new draft.
+
+## Audience, revenue and opportunities
+
+    ve audience plan <product> [--start YYYY-MM-DD] [--utm]   # 14-day organic experiment + content for 6 platforms
+    ve audience calendar <product> | ve audience content <product> | ve audience status
+    ve audience approve <plan> --day N                          # interactive terminal only
+    ve audience posted <plan> --day N --url <post link>         # publication evidence
+    ve revenue record --plan <pln> --channel linkedin --date YYYY-MM-DD --clicks 14 --visits 9 --source "Payhip dashboard"
+    ve revenue cost --date YYYY-MM-DD --amount 3.50 --description "..." --source "receipt"
+    ve sales record <product> ... --plan <pln> --channel linkedin    # order attribution
+    ve revenue goals | ve revenue report | ve opportunities score [--file ideas.json]
+
+Plans (live products only) teach one practical step a day taken from the
+product's own files, one channel a day (LinkedIn, Facebook, Instagram, TikTok,
+YouTube Shorts, Pinterest), with a direct offer on days 5, 10 and 14 only.
+Channels with an outside blocker are left out. Video days get a script,
+storyboard and shot list; no video is produced. Later plans avoid steps used
+before. Everything stays a draft until approved at a terminal; nothing is
+posted, followed, messaged or paid for.
+
+Revenue numbers come only from owner records. Unknown is shown as unknown,
+not zero; conversion is shown only when orders and visits were recorded for
+the same channel and days; net contribution subtracts recorded fees and
+marketing costs. The first-sales goal is 10 verified orders per live product
+(fully refunded orders do not count). While a live product is short of it, the
+autopilot keeps a 14-day experiment active and makes no new product drafts.
+Brands: every new record carries `brand` (default `avenor-studio`); existing
+records without one belong to the default brand.

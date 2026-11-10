@@ -25,6 +25,8 @@ import { aiReadiness, type Readiness } from "./ai-factory.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { approved, launchReadiness, type Readiness as LaunchReadiness } from "./launch.js";
 import { pounds, salesTotals, type SalesTotals } from "./sales.js";
+import { activePlan, CHANNEL_INFO } from "./audience.js";
+import { channelPerformance, experimentResult, goals, type ChannelRow, type GoalProgress } from "./revenue.js";
 
 export const TIMEZONE = "Europe/London";
 const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" });
@@ -60,6 +62,10 @@ export interface DailyReport {
   readonly launch: readonly (LaunchReadiness & { readonly approved: boolean; readonly packageId: string | null })[];
   /** Verified orders (sales.ts), per currency; owner-recorded only, never estimated. */
   readonly orders: readonly (SalesTotals & { readonly currency: string })[];
+  /** Revenue: first-sales goals, channel performance, experiments and content waiting for approval (revenue.ts, audience.ts). */
+  readonly revenue: { readonly goals: readonly GoalProgress[]; readonly channels: readonly ChannelRow[]; readonly costsPence: number;
+    readonly experiments: readonly { readonly planId: string; readonly productId: string; readonly status: string; readonly posted: number; readonly days: number; readonly orders: number; readonly visits: number | null; readonly clicks: number | null; readonly conclusion: string }[];
+    readonly awaitingApproval: number; readonly plannedToday: readonly { readonly planId: string; readonly day: number; readonly channel: string; readonly approved: boolean; readonly posted: boolean }[] } | null;
   /** The single most important thing for the owner to do next (null = nothing). */
   readonly nextAction: Item | null;
   /** One short paragraph: what Automaton did and what needs the owner. */
@@ -205,8 +211,17 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   const launches = section("launch readiness", () => current.map((p) => ({ ...launchReadiness(store, p), approved: approved(p), packageId: store.launches().filter((l) => l.productId === p.id && l.version === p.version).at(-1)?.id ?? null })), []);
   for (const l of launches) if (l.approved && !l.packageId) actions.push({ priority: 2, ref: l.productId, text: "approved product without a launch package", command: `launch prepare ${l.productId}` });
   const orders = section("verified orders", () => { const all = store.orders(); return [...new Set(all.map((o) => o.currency))].map((cur) => ({ currency: cur, ...salesTotals(all.filter((o) => o.currency === cur)) })); }, []);
+  const revenue = section("revenue goals, channels and experiments", () => {
+    const plans = store.audiencePlans();
+    const experiments = plans.map((pl) => ({ planId: pl.id, productId: pl.productId, days: pl.days.length, ...experimentResult(store, pl.id, today) }));
+    const plannedToday = plans.flatMap((pl) => pl.days.filter((d) => d.date === today).map((d) => ({ planId: pl.id, day: d.day, channel: d.channel, approved: !!d.approval, posted: !!d.posted })));
+    for (const pt of plannedToday.filter((x) => !x.posted)) actions.push({ priority: 1, ref: `${pt.planId} day ${pt.day}`, text: pt.approved ? `post today's ${CHANNEL_INFO[pt.channel as keyof typeof CHANNEL_INFO].label} content yourself, then record its link` : `approve today's ${CHANNEL_INFO[pt.channel as keyof typeof CHANNEL_INFO].label} content (interactive terminal)`, command: pt.approved ? `audience posted ${pt.planId} --day ${pt.day} --url <post link>` : `audience approve ${pt.planId} --day ${pt.day}` });
+    return { goals: goals(store), channels: channelPerformance(store), costsPence: store.marketing().costs.reduce((a, c) => a + c.pence, 0), experiments,
+      awaitingApproval: plans.reduce((a, pl) => a + pl.days.filter((d) => !d.approval && d.date >= today).length, 0) + store.campaigns().reduce((a, c) => a + c.posts.filter((x) => x.status === "draft").length, 0), plannedToday };
+  }, null);
+  for (const g of revenue?.goals ?? []) if (g.remaining > 0 && !activePlan(store, g.productId, today)) actions.push({ priority: 1, ref: g.productId, text: `${g.name}: ${g.sales}/${g.target} verified sales and no active 14-day experiment: prepare one`, command: `audience plan ${g.productId}` });
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
-  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, launch: launches, orders, nextAction: null, summary: "", engagement,
+  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, launch: launches, orders, revenue, nextAction: null, summary: "", engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };
 }
 
@@ -235,6 +250,13 @@ export function renderReport(r: DailyReport): string {
     r.factory.length ? r.factory.map((x) => `- ${x.id} (${x.date}, ${x.mode}): ${x.status}${x.concept ? `, ${x.concept}` : ""}${x.productId ? `, product ${x.productId}: ${x.productStatus ?? "missing"}` : ""}`).join("\n") : "- no factory runs", "",
     "## Launch readiness", "",
     r.launch.length ? ["| Product | Stage | Readiness | Next step |", "|---|---|---|---|", ...r.launch.map((l) => `| ${l.productId} ${l.name} | ${l.stage} | ${l.score}/100 | ${l.next ? `${l.next.label}${l.next.command ? ` (\`${l.next.command}\`)` : ""}` : "-"} |`)].join("\n") : "- no products", "",
+    "## Revenue and audience", "",
+    r.revenue ? [
+      ...r.revenue.goals.map((g) => `- First-sales goal, ${g.name}: **${g.sales}/${g.target}** verified sales (${g.withEvidence} with an evidence file)`),
+      `- Marketing costs recorded: ${pounds(r.revenue.costsPence)}. Content waiting for approval: ${r.revenue.awaitingApproval}.`,
+      ...r.revenue.experiments.map((e) => `- Experiment ${e.planId} (${e.productId}): ${e.status}; posted ${e.posted}/${e.days}; orders ${e.orders}; visits ${e.visits ?? "unknown"}; ${e.conclusion}`),
+      ...r.revenue.channels.filter((c) => c.posted || c.orders || c.visits !== null || c.clicks !== null).map((c) => `- ${c.channel}: posted ${c.posted}, clicks ${c.clicks ?? "unknown"}, visits ${c.visits ?? "unknown"}, orders ${c.orders}, conversion ${c.conversion}`),
+    ].join("\n") || "- nothing recorded yet" : "- unknown (could not be read)", "",
     "## Verified orders (sales record)", "",
     r.orders.length ? r.orders.map((t) => `- ${t.currency}: ${t.orders} order(s), gross ${pounds(t.grossPence)}, refunds ${pounds(t.refundsPence)}, fees ${pounds(t.feesPence)}${t.ordersWithoutFees ? ` (not recorded for ${t.ordersWithoutFees})` : ""}, net ${pounds(t.netPence)}; attributed to campaigns: ${t.orders - t.unattributed}`).join("\n") : "- no orders recorded: sales are unknown, not zero", "",
     "## Verified sales and engagement (owner-recorded only)", "",
@@ -263,6 +285,11 @@ export const reportDir = (store: Store) => path.join(store.dir, "reports");
 export function nextAction(r: Pick<DailyReport, "problems" | "approvals" | "actions"> & { launch?: DailyReport["launch"] }): Item | null {
   const urgent = r.problems.find((x) => x.priority === 1);
   if (urgent) return urgent;
+  // Launch steps that are prerequisites come first; outcomes (a published post, recorded sales) are advanced by today's experiment action.
+  const pre = [...(r.launch ?? [])].filter((x) => x.approved && x.next && !["sales-recorded", "post-published"].includes(x.next.id)).sort((a, b) => b.score - a.score)[0];
+  if (pre?.next) return { priority: 1, ref: pre.productId, text: `advance the launch of ${pre.name} (readiness ${pre.score}/100): ${pre.next.label}`, command: pre.next.command };
+  const revenueStep = r.actions.find((x) => x.priority === 1 && (/^pln-[0-9a-f]{8} day \d+$/.test(x.ref) || x.command?.startsWith("audience plan ")));
+  if (revenueStep) return revenueStep;
   // The step most likely to advance a launch: the most advanced approved product's next unblocked criterion.
   const l = [...(r.launch ?? [])].filter((x) => x.approved && x.next).sort((a, b) => b.score - a.score)[0];
   if (l?.next) return { priority: 1, ref: l.productId, text: `advance the launch of ${l.name} (readiness ${l.score}/100): ${l.next.label}`, command: l.next.command };
@@ -380,6 +407,11 @@ code{font-size:.85rem}@media (prefers-color-scheme:dark){body{background:#111;co
 <table><tr><th>Product</th><th>Stage</th><th>Readiness</th><th>Payhip listing</th><th>Package</th><th>Next step</th></tr>
 ${r.launch.map((l) => `<tr><td>${h(l.productId)} ${h(l.name)}</td><td>${h(l.stage)}</td><td>${l.score}/100</td><td>${h(l.criteria.find((c) => c.id === "listing-live")?.detail ?? "")}</td><td>${h(l.packageId ?? "not prepared")}</td><td>${l.next ? `${h(l.next.label)}${l.next.command ? `<br><code>${h(l.next.command)}</code>` : ""}` : "-"}</td></tr>`).join("")}</table>
 <details><summary>Readiness criteria</summary><ul>${(r.launch[0]?.criteria ?? []).map((c) => `<li>${h(c.label)} (weight ${c.weight})</li>`).join("")}</ul><p>Score = weighted share of criteria that are recorded facts; blocked criteria count as not done.</p></details>
+<h2>Revenue</h2>${r.revenue ? `${r.revenue.goals.map((g) => `<p><b>${h(g.name)}: ${g.sales} of ${g.target} first sales</b> <progress max="${g.target}" value="${g.sales}"></progress> ${g.remaining} to go (${g.withEvidence} with an evidence file)</p>`).join("") || "<p>No live product: the first-sales goal starts when one is live.</p>"}
+<table><tr><th>Channel</th><th>Posted</th><th>Clicks</th><th>Visits</th><th>Orders</th><th>Net</th><th>Costs</th><th>Conversion</th></tr>${r.revenue.channels.map((c) => `<tr><td>${h(c.channel)}</td><td>${c.posted}</td><td>${c.clicks === null ? "unknown" : c.clicks}</td><td>${c.visits === null ? "unknown" : c.visits}</td><td>${c.orders}</td><td>${pounds(c.netPence)}</td><td>${pounds(c.costPence)}</td><td>${h(c.conversion)}</td></tr>`).join("")}</table>
+<p><small>0 = recorded as zero. unknown = never recorded. not measurable = the numbers needed were not both recorded.</small></p>
+<h3>Marketing experiments</h3>${r.revenue.experiments.length ? `<ul>${r.revenue.experiments.map((e) => `<li>${h(e.planId)} (${h(e.productId)}): ${h(e.status)}; posted ${e.posted}/${e.days}; orders ${e.orders}; visits ${e.visits === null ? "unknown" : e.visits}; <b>${h(e.conclusion)}</b></li>`).join("")}</ul>` : "<p>No experiment yet.</p>"}
+<p>Content waiting for your approval: ${r.revenue.awaitingApproval}. Today: ${r.revenue.plannedToday.map((t) => `day ${t.day} ${h(t.channel)} (${t.posted ? "posted" : t.approved ? "approved, not posted" : "needs approval"})`).join(", ") || "nothing planned"}.</p>` : "<p>Unknown (could not be read).</p>"}
 <h2>Verified orders</h2>${r.orders.length ? `<ul>${r.orders.map((t) => `<li>${h(t.currency)}: ${t.orders} order(s) (${t.verified} with an evidence file): gross ${pounds(t.grossPence)}, refunds ${pounds(t.refundsPence)}, fees ${pounds(t.feesPence)}${t.ordersWithoutFees ? ` (fees not recorded for ${t.ordersWithoutFees})` : ""}, <b>net ${pounds(t.netPence)}</b>; attributed to campaigns ${t.orders - t.unattributed}</li>`).join("")}</ul>` : "<p>No orders recorded: sales and revenue are unknown, not zero. Estimates are never shown as sales.</p>"}
 <h2>Products</h2><table><tr><th>Product</th><th>Version</th><th>Status</th><th>Price</th><th>Sign-off</th><th>Live URL</th></tr>
 ${r.products.map((p) => `<tr><td>${h(p.id)} ${h(p.name)}</td><td>${p.version}</td><td>${h(p.supersededBy ? `superseded by ${p.supersededBy}` : p.status)}</td><td>${h(p.price)}</td><td>${h(p.signOff)}</td><td>${h(p.liveUrl ?? "not live")}</td></tr>`).join("")}</table>

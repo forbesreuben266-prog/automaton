@@ -61,6 +61,12 @@ export class Store {
   /** Verified orders recorded by the owner (see sales.ts): no customer details, only order references and amounts. */
   orders<T = import("./sales.js").Order>(): T[] { return readJson<T[]>(path.join(this.dir, "sales.json"), []); }
   saveOrders(o: readonly unknown[]): void { writeJson(path.join(this.dir, "sales.json"), o); }
+  /** Audience plans and 14-day experiments (see audience.ts). */
+  audiencePlans<T = import("./audience.js").AudiencePlan>(): T[] { return readJson<T[]>(path.join(this.dir, "audience.json"), []); }
+  saveAudiencePlans(p: readonly unknown[]): void { writeJson(path.join(this.dir, "audience.json"), p); }
+  /** Owner-verified marketing measurements and costs (see revenue.ts). */
+  marketing<T = import("./revenue.js").MarketingLedger>(): T { return readJson<T>(path.join(this.dir, "marketing.json"), { metrics: [], costs: [] } as unknown as T); }
+  saveMarketing(m: unknown): void { writeJson(path.join(this.dir, "marketing.json"), m); }
   state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
   saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {

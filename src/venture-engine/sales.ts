@@ -24,6 +24,9 @@ export interface Order {
   readonly grossPence: number; readonly feesPence: number | null;
   readonly refunds: readonly { readonly at: string; readonly date: string; readonly pence: number; readonly source: string }[];
   readonly campaignId: string | null; readonly postId: string | null;
+  /** Optional attribution to an audience plan and channel (revenue.ts); absent on earlier records. */
+  readonly planId?: string | null; readonly channel?: string | null;
+  readonly brand?: string;
   readonly source: string; readonly verification: "evidence-file" | "owner-reported";
   readonly evidence: { readonly name: string; readonly bytes: number; readonly sha256: string } | null;
   readonly recordedAt: string;
@@ -51,7 +54,8 @@ function evidenceOf(file: string): Order["evidence"] {
   } finally { fs.closeSync(fd); }
 }
 
-export function recordOrder(store: Store, productId: string, r: { orderRef: string; date: string; gross: string; fees?: string; campaignId?: string; postId?: string; source: string; evidenceFile?: string }, now: Date): Order {
+export const ORDER_CHANNELS = ["linkedin", "facebook", "instagram", "tiktok", "youtube-shorts", "pinterest", "email", "direct", "other"] as const;
+export function recordOrder(store: Store, productId: string, r: { orderRef: string; date: string; gross: string; fees?: string; campaignId?: string; postId?: string; planId?: string; channel?: string; source: string; evidenceFile?: string }, now: Date): Order {
   const p = store.products().find((x) => x.id === productId) as Product | undefined;
   if (!p) throw new Error(`no product ${productId}`);
   if (p.status !== "live" || !p.live) throw new Error(`${productId} is ${p.status}: sales can be recorded only for a live product (product mark-live)`);
@@ -78,8 +82,18 @@ export function recordOrder(store: Store, productId: string, r: { orderRef: stri
       postId = post.id;
     }
   }
+  if (r.channel !== undefined && !(ORDER_CHANNELS as readonly string[]).includes(r.channel)) throw new Error(`--channel: one of ${ORDER_CHANNELS.join(", ")}`);
+  let planId: string | null = null;
+  if (r.planId !== undefined) {
+    const pl = store.audiencePlans().find((x) => x.id === r.planId);
+    if (!pl || pl.productId !== productId) throw new Error(`--plan: ${r.planId} is not an audience plan for ${productId}`);
+    if (r.date < pl.start) throw new Error(`--plan: the order is dated before plan ${pl.id} started (${pl.start})`);
+    if (r.channel && !pl.channels.includes(r.channel as never)) throw new Error(`--channel: ${r.channel} is not a channel of plan ${pl.id}`);
+    planId = pl.id;
+  }
+  const channel = r.channel ?? (postId ? store.campaigns().find((c) => c.id === campaignId)!.posts.find((x) => x.id === postId)!.platform : null);
   const evidence = r.evidenceFile !== undefined ? evidenceOf(r.evidenceFile) : null;
-  const o: Order = { id: newId("ord"), productId, orderRef: r.orderRef, date: r.date, currency: p.currency, grossPence, feesPence, refunds: [], campaignId, postId,
+  const o: Order = { id: newId("ord"), productId, orderRef: r.orderRef, date: r.date, currency: p.currency, grossPence, feesPence, refunds: [], campaignId, postId, planId, channel, brand: "avenor-studio",
     source: source.slice(0, 200), verification: evidence ? "evidence-file" : "owner-reported", evidence, recordedAt: now.toISOString() };
   store.saveOrders([...orders, o]);
   store.audit({ kind: "sale-recorded", order: o.id, product: productId, orderRef: o.orderRef, grossPence, feesPence, campaign: campaignId, post: postId, verification: o.verification, evidenceSha256: evidence?.sha256 ?? null }, now);
@@ -122,7 +136,7 @@ export function salesReport(store: Store, productId?: string): string {
   return `verified sales (owner-recorded orders only; no estimates)\n${lines.join("\n")}\n${orders.map((o) => `  ${o.id} ${o.date} ${o.productId} ${o.orderRef} gross ${pounds(o.grossPence)}${o.refunds.length ? ` refunded ${pounds(refunded(o))}` : ""}${o.feesPence !== null ? ` fees ${pounds(o.feesPence)}` : ""}${o.campaignId ? ` via ${o.campaignId}${o.postId ? `/${o.postId}` : ""}` : ""} [${o.verification}]`).join("\n")}\n`;
 }
 
-export const SALES_USAGE = "sales record <product> --order <ref> --date YYYY-MM-DD --gross X [--fees X] [--campaign <cmp> [--post <pst>]] --source <text> [--evidence <file>] | sales refund <order> --amount X --date YYYY-MM-DD --source <text> | sales report [product]";
+export const SALES_USAGE = "sales record <product> --order <ref> --date YYYY-MM-DD --gross X [--fees X] [--campaign <cmp> [--post <pst>]] [--plan <pln>] [--channel <c>] --source <text> [--evidence <file>] | sales refund <order> --amount X --date YYYY-MM-DD --source <text> | sales report [product]";
 
 const flags = (args: readonly string[], allowed: readonly string[]) => {
   const f: Record<string, string> = {};
@@ -134,9 +148,9 @@ export async function salesCli(args: readonly string[], ctx: { store: Store; out
   const [sub, a, ...rest] = args;
   const { store, out } = ctx;
   if (sub === "record") {
-    const f = flags(rest, ["--order", "--date", "--gross", "--fees", "--campaign", "--post", "--source", "--evidence"]);
+    const f = flags(rest, ["--order", "--date", "--gross", "--fees", "--campaign", "--post", "--plan", "--channel", "--source", "--evidence"]);
     for (const k of ["--order", "--date", "--gross", "--source"]) if (f[k] === undefined) throw new Error(`sales record: ${k} is required`);
-    const o = await withLock(store.dir, async () => recordOrder(store, String(a), { orderRef: f["--order"], date: f["--date"], gross: f["--gross"], fees: f["--fees"], campaignId: f["--campaign"], postId: f["--post"], source: f["--source"], evidenceFile: f["--evidence"] }, ctx.now()));
+    const o = await withLock(store.dir, async () => recordOrder(store, String(a), { orderRef: f["--order"], date: f["--date"], gross: f["--gross"], fees: f["--fees"], campaignId: f["--campaign"], postId: f["--post"], planId: f["--plan"], channel: f["--channel"], source: f["--source"], evidenceFile: f["--evidence"] }, ctx.now()));
     out(`recorded ${o.id}: order ${o.orderRef}, ${o.currency} ${pounds(o.grossPence)} gross${o.feesPence !== null ? `, fees ${pounds(o.feesPence)}` : ", fees not recorded"} (${o.verification})\n`);
     return 0;
   }
