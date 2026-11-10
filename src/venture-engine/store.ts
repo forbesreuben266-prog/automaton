@@ -49,6 +49,9 @@ export class Store {
   /** Daily operations notes (see operations.ts): owner-recorded outside blockers, used for reporting only. */
   operations(): { blockers?: import("./operations.js").Blocker[] } { return readJson(path.join(this.dir, "operations.json"), {}); }
   saveOperations(o: { blockers?: readonly unknown[] }): void { writeJson(path.join(this.dir, "operations.json"), o); }
+  /** Product factory runs (see factory.ts): one record per run, with its concept, product and status. */
+  factoryRuns<T = import("./factory.js").FactoryRun>(): T[] { return readJson<T[]>(path.join(this.dir, "factory.json"), []); }
+  saveFactoryRuns(r: readonly unknown[]): void { writeJson(path.join(this.dir, "factory.json"), r); }
   state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
   saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {

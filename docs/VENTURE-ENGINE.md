@@ -451,3 +451,31 @@ published only after `campaign published`.
 - Never: publishing, scheduling, sending, buying, approving, changing prices,
   copy or records, network or model calls. It uses the same run lock as the
   engine, so runs never overlap.
+
+## Product factory (offline; owner review required)
+
+    ve factory run --offline    # one bounded run: score concepts, build the best eligible product, write the review package
+    ve factory list | ve factory show <run>
+
+One run per UK day (a rerun shows that day's run), one product per run, refused
+while STOP is set. Concepts come from a hand-written catalogue of business
+toolkits (`blueprints/toolkit.ts`: client onboarding, proposals and quotes,
+project tracking); each builds real Markdown and CSV files through the normal
+product QA. Concepts already made, or too similar to an existing product, are
+excluded; when the catalogue is exhausted the run reports `no-eligible-concept`.
+
+Scores are transparent: usefulness, simplicity and monetisation are stated
+assumptions; demand evidence is `unverified` (0) and competition `unknown`
+offline. Without `--offline` the factory refuses: AI-powered generation is not
+available in this version, and nothing is generated in its place.
+
+Each run writes `~/.automaton-ventures/factory/<run>/`: `review-package.md`
+(concept, score, file manifest, QA results, price rationale, risks, owner
+checklist), `listing.md` (Payhip draft), `marketing-drafts.md` (Facebook,
+LinkedIn, Instagram; link placeholder only) and `summary.json`. The product
+itself is a normal product record (status `ready` or `needs-work`, no sign-off)
+under a new venture with status `factory-draft`, which engine cycles leave
+alone. Nothing is approved, listed, published, scheduled, sent or bought: the
+owner continues with `product sign-off`, `product request-launch`, `approve`,
+`product mark-live` and `campaign create`. The daily report lists factory runs,
+drafts awaiting review and failed validations.

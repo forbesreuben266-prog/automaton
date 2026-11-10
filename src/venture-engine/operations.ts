@@ -46,6 +46,8 @@ export interface DailyReport {
   readonly campaigns: readonly { readonly id: string; readonly productId: string; readonly url: string; readonly posts: readonly { readonly id: string; readonly platform: string; readonly date: string; readonly status: string; readonly state: string }[] }[];
   /** Owner-recorded results only. null = nothing recorded (unknown), never zero. */
   readonly sales: readonly { readonly productId: string; readonly periods: number; readonly verifiedPeriods: number; readonly lastPeriodEnd: string | null; readonly visits: number | null; readonly signups: number | null; readonly sales: number | null; readonly revenue: number | null; readonly currency: string }[];
+  /** Product factory runs (factory.ts). */
+  readonly factory: readonly { readonly id: string; readonly date: string; readonly status: string; readonly concept: string | null; readonly productId: string | null; readonly productStatus: string | null }[];
   readonly engagement: readonly { readonly campaignId: string; readonly postsWithResults: number; readonly impressions: number | null; readonly clicks: number | null }[];
   readonly actions: readonly Item[]; readonly blocked: readonly Item[]; readonly approvals: readonly Item[]; readonly problems: readonly Item[];
   readonly checked: readonly string[]; readonly completed: readonly string[]; readonly errors: readonly string[]; readonly limitations: readonly string[];
@@ -127,6 +129,14 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   }), []);
   if (!sales.some((s) => s.periods)) limitations.push("No sales, revenue or visits have been recorded: they are unknown, not zero.");
 
+  const factory = section("product factory runs", () => store.factoryRuns().map((r) => {
+    const p = r.productId ? allProducts.find((x) => x.id === r.productId) : undefined;
+    if (r.date === today) actions.push({ priority: 2, ref: r.id, text: `new factory run (${r.status}${r.concept ? `: ${r.concept}` : ""}): read its review package`, command: `factory show ${r.id}` });
+    if (r.status === "failed-validation") problems.push({ priority: 2, ref: r.id, text: `factory product ${r.productId} failed validation: ${r.failedChecks.join(", ")}`, command: `product check ${r.productId}` });
+    if (r.productId && !p) problems.push({ priority: 2, ref: r.id, text: `its product ${r.productId} is missing from products.json` });
+    return { id: r.id, date: r.date, status: r.status, concept: r.concept, productId: r.productId, productStatus: p ? (p.status === "ready" && p.signOff ? "ready, signed off" : p.status === "ready" ? "ready, awaiting your review and sign-off" : p.status) : null };
+  }), []);
+
   const engagement: { campaignId: string; postsWithResults: number; impressions: number | null; clicks: number | null }[] = [];
   const campaigns = section("campaigns and posts", () => store.campaigns().map((c: Campaign) => {
     const prod = allProducts.find((p) => p.id === c.productId);
@@ -165,7 +175,7 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   for (const b of blocks.filter((x) => x.scope === "payhip")) blocked.push({ priority: 1, ref: "payhip", text: `Payhip: ${b.reason}` });
 
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
-  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, engagement,
+  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };
 }
 
@@ -186,6 +196,8 @@ export function renderReport(r: DailyReport): string {
     r.products.length ? ["| Product | Version | Status | Price | Sign-off | Files intact | Live URL |", "|---|---|---|---|---|---|---|", ...r.products.map((p) => `| ${p.id} ${p.name} | ${p.version} | ${p.supersededBy ? `superseded by ${p.supersededBy}` : p.status} | ${p.price} | ${p.signOff} | ${p.filesIntact === null ? "-" : p.filesIntact ? "yes" : "NO"} | ${p.liveUrl ?? "not live"} |`)].join("\n") : "- no products recorded", "",
     "## Campaigns", "",
     r.campaigns.length ? r.campaigns.map((c) => [`**${c.id}** for ${c.productId}, link ${c.url}`, "", "| Date | Platform | Post | State |", "|---|---|---|---|", ...c.posts.map((p) => `| ${p.date} | ${p.platform} | ${p.id} | ${p.state} |`)].join("\n")).join("\n\n") : "- no campaigns recorded", "",
+    "## Product factory", "",
+    r.factory.length ? r.factory.map((x) => `- ${x.id} (${x.date}): ${x.status}${x.concept ? `, ${x.concept}` : ""}${x.productId ? `, product ${x.productId}: ${x.productStatus ?? "missing"}` : ""}`).join("\n") : "- no factory runs", "",
     "## Verified sales and engagement (owner-recorded only)", "",
     r.sales.length ? r.sales.map((s) => `- ${s.productId}: ${s.periods} period(s) recorded (${s.verifiedPeriods} with an evidence file), latest ending ${s.lastPeriodEnd ?? "-"}; visits ${n(s.visits)}, signups ${n(s.signups)}, sales ${n(s.sales)}, revenue ${s.revenue === null ? "not recorded" : `${s.currency} ${s.revenue}`}`).join("\n") : "- Sales and revenue: not recorded (no live product with recorded results)",
     ...r.engagement.map((e) => `- ${e.campaignId}: ${e.postsWithResults} post(s) with results; impressions ${n(e.impressions)}, clicks ${n(e.clicks)}`), "",

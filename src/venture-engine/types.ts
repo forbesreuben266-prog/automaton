@@ -9,7 +9,7 @@
 
 import type { ModelUse } from "./model.js";
 
-export type VentureStatus = "draft" | "built" | "awaiting-launch-approval" | "launched" | "archived" | "awaiting-shutdown-approval" | "shut-down";
+export type VentureStatus = "draft" | "built" | "factory-draft" | "awaiting-launch-approval" | "launched" | "archived" | "awaiting-shutdown-approval" | "shut-down";
 export type DecisionKind = "SCALE" | "IMPROVE" | "HOLD" | "KILL";
 export type EvidenceKind = "simulated" | "actual";
 

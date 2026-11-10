@@ -23,13 +23,14 @@ import path from "node:path";
 import { type Blueprint, type BlueprintInput, CURRENCIES, type Currency, DISCLAIMER, esc, money, type ProductFile, type Section } from "./blueprints/common.js";
 import { freelanceInvoicing } from "./blueprints/freelance-invoicing.js";
 import { generic } from "./blueprints/generic.js";
+import { toolkit } from "./blueprints/toolkit.js";
 import { withLock } from "./control.js";
 import { recordActual } from "./engine.js";
 import { concreteBullets, PLACEHOLDERS } from "./evaluate.js";
 import { newId, sha256, Store } from "./store.js";
 import type { ApprovalRequest, Asset, Check, Venture } from "./types.js";
 
-export const BLUEPRINTS: readonly Blueprint[] = [freelanceInvoicing, generic];
+export const BLUEPRINTS: readonly Blueprint[] = [toolkit, freelanceInvoicing, generic];
 
 export type ProductStatus = "ready" | "needs-work" | "archived" | "live";
 export interface ValidationRecord {
@@ -450,7 +451,7 @@ export function requestLaunch(store: Store, id: string, now: Date): ApprovalRequ
   if (open) return open;
   const ventures = store.ventures();
   const v = ventures.find((x) => x.id === p.ventureId)!;
-  if (!["built", "archived", "awaiting-launch-approval"].includes(v.status)) throw new Error(`venture ${v.id} is ${v.status}`);
+  if (!["built", "factory-draft", "archived", "awaiting-launch-approval"].includes(v.status)) throw new Error(`venture ${v.id} is ${v.status}`);
   const req: ApprovalRequest = { id: newId("apr"), ventureId: p.ventureId, action: "launch-public", status: "pending", createdAt: now.toISOString(), decidedAt: null,
     summary: `Launch publicly: product ${p.id} (${p.name}, version ${p.version}) for venture ${v.id}. Proposed price ${p.currency} ${p.price} (hypothesis). Read qa-report.md first (${p.review.length} passage(s) on legal, tax or financial topics). Approving does not publish anything: you host the page, connect your own form and payment link, then run 'product mark-live ${p.id} --url <https://...>'.` };
   store.saveApprovals([...approvals, req]);
