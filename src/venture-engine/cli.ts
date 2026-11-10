@@ -20,6 +20,9 @@
  *   stop [reason] | resume       the STOP switch: no cycle runs while it is set (a running run ends after its cycle)
  *   status | show <venture> | approvals | approve <id> | deny <id>
  *   record <venture> --source "<where from>" [--visitors N] [--signups N] [--sales N] [--revenue X] [--cost X]
+ *   operations daily [--json]    offline daily report (operations.ts): checks records, lists actions, blockers and approvals,
+ *                                saves reports/daily-YYYY-MM-DD.md/.json; publishes, sends, approves and spends nothing
+ *   operations block|unblock|blockers|unit   owner-recorded outside blockers; systemd templates (installs nothing)
  *   dashboard | config | schedule-unit (prints a systemd user timer for the owner to review and install; installs nothing)
  * Configuration: ~/.automaton-ventures/config.json (created with safe defaults: no model, schedule disabled).
  */
@@ -37,13 +40,14 @@ import { loopbackUrl, ollamaModel, type FetchFn, type ModelClient } from "./mode
 import { changedFiles, confirmationCode, PRODUCT_USAGE, productCli, signOff, signOffItems } from "./products.js";
 import { CAMPAIGN_USAGE, campaignCli } from "./campaign.js";
 import { generateMarketing } from "./marketing.js";
+import { OPERATIONS_USAGE, operationsCli } from "./operations.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
 export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
-const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | " + CAMPAIGN_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
+const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | " + CAMPAIGN_USAGE + " | " + OPERATIONS_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
 export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch;
   /** Whether a person is at an interactive terminal (default: stdin and stdout are TTYs). Sign-off requires it. */
@@ -130,6 +134,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       d.out(`${p.id} (version ${p.version}) created from your edits in ${p.previous}; ${p.previous} is unchanged. Adopted files are kept in later repairs: ${(p.customised ?? []).join(", ")}.\n`);
       return 0;
     }
+    if (cmd === "operations") return await operationsCli(rest, { store, cfg, out: d.out, now });
     if (cmd === "campaign") return await campaignCli(rest, { store, out: d.out, now, interactive: d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true) });
     if (cmd === "product" && rest[0] === "marketing") {
       if (rest.length !== 2) throw new Error("product marketing <product>");

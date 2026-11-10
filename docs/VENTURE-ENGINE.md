@@ -424,3 +424,30 @@ approval. It would never scrape or automate a browser.
 - **Your approval:** you'd approve enabling it (a config flag, off by default),
   each account connection, and each publishing run, from an interactive
   terminal. That would add `external-account-action` approvals.
+
+## Daily operations (offline report; nothing external)
+
+    ve operations daily [--json]       # check everything, write today's report, print it
+    ve operations block facebook --reason "Facebook account verification pending"
+    ve operations unblock facebook | ve operations blockers
+    ve operations unit                 # systemd user service + timer templates (08:00 Europe/London); installs nothing
+
+`operations daily` reads ventures, products, campaigns, approvals and the
+results you recorded, and lists: recommended actions, blocked activity (outside
+blockers you recorded with `operations block`), items that need your approval,
+and problems or missing information (changed product files, a campaign whose
+product is missing, a campaign link that differs from the live URL, approvals
+that no longer match the post text). Sales, revenue and engagement come only
+from `product record` and `campaign record`; anything not recorded is reported
+as unknown, never as zero. A post scheduled in Meta Business Suite counts as
+published only after `campaign published`.
+
+- Reports: `~/.automaton-ventures/reports/daily-YYYY-MM-DD.md` and `.json`
+  (mode 600; the date is the UK date, GMT or BST). A rerun on the same day
+  replaces that day's report; every run is in `audit.jsonl`.
+- Maintenance allowlist: regenerating `dashboard.html`. Skipped while STOP is set.
+- Exit code 0 = ok; 1 = partial (a record could not be read; the rest is still
+  reported) or failed (no report written); journalctl shows the reason.
+- Never: publishing, scheduling, sending, buying, approving, changing prices,
+  copy or records, network or model calls. It uses the same run lock as the
+  engine, so runs never overlap.
