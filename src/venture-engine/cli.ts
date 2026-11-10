@@ -44,6 +44,7 @@ import { CAMPAIGN_USAGE, campaignCli } from "./campaign.js";
 import { generateMarketing } from "./marketing.js";
 import { OPERATIONS_USAGE, operationsCli } from "./operations.js";
 import { FACTORY_USAGE, factoryCli } from "./factory.js";
+import { loadStoredConcepts } from "./blueprints/toolkit.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
@@ -105,6 +106,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
   try {
     const store = new Store(dataDir(d.home));
     const cfg = loadConfig(store);
+    loadStoredConcepts(store.aiConcepts()); // AI-made toolkits, so product commands can rebuild them
     const opts = (extra: Partial<EngineOptions> = {}, paid = false): EngineOptions => ({ store, kinds: KINDS, now, limits: cfg.limits, model: modelFor(cfg, d, store, paid, now), maxModelCallsPerCycle: cfg.model.maxCallsPerCycle, paidApproved: paid && cfg.model.paidUsageApproved === true, ...extra });
     const print = (rs: Awaited<ReturnType<typeof runEngine>>) => {
       for (const r of rs) {
@@ -137,7 +139,7 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       d.out(`${p.id} (version ${p.version}) created from your edits in ${p.previous}; ${p.previous} is unchanged. Adopted files are kept in later repairs: ${(p.customised ?? []).join(", ")}.\n`);
       return 0;
     }
-    if (cmd === "factory") return await factoryCli(rest, { store, cfg, out: d.out, now });
+    if (cmd === "factory") return await factoryCli(rest, { store, cfg, out: d.out, now, model: (paid) => modelFor(cfg, d, store, paid, now) });
     if (cmd === "operations") return await operationsCli(rest, { store, cfg, out: d.out, now });
     if (cmd === "campaign") return await campaignCli(rest, { store, out: d.out, now, interactive: d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true) });
     if (cmd === "product" && rest[0] === "marketing") {

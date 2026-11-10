@@ -21,6 +21,7 @@ import { stopReason, withLock, type EngineConfig } from "./control.js";
 import { renderDashboard } from "./dashboard.js";
 import { changedFiles, realTotals, reviewHash, type Product } from "./products.js";
 import { ensurePrivateDir, type Store } from "./store.js";
+import { aiReadiness, type Readiness } from "./ai-factory.js";
 
 export const TIMEZONE = "Europe/London";
 const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" });
@@ -47,7 +48,9 @@ export interface DailyReport {
   /** Owner-recorded results only. null = nothing recorded (unknown), never zero. */
   readonly sales: readonly { readonly productId: string; readonly periods: number; readonly verifiedPeriods: number; readonly lastPeriodEnd: string | null; readonly visits: number | null; readonly signups: number | null; readonly sales: number | null; readonly revenue: number | null; readonly currency: string }[];
   /** Product factory runs (factory.ts). */
-  readonly factory: readonly { readonly id: string; readonly date: string; readonly status: string; readonly concept: string | null; readonly productId: string | null; readonly productStatus: string | null }[];
+  readonly factory: readonly { readonly id: string; readonly date: string; readonly mode: string; readonly status: string; readonly concept: string | null; readonly productId: string | null; readonly productStatus: string | null }[];
+  /** AI provider readiness from local checks only (no network, no tokens). */
+  readonly aiProvider: Readiness | null;
   readonly engagement: readonly { readonly campaignId: string; readonly postsWithResults: number; readonly impressions: number | null; readonly clicks: number | null }[];
   readonly actions: readonly Item[]; readonly blocked: readonly Item[]; readonly approvals: readonly Item[]; readonly problems: readonly Item[];
   readonly checked: readonly string[]; readonly completed: readonly string[]; readonly errors: readonly string[]; readonly limitations: readonly string[];
@@ -131,11 +134,14 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
 
   const factory = section("product factory runs", () => store.factoryRuns().map((r) => {
     const p = r.productId ? allProducts.find((x) => x.id === r.productId) : undefined;
-    if (r.date === today) actions.push({ priority: 2, ref: r.id, text: `new factory run (${r.status}${r.concept ? `: ${r.concept}` : ""}): read its review package`, command: `factory show ${r.id}` });
-    if (r.status === "failed-validation") problems.push({ priority: 2, ref: r.id, text: `factory product ${r.productId} failed validation: ${r.failedChecks.join(", ")}`, command: `product check ${r.productId}` });
+    const mode = r.mode ?? "offline-template";
+    if (r.date === today) actions.push({ priority: 2, ref: r.id, text: `new factory run (${mode}, ${r.status}${r.concept ? `: ${r.concept}` : ""}): read its review package${mode === "mock-demo" ? " (MOCK DEMONSTRATION, not real AI)" : ""}`, command: `factory show ${r.id}` });
+    if (r.status === "failed-validation" || r.status === "needs-repair") problems.push({ priority: 2, ref: r.id, text: `factory product ${r.productId} needs repair: failed ${r.failedChecks.join(", ")}`, command: `factory show ${r.id}` });
+    if (r.status === "ai-failed" && r.date === today) problems.push({ priority: 2, ref: r.id, text: `AI factory run failed: ${(r.reason ?? "").slice(0, 200)}`, command: `factory show ${r.id}` });
     if (r.productId && !p) problems.push({ priority: 2, ref: r.id, text: `its product ${r.productId} is missing from products.json` });
-    return { id: r.id, date: r.date, status: r.status, concept: r.concept, productId: r.productId, productStatus: p ? (p.status === "ready" && p.signOff ? "ready, signed off" : p.status === "ready" ? "ready, awaiting your review and sign-off" : p.status) : null };
-  }), []);
+    return { id: r.id, date: r.date, mode, status: r.status, concept: r.concept, productId: r.productId, productStatus: p ? (p.status === "ready" && p.signOff ? "ready, signed off" : p.status === "ready" ? "ready, awaiting your review and sign-off" : p.status) : null };
+  }).slice(-10), []);
+  const aiProvider = section("AI provider readiness (local checks only)", () => aiReadiness(store, cfg, now), null);
 
   const engagement: { campaignId: string; postsWithResults: number; impressions: number | null; clicks: number | null }[] = [];
   const campaigns = section("campaigns and posts", () => store.campaigns().map((c: Campaign) => {
@@ -175,7 +181,7 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   for (const b of blocks.filter((x) => x.scope === "payhip")) blocked.push({ priority: 1, ref: "payhip", text: `Payhip: ${b.reason}` });
 
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
-  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, engagement,
+  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };
 }
 
@@ -197,7 +203,8 @@ export function renderReport(r: DailyReport): string {
     "## Campaigns", "",
     r.campaigns.length ? r.campaigns.map((c) => [`**${c.id}** for ${c.productId}, link ${c.url}`, "", "| Date | Platform | Post | State |", "|---|---|---|---|", ...c.posts.map((p) => `| ${p.date} | ${p.platform} | ${p.id} | ${p.state} |`)].join("\n")).join("\n\n") : "- no campaigns recorded", "",
     "## Product factory", "",
-    r.factory.length ? r.factory.map((x) => `- ${x.id} (${x.date}): ${x.status}${x.concept ? `, ${x.concept}` : ""}${x.productId ? `, product ${x.productId}: ${x.productStatus ?? "missing"}` : ""}`).join("\n") : "- no factory runs", "",
+    `- AI provider: ${r.aiProvider ? `${r.aiProvider.provider}, ${r.aiProvider.ready ? "ready" : "not ready"} (${r.aiProvider.reasons.join("; ")})` : "unknown"}. Unattended AI generation is not enabled.`,
+    r.factory.length ? r.factory.map((x) => `- ${x.id} (${x.date}, ${x.mode}): ${x.status}${x.concept ? `, ${x.concept}` : ""}${x.productId ? `, product ${x.productId}: ${x.productStatus ?? "missing"}` : ""}`).join("\n") : "- no factory runs", "",
     "## Verified sales and engagement (owner-recorded only)", "",
     r.sales.length ? r.sales.map((s) => `- ${s.productId}: ${s.periods} period(s) recorded (${s.verifiedPeriods} with an evidence file), latest ending ${s.lastPeriodEnd ?? "-"}; visits ${n(s.visits)}, signups ${n(s.signups)}, sales ${n(s.sales)}, revenue ${s.revenue === null ? "not recorded" : `${s.currency} ${s.revenue}`}`).join("\n") : "- Sales and revenue: not recorded (no live product with recorded results)",
     ...r.engagement.map((e) => `- ${e.campaignId}: ${e.postsWithResults} post(s) with results; impressions ${n(e.impressions)}, clicks ${n(e.clicks)}`), "",

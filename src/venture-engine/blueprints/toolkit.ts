@@ -25,6 +25,8 @@ export interface Concept {
   readonly priceRationale: string;
   readonly setup: readonly string[];
   readonly files: readonly ProductFile[];
+  /** Set for factory-made concepts (AI or mock): where the content came from, for labelling and review. */
+  readonly origin?: { readonly mode: "ai" | "mock-demo"; readonly model: string; readonly run: string; readonly idea: string; readonly imageBrief: string; readonly differentiation: string; readonly risks: readonly string[]; readonly assumptions: readonly string[] };
 }
 
 const start = (c: Omit<Concept, "files"> & { files: readonly ProductFile[] }): ProductFile => ({
@@ -36,7 +38,7 @@ ${c.offer}
 
 | File | What it is | Open it with |
 |---|---|---|
-${c.files.map((f) => `| \`${f.name}\` | ${f.description} | ${f.name.endsWith(".csv") ? "Excel, Google Sheets, Numbers or LibreOffice" : "Any text editor or word processor"} |`).join("\n")}
+${c.files.map((f) => `| \`${f.name}\` | ${f.description} | ${f.name.endsWith(".csv") ? "Excel, Google Sheets, Numbers or LibreOffice" : f.name.endsWith(".html") ? "Any web browser (works offline; print or save as PDF)" : "Any text editor or word processor"} |`).join("\n")}
 
 ## Setup
 
@@ -367,8 +369,12 @@ Prepared by [[Your business name]] on [[date]]. Valid until [[valid-until date]]
   }),
 ];
 
-/** Extra concepts registered at run time (tests only; the CLI uses CONCEPTS). */
+/** Concepts registered at run time: AI-made concepts loaded from the store (ai-concepts.json), and test concepts. */
 export const EXTRA_CONCEPTS: Concept[] = [];
+/** Makes the store's AI-made concepts available to the blueprint (so builds, reviews and repairs regenerate the same files). */
+export function loadStoredConcepts(stored: readonly Concept[]): void {
+  for (const c of stored) if (!CONCEPTS.some((x) => x.id === c.id) && !EXTRA_CONCEPTS.some((x) => x.id === c.id)) EXTRA_CONCEPTS.push(c);
+}
 export const conceptFor = (o: Pick<Opportunity, "source">): Concept | undefined => [...CONCEPTS, ...EXTRA_CONCEPTS].find((c) => o.source === `factory:${c.id}`);
 
 export const toolkit: Blueprint = {

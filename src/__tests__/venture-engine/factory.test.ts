@@ -59,10 +59,10 @@ describe("factory run --offline: the complete pipeline", () => {
     expect(p.checks.every((c) => c.passed)).toBe(true);
     expect(p.deliverables).toEqual(["start-here.md", "onboarding-checklist.md", "client-intake-questionnaire.md", "welcome-pack.md", "kickoff-call-agenda.md", "onboarding-tracker.csv", "access-checklist.csv"]);
     expect(store.ventures().find((v) => v.id === run.ventureId)?.status).toBe("factory-draft");
-    expect(run.files.map((f) => f.name)).toEqual(["listing.md", "marketing-drafts.md", "review-package.md", "summary.json"]);
+    expect(run.files.map((f) => f.name)).toEqual(["client-onboarding-kit.zip", "listing.md", "marketing-drafts.md", "image-brief.md", "zip-manifest.json", "review-package.md", "summary.json"]);
     for (const f of run.files) expect(fs.statSync(path.join(run.dir, f.name)).mode & 0o777).toBe(0o600);
     const review = pkg(run.dir, "review-package.md");
-    expect(review).toMatch(/READY FOR YOUR REVIEW[\s\S]*## Concept and customer[\s\S]*## Opportunity score: 0\.56[\s\S]*demandEvidence \| 0 \| 0\.25 \| unverified[\s\S]*## Files[\s\S]*onboarding-tracker\.csv[\s\S]*## Automated quality checks[\s\S]*complete-content \| pass[\s\S]*## Price\n\nGBP 9\. GBP 9: below the live GBP 12[\s\S]*## Risks, assumptions and missing information[\s\S]*## Owner approval checklist/);
+    expect(review).toMatch(/READY FOR YOUR REVIEW[\s\S]*## Concept and customer[\s\S]*## Opportunity score: 0\.56[\s\S]*demandEvidence \| 0 \| 0\.25 \| unknown \| unverified[\s\S]*## Files[\s\S]*onboarding-tracker\.csv[\s\S]*## Automated quality checks[\s\S]*complete-content \| pass[\s\S]*## Price\n\nGBP 9\. GBP 9: below the live GBP 12[\s\S]*## Risks, assumptions and missing information[\s\S]*## Owner approval checklist/);
     expect(pkg(run.dir, "listing.md")).toMatch(/no Payhip listing was created or changed[\s\S]*\*\*Title:\*\* Client onboarding kit[\s\S]*\*\*Price:\*\* GBP 9/);
     const md = pkg(run.dir, "marketing-drafts.md");
     expect(md.match(/^## (Facebook|LinkedIn|Instagram) \(\d+ of \d+ characters\)/gm)).toHaveLength(3);
@@ -93,11 +93,9 @@ describe("factory run --offline: the complete pipeline", () => {
 
 describe("factory: refusals, limits and idempotency", () => {
   it("without --offline it refuses (no model configured, or AI generation unavailable) and generates nothing", async () => {
-    expect(() => runFactory(store, DEFAULT_CONFIG, NOW, { offline: false })).toThrow(/no AI model is configured[\s\S]*Nothing was generated/);
-    const ollama: EngineConfig = { ...DEFAULT_CONFIG, model: { ...DEFAULT_CONFIG.model, provider: "ollama" } };
-    expect(() => runFactory(store, ollama, NOW, { offline: false })).toThrow(/not available in this version \(configured provider: ollama\); no model was called/);
+    expect(() => runFactory(store, DEFAULT_CONFIG, NOW, { offline: false })).toThrow(/use 'factory run --offline'.*nothing was generated/);
     expect(await cli("factory", "run")).toBe(1);
-    expect(await cli("factory", "run", "--paid")).toBe(1); expect(out).toMatch(/unknown option --paid/);
+    expect(await cli("factory", "run", "--paid")).toBe(1); expect(out).toMatch(/factory run --offline \| factory run --ai/);
     expect(store.products()).toEqual([]); expect(store.factoryRuns()).toEqual([]);
   });
 
@@ -129,16 +127,15 @@ describe("factory: refusals, limits and idempotency", () => {
     expect(scoreConcepts(store, [copy])[0]).toMatchObject({ eligible: false, excluded: expect.stringMatching(/too similar to an existing product/) });
   });
 
-  it("failed quality checks: the run is failed-validation, no listing or marketing is written, and the CLI exits 1", async () => {
+  it("failed quality checks: the run needs repair (never review-ready), its package says so, and the CLI exits 1", async () => {
     const thin = concept({ ...CONCEPTS[0], id: "thin-kit", name: "Thin kit", problem: "a deliberately unfinished test product", ratings: { usefulness: 1, simplicity: 1, monetisation: 1 },
       files: [{ name: "notes.md", template: false, description: "Notes", text: "# Notes\n\n- TODO write this\n" }] });
     EXTRA_CONCEPTS.push(thin);
     expect(await cli("factory", "run", "--offline")).toBe(1);
     const run = store.factoryRuns()[0];
-    expect(run).toMatchObject({ status: "failed-validation", concept: "thin-kit" });
+    expect(run).toMatchObject({ status: "needs-repair", concept: "thin-kit" });
     expect(run.failedChecks).toContain("complete-content");
-    expect(run.files.map((f) => f.name)).toEqual(["review-package.md", "summary.json"]);
-    expect(pkg(run.dir, "review-package.md")).toMatch(/FAILED VALIDATION: not ready for review[\s\S]*complete-content \| FAIL/);
+    expect(pkg(run.dir, "review-package.md")).toMatch(/NEEDS REPAIR: not ready for review[\s\S]*complete-content \| FAIL/);
     expect(store.products()[0].status).toBe("needs-work");
   });
 });
@@ -173,20 +170,20 @@ describe("factory: safeguards and preservation", () => {
   it("daily operations lists the new run, the draft awaiting review, and failed validations", () => {
     const { run } = offline();
     const r = runDaily(store, DEFAULT_CONFIG, NOW).report;
-    expect(r.factory).toEqual([{ id: run.id, date: "2026-11-10", status: "review-ready", concept: "client-onboarding-kit", productId: run.productId, productStatus: "ready, awaiting your review and sign-off" }]);
+    expect(r.factory).toEqual([{ id: run.id, date: "2026-11-10", mode: "offline-template", status: "review-ready", concept: "client-onboarding-kit", productId: run.productId, productStatus: "ready, awaiting your review and sign-off" }]);
     expect(r.actions.some((a) => a.ref === run.id && a.command === `factory show ${run.id}`)).toBe(true);
     expect(r.approvals.some((a) => a.ref === run.productId && /sign-off missing/.test(a.text))).toBe(true);
     EXTRA_CONCEPTS.push(concept({ ...CONCEPTS[0], id: "thin-kit", name: "Thin kit", problem: "a deliberately unfinished test product", ratings: { usefulness: 1, simplicity: 1, monetisation: 1 }, files: [{ name: "notes.md", template: false, description: "Notes", text: "# Notes\n\n- TODO\n" }] }));
     offline(NEXT_DAY);
     const r2 = runDaily(store, DEFAULT_CONFIG, NEXT_DAY).report;
-    expect(r2.problems.some((p) => /failed validation: .*complete-content/.test(p.text))).toBe(true);
+    expect(r2.problems.some((p) => /needs repair: failed .*complete-content/.test(p.text))).toBe(true);
   });
 
   it("CLI list and show", async () => {
     expect(await cli("factory", "list")).toBe(0); expect(out).toBe("no factory runs\n");
     expect(await cli("factory", "run", "--offline")).toBe(0);
     const id = store.factoryRuns()[0].id;
-    expect(await cli("factory", "list")).toBe(0); expect(out).toMatch(new RegExp(`^${id} 2026-11-10 review-ready client-onboarding-kit prd-`));
+    expect(await cli("factory", "list")).toBe(0); expect(out).toMatch(new RegExp(`^${id} 2026-11-10 offline-template review-ready client-onboarding-kit prd-`));
     expect(await cli("factory", "show", id)).toBe(0); expect(out).toMatch(/^# Review package: Client onboarding kit/);
     expect(await cli("factory", "show", "fct-00000000")).toBe(1);
     expect(await cli("factory")).toBe(2); expect(out).toMatch(/factory run --offline/);

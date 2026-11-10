@@ -479,3 +479,34 @@ alone. Nothing is approved, listed, published, scheduled, sent or bought: the
 owner continues with `product sign-off`, `product request-launch`, `approve`,
 `product mark-live` and `campaign create`. The daily report lists factory runs,
 drafts awaiting review and failed validations.
+
+### AI mode (`factory run --ai`)
+
+    ve factory preflight             # AI readiness from local checks only: no network, no tokens
+    ve factory run --ai --mock       # labelled MOCK DEMONSTRATION of the AI pipeline (built-in mock model)
+    ve factory run --ai              # free local model (ollama on a loopback address)
+    ve factory run --ai --paid       # Claude: only with model.paidUsageApproved = true and an owner-approved cost
+
+Two model calls at most: ideas (validated JSON: customer, problem, concept, file
+types, differentiation, complexity, usefulness and monetisation rationale,
+risks, assumptions; demand and competition must be "unverified"), then the
+product (Markdown, CSV and HTML-worksheet specs). Answers that are not valid
+JSON, claim market evidence, make misleading claims, use unsafe file names or
+inconsistent CSV rows fail the run (`ai-failed`); nothing is generated in their
+place. Ideas touching legal, tax or financial advice are not eligible. HTML is
+never taken from the model: worksheets are rendered by the factory (inputs only,
+no scripts, CSP blocks all network access).
+
+Paid runs (Claude) reuse the existing adapter (`claude.ts`): the worst-case cost
+of both calls must fit `model.maxGbpPerRun` and the ledger before the first
+call; no retries; the run stops after a failed call. API keys stay in
+`anthropic.key` and never appear in reports.
+
+Every run (offline or AI) writes a ZIP of exactly the deliverables, a
+`zip-manifest.json` (sizes, SHA-256) and the checks `zip-integrity`,
+`not-near-duplicate`, `listing-consistency`, `usability` and
+`marketing-drafts` on top of the product QA. Any failure marks the run
+`needs-repair`. AI-made concepts are kept in `ai-concepts.json` so `product
+review` rebuilds the same files. The daily report shows the latest runs, the AI
+provider's readiness (local checks only) and runs needing repair; unattended AI
+generation is not enabled.

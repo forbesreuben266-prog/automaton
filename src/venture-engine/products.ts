@@ -181,6 +181,8 @@ const MISLEADING: readonly [RegExp, string][] = [
   [/["“][^"”\n]{12,}["”]\s*[—–-]\s*[A-Z][a-z]+/, "testimonial (none exist yet)"],
   [/\b\d+(\.\d+)?% (faster|more|of (customers|freelancers|users))\b/i, "unsupported statistic"],
 ];
+/** True when a text touches legal, tax, financial or similar topics (the product QA's rule). */
+export const isSensitive = (text: string): boolean => SENSITIVE.test(text);
 /** The misleading-claim patterns found in a text (the same rules as the product QA). */
 export const misleadingClaims = (text: string): string[] => MISLEADING.filter(([r]) => r.test(text)).map(([, why]) => why);
 const SENSITIVE = /\b(legal(ly)?|law(s|yer)?|solicitor|attorney|court|sue|lawsuit|statutory|legislation|contract|tax(es)?|VAT|GST|HMRC|IRS|interest|debt|invest(ment|ing)?|pension|insurance|medical|diagnos)/i;

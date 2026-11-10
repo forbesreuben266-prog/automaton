@@ -52,6 +52,9 @@ export class Store {
   /** Product factory runs (see factory.ts): one record per run, with its concept, product and status. */
   factoryRuns<T = import("./factory.js").FactoryRun>(): T[] { return readJson<T[]>(path.join(this.dir, "factory.json"), []); }
   saveFactoryRuns(r: readonly unknown[]): void { writeJson(path.join(this.dir, "factory.json"), r); }
+  /** Concepts written by the AI factory (rendered files included), so the toolkit blueprint can rebuild them. */
+  aiConcepts<T = import("./blueprints/toolkit.js").Concept>(): T[] { return readJson<T[]>(path.join(this.dir, "ai-concepts.json"), []); }
+  saveAiConcepts(c: readonly unknown[]): void { writeJson(path.join(this.dir, "ai-concepts.json"), c); }
   state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
   saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {

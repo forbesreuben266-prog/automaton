@@ -203,7 +203,7 @@ describe("isolation", () => {
     const DIRS = [path.join(SRC, "venture-engine"), path.join(SRC, "venture-engine", "kinds"), path.join(SRC, "venture-engine", "blueprints")];
     for (const d of DIRS) for (const f of fs.readdirSync(d).filter((x) => x.endsWith(".ts"))) {
       const src = fs.readFileSync(path.join(d, f), "utf8");
-      for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]) || (f === "claude.ts" && m[1] === "@anthropic-ai/sdk"), `${f}: ${m[1]}`).toBe(true);
+      for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]) || (f === "claude.ts" && m[1] === "@anthropic-ai/sdk") || (f === "zip.ts" && m[1] === "node:zlib"), `${f}: ${m[1]}`).toBe(true);
       const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(/child_process|https?\.request|net\.connect|eval\(|new Function|wallet|solana|viem|broker|placeorder|docker|sudo/i.test(code), f).toBe(false);
       expect((code.match(/\bfetch\(/g) ?? []).length, f).toBe(f === "cli.ts" ? 1 : 0);
