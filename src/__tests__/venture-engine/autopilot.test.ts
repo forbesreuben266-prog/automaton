@@ -61,8 +61,9 @@ describe("autopilot: bounded offline daily workflow", () => {
     const r = runAutopilot(store, DEFAULT_CONFIG, NOW);
     expect(r.completed).toEqual([
       expect.stringMatching(new RegExp(`^recovered ${failed.id} from its saved answers as fct-[0-9a-f]{8} \\(review-ready, product prd-[0-9a-f]{8}\\); no model call$`)),
-      expect.stringMatching(/^prepared offline product draft prd-[0-9a-f]{8} \(client-onboarding-kit\) with ZIP, listing and marketing drafts: review-ready$/),
+      expect.stringMatching(/^prepared launch package lch-[0-9a-f]{8} for prd-[0-9a-f]{8} \(Freelance invoicing kit\): verified ZIP, listing, cover, marketing, checklist$/),
     ]);
+    expect(r.skipped).toContain("new product draft: launch preparation took priority today");
     const recovered = store.factoryRuns().find((x) => x.recoveredFrom === failed.id)!;
     expect(recovered).toMatchObject({ modelCalls: 0, status: "review-ready" });
     expect(fs.readFileSync(path.join(recovered.dir, "review-package.md"), "utf8")).toMatch(/safe repairs: project-pipeline\.csv: row 1: 7 missing cell\(s\) left empty/);

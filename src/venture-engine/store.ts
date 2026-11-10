@@ -55,6 +55,12 @@ export class Store {
   /** Concepts written by the AI factory (rendered files included), so the toolkit blueprint can rebuild them. */
   aiConcepts<T = import("./blueprints/toolkit.js").Concept>(): T[] { return readJson<T[]>(path.join(this.dir, "ai-concepts.json"), []); }
   saveAiConcepts(c: readonly unknown[]): void { writeJson(path.join(this.dir, "ai-concepts.json"), c); }
+  /** Launch packages (see launch.ts): one record per prepared package. */
+  launches<T = import("./launch.js").LaunchPackage>(): T[] { return readJson<T[]>(path.join(this.dir, "launches.json"), []); }
+  saveLaunches(l: readonly unknown[]): void { writeJson(path.join(this.dir, "launches.json"), l); }
+  /** Verified orders recorded by the owner (see sales.ts): no customer details, only order references and amounts. */
+  orders<T = import("./sales.js").Order>(): T[] { return readJson<T[]>(path.join(this.dir, "sales.json"), []); }
+  saveOrders(o: readonly unknown[]): void { writeJson(path.join(this.dir, "sales.json"), o); }
   state(): { cycles: number; seed: number; day?: string; cyclesToday?: number } { return readJson(path.join(this.dir, "state.json"), { cycles: 0, seed: 1 }); }
   saveState(s: { cycles: number; seed: number; day?: string; cyclesToday?: number }): void { writeJson(path.join(this.dir, "state.json"), s); }
   audit(entry: Record<string, unknown>, now: Date): void {

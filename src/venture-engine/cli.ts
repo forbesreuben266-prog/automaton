@@ -25,6 +25,8 @@
  *   operations block|unblock|blockers|unit   owner-recorded outside blockers; systemd templates (installs nothing)
  *   factory run --offline | list | show <run>   one bounded offline product-factory run (factory.ts): concept scoring,
  *                                a product draft through the normal QA, listing and marketing drafts, review package
+ *   launch prepare|status|checklist   launch packages and readiness for approved products (launch.ts)
+ *   sales record|refund|report        verified Payhip orders entered by the owner, deduplicated (sales.ts)
  *   dashboard | config | schedule-unit (prints a systemd user timer for the owner to review and install; installs nothing)
  * Configuration: ~/.automaton-ventures/config.json (created with safe defaults: no model, schedule disabled).
  */
@@ -46,13 +48,15 @@ import { OPERATIONS_USAGE, operationsCli } from "./operations.js";
 import { FACTORY_USAGE, factoryCli } from "./factory.js";
 import { loadStoredConcepts } from "./blueprints/toolkit.js";
 import { autopilotCli } from "./autopilot.js";
+import { LAUNCH_USAGE, launchCli } from "./launch.js";
+import { SALES_USAGE, salesCli } from "./sales.js";
 import { adoptEdits, formatReview, reviewAll, reviewProduct } from "./review.js";
 import { Store } from "./store.js";
 import type { Evidence, VentureKind } from "./types.js";
 
 export const KINDS: readonly VentureKind[] = [digitalProduct];
 export const dataDir = (home = os.homedir()) => path.join(home, ".automaton-ventures");
-const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | " + CAMPAIGN_USAGE + " | " + OPERATIONS_USAGE + " | " + FACTORY_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
+const USAGE = "Usage: run [cycles] [--paid] | ledger | claude-check [--x-api-key] | " + PRODUCT_USAGE + " | " + CAMPAIGN_USAGE + " | " + OPERATIONS_USAGE + " | " + FACTORY_USAGE + " | " + LAUNCH_USAGE + " | " + SALES_USAGE + " | scheduled-run | stop [reason] | resume | status | show <venture> | approvals | approve <id> | deny <id> | record <venture> --source <text> [--visitors N --signups N --sales N --revenue X --cost X] | dashboard | config | schedule-unit";
 
 export interface CliDeps { readonly home?: string; readonly out: (s: string) => void; readonly now?: () => Date; readonly model?: ModelClient | null; readonly fetchFn?: FetchFn; readonly createMessage?: CreateMessage; readonly sdkFetchForTests?: typeof fetch;
   /** Whether a person is at an interactive terminal (default: stdin and stdout are TTYs). Sign-off requires it. */
@@ -141,6 +145,8 @@ export async function main(argv: readonly string[], d: CliDeps): Promise<number>
       return 0;
     }
     if (cmd === "factory") return await factoryCli(rest, { store, cfg, out: d.out, now, model: (paid) => modelFor(cfg, d, store, paid, now) });
+    if (cmd === "launch") return await launchCli(rest, { store, out: d.out, now });
+    if (cmd === "sales") return await salesCli(rest, { store, out: d.out, now });
     if (cmd === "operations" && rest[0] === "autopilot") return await autopilotCli(rest.slice(1), { store, cfg, out: d.out, now });
     if (cmd === "operations") return await operationsCli(rest, { store, cfg, out: d.out, now });
     if (cmd === "campaign") return await campaignCli(rest, { store, out: d.out, now, interactive: d.isInteractive ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true) });

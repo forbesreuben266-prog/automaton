@@ -4,6 +4,8 @@
  *   operations autopilot   1. recover at most one failed AI run from its SAVED model answers (local, no model call)
  *                          2. prepare at most one new offline product draft (ZIP, listing, marketing) when the review
  *                             backlog is small and nothing was prepared today
+ *                          2a. first, refresh at most one launch package for an approved product (launch prepare);
+ *                             when it does, no new draft is made that day (launches come before new drafts)
  *                          3. run the daily checks and write the report and the owner dashboard
  *
  * It never calls a model (free or paid), never retries, never approves, publishes, schedules, lists, sends or
@@ -15,6 +17,7 @@ import { type EngineConfig } from "./control.js";
 import { recoverable, recoverRun, runFactory } from "./factory.js";
 import { londonDate, renderReport, runDaily, type DailyReport, type Item } from "./operations.js";
 import { stopReason, withLock } from "./control.js";
+import { approved, prepareLaunch } from "./launch.js";
 import type { Store } from "./store.js";
 
 /** New drafts are prepared only while fewer than this many factory products wait for the owner's review. */
@@ -36,11 +39,20 @@ export function runAutopilot(store: Store, cfg: EngineConfig, now: Date): Autopi
       catch (e) { unresolved.push({ priority: 2, ref: old.id, text: `could not recover locally: ${(e as Error).message.slice(0, 240)}`, command: `factory show ${old.id}` }); }
       if (todo.length > 1) skipped.push(`recovery: ${todo.length - 1} more run(s) left for tomorrow (one per run)`);
     }
+    // 2a. Launch preparation for approved products comes before any new draft.
+    let launched = false;
+    const current = store.products().filter((p) => p.status !== "archived" && !store.products().some((x) => x.previous === p.id) && approved(p));
+    for (const p of current) {
+      try { const { pkg, reused } = prepareLaunch(store, p.id, now); if (!reused) { completed.push(`prepared launch package ${pkg.id} for ${p.id} (${p.name}): verified ZIP, listing, cover, marketing, checklist`); launched = true; break; } }
+      catch (e) { unresolved.push({ priority: 2, ref: p.id, text: `launch package could not be prepared: ${(e as Error).message.slice(0, 240)}`, command: `launch prepare ${p.id}` }); }
+    }
+    if (!launched) skipped.push(current.length ? "launch packages: all approved products are up to date" : "launch packages: no approved product yet");
     // 2. At most one offline draft, only when the owner is not already behind on reviews.
     const products = store.products();
     const waiting = store.factoryRuns().filter((r) => r.productId && products.some((p) => p.id === r.productId && p.status === "ready" && !p.signOff)).length;
     const today = londonDate(now);
-    if (waiting >= REVIEW_BACKLOG_LIMIT) skipped.push(`new product draft: ${waiting} factory product(s) already wait for your review (limit ${REVIEW_BACKLOG_LIMIT})`);
+    if (launched || store.launches().some((l) => londonDate(new Date(l.createdAt)) === today)) skipped.push("new product draft: launch preparation took priority today");
+    else if (waiting >= REVIEW_BACKLOG_LIMIT) skipped.push(`new product draft: ${waiting} factory product(s) already wait for your review (limit ${REVIEW_BACKLOG_LIMIT})`);
     else if (store.factoryRuns().some((r) => r.date === today && (r.mode ?? "offline-template") === "offline-template")) skipped.push("new product draft: one was already prepared today");
     else {
       let run: ReturnType<typeof runFactory>["run"] | null = null;

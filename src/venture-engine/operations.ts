@@ -23,6 +23,8 @@ import { changedFiles, realTotals, reviewHash, type Product } from "./products.j
 import { ensurePrivateDir, type Store } from "./store.js";
 import { aiReadiness, type Readiness } from "./ai-factory.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
+import { approved, launchReadiness, type Readiness as LaunchReadiness } from "./launch.js";
+import { pounds, salesTotals, type SalesTotals } from "./sales.js";
 
 export const TIMEZONE = "Europe/London";
 const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" });
@@ -54,6 +56,10 @@ export interface DailyReport {
   readonly aiProvider: Readiness | null;
   /** Paid-model spending from the local ledger (an estimate, not a provider bill). null = no paid usage recorded. */
   readonly spending: { readonly committedGbp: number; readonly settledGbp: number; readonly unknownGbp: number; readonly remainingGbp: number; readonly capGbp: number; readonly requests: number } | null;
+  /** Launch readiness of every current product (launch.ts): transparent criteria and score. */
+  readonly launch: readonly (LaunchReadiness & { readonly approved: boolean; readonly packageId: string | null })[];
+  /** Verified orders (sales.ts), per currency; owner-recorded only, never estimated. */
+  readonly orders: readonly (SalesTotals & { readonly currency: string })[];
   /** The single most important thing for the owner to do next (null = nothing). */
   readonly nextAction: Item | null;
   /** One short paragraph: what Automaton did and what needs the owner. */
@@ -196,8 +202,11 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
     const t = new Ledger(store.dir, HARD_CAP_GBP, now).totals();
     return { committedGbp: t.committedGbp, settledGbp: t.settledGbp, unknownGbp: t.unknownGbp, remainingGbp: t.remainingGbp, capGbp: t.capGbp, requests: t.requests };
   }, null);
+  const launches = section("launch readiness", () => current.map((p) => ({ ...launchReadiness(store, p), approved: approved(p), packageId: store.launches().filter((l) => l.productId === p.id && l.version === p.version).at(-1)?.id ?? null })), []);
+  for (const l of launches) if (l.approved && !l.packageId) actions.push({ priority: 2, ref: l.productId, text: "approved product without a launch package", command: `launch prepare ${l.productId}` });
+  const orders = section("verified orders", () => { const all = store.orders(); return [...new Set(all.map((o) => o.currency))].map((cur) => ({ currency: cur, ...salesTotals(all.filter((o) => o.currency === cur)) })); }, []);
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
-  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, nextAction: null, summary: "", engagement,
+  return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, launch: launches, orders, nextAction: null, summary: "", engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };
 }
 
@@ -224,6 +233,10 @@ export function renderReport(r: DailyReport): string {
     "## Product factory", "",
     `- AI provider: ${r.aiProvider ? `${r.aiProvider.provider}, ${r.aiProvider.ready ? "ready" : "not ready"} (${r.aiProvider.reasons.join("; ")})` : "unknown"}. Unattended AI generation is not enabled.`,
     r.factory.length ? r.factory.map((x) => `- ${x.id} (${x.date}, ${x.mode}): ${x.status}${x.concept ? `, ${x.concept}` : ""}${x.productId ? `, product ${x.productId}: ${x.productStatus ?? "missing"}` : ""}`).join("\n") : "- no factory runs", "",
+    "## Launch readiness", "",
+    r.launch.length ? ["| Product | Stage | Readiness | Next step |", "|---|---|---|---|", ...r.launch.map((l) => `| ${l.productId} ${l.name} | ${l.stage} | ${l.score}/100 | ${l.next ? `${l.next.label}${l.next.command ? ` (\`${l.next.command}\`)` : ""}` : "-"} |`)].join("\n") : "- no products", "",
+    "## Verified orders (sales record)", "",
+    r.orders.length ? r.orders.map((t) => `- ${t.currency}: ${t.orders} order(s), gross ${pounds(t.grossPence)}, refunds ${pounds(t.refundsPence)}, fees ${pounds(t.feesPence)}${t.ordersWithoutFees ? ` (not recorded for ${t.ordersWithoutFees})` : ""}, net ${pounds(t.netPence)}; attributed to campaigns: ${t.orders - t.unattributed}`).join("\n") : "- no orders recorded: sales are unknown, not zero", "",
     "## Verified sales and engagement (owner-recorded only)", "",
     r.sales.length ? r.sales.map((s) => `- ${s.productId}: ${s.periods} period(s) recorded (${s.verifiedPeriods} with an evidence file), latest ending ${s.lastPeriodEnd ?? "-"}; visits ${n(s.visits)}, signups ${n(s.signups)}, sales ${n(s.sales)}, revenue ${s.revenue === null ? "not recorded" : `${s.currency} ${s.revenue}`}`).join("\n") : "- Sales and revenue: not recorded (no live product with recorded results)",
     ...r.engagement.map((e) => `- ${e.campaignId}: ${e.postsWithResults} post(s) with results; impressions ${n(e.impressions)}, clicks ${n(e.clicks)}`), "",
@@ -247,7 +260,12 @@ export const reportDir = (store: Store) => path.join(store.dir, "reports");
 
 /** The daily run: inspect, allowlisted maintenance, then the report files and an audit entry. */
 /** The owner's next action: problems first, then approvals, then actions, by priority. */
-export function nextAction(r: Pick<DailyReport, "problems" | "approvals" | "actions">): Item | null {
+export function nextAction(r: Pick<DailyReport, "problems" | "approvals" | "actions"> & { launch?: DailyReport["launch"] }): Item | null {
+  const urgent = r.problems.find((x) => x.priority === 1);
+  if (urgent) return urgent;
+  // The step most likely to advance a launch: the most advanced approved product's next unblocked criterion.
+  const l = [...(r.launch ?? [])].filter((x) => x.approved && x.next).sort((a, b) => b.score - a.score)[0];
+  if (l?.next) return { priority: 1, ref: l.productId, text: `advance the launch of ${l.name} (readiness ${l.score}/100): ${l.next.label}`, command: l.next.command };
   return [...r.problems, ...r.approvals, ...r.actions].sort((a, b) => a.priority - b.priority)[0] ?? null;
 }
 export function summarise(r: Pick<DailyReport, "problems" | "approvals" | "actions" | "blocked" | "completed" | "errors">): string {
@@ -358,6 +376,11 @@ code{font-size:.85rem}@media (prefers-color-scheme:dark){body{background:#111;co
 <h3>Problems</h3>${items(r.problems, "No problems found.")}
 <h3>Blocked</h3>${items(r.blocked, "Nothing blocked.")}
 <h2>Automaton completed</h2><ul>${r.completed.map((c) => `<li>${h(c)}</li>`).join("")}</ul>
+<h2>Launches</h2><p>Live: ${r.launch.filter((l) => l.stage === "live" || l.stage === "marketing" || l.stage === "selling").length}. Approved, not live: ${r.launch.filter((l) => l.stage === "approved" || l.stage === "launch approved").length}. Drafts awaiting your approval: ${r.launch.filter((l) => l.stage === "draft awaiting approval").length}.</p>
+<table><tr><th>Product</th><th>Stage</th><th>Readiness</th><th>Payhip listing</th><th>Package</th><th>Next step</th></tr>
+${r.launch.map((l) => `<tr><td>${h(l.productId)} ${h(l.name)}</td><td>${h(l.stage)}</td><td>${l.score}/100</td><td>${h(l.criteria.find((c) => c.id === "listing-live")?.detail ?? "")}</td><td>${h(l.packageId ?? "not prepared")}</td><td>${l.next ? `${h(l.next.label)}${l.next.command ? `<br><code>${h(l.next.command)}</code>` : ""}` : "-"}</td></tr>`).join("")}</table>
+<details><summary>Readiness criteria</summary><ul>${(r.launch[0]?.criteria ?? []).map((c) => `<li>${h(c.label)} (weight ${c.weight})</li>`).join("")}</ul><p>Score = weighted share of criteria that are recorded facts; blocked criteria count as not done.</p></details>
+<h2>Verified orders</h2>${r.orders.length ? `<ul>${r.orders.map((t) => `<li>${h(t.currency)}: ${t.orders} order(s) (${t.verified} with an evidence file): gross ${pounds(t.grossPence)}, refunds ${pounds(t.refundsPence)}, fees ${pounds(t.feesPence)}${t.ordersWithoutFees ? ` (fees not recorded for ${t.ordersWithoutFees})` : ""}, <b>net ${pounds(t.netPence)}</b>; attributed to campaigns ${t.orders - t.unattributed}</li>`).join("")}</ul>` : "<p>No orders recorded: sales and revenue are unknown, not zero. Estimates are never shown as sales.</p>"}
 <h2>Products</h2><table><tr><th>Product</th><th>Version</th><th>Status</th><th>Price</th><th>Sign-off</th><th>Live URL</th></tr>
 ${r.products.map((p) => `<tr><td>${h(p.id)} ${h(p.name)}</td><td>${p.version}</td><td>${h(p.supersededBy ? `superseded by ${p.supersededBy}` : p.status)}</td><td>${h(p.price)}</td><td>${h(p.signOff)}</td><td>${h(p.liveUrl ?? "not live")}</td></tr>`).join("")}</table>
 <h2>Factory runs</h2><table><tr><th>Run</th><th>Date</th><th>Mode</th><th>Status</th><th>Product</th></tr>

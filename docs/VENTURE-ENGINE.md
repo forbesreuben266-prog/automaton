@@ -528,3 +528,31 @@ Every daily run also writes `reports/owner-dashboard.html` (private, no
 scripts): a summary, the next action, what needs you (approvals, actions,
 problems, blocked), what Automaton completed, products, factory runs,
 campaigns, owner-recorded sales and paid-AI spending from the local ledger.
+
+## Launches and verified sales
+
+    ve launch prepare <product>     # approved products only: verified ZIP + manifest, listing, cover.svg, 3 Facebook/LinkedIn messages, checklist
+    ve launch status                # stage, readiness score and next step for every current product
+    ve launch checklist <product>
+    ve sales record <product> --order <ref> --date YYYY-MM-DD --gross 12 [--fees 0.86] [--campaign <cmp> [--post <pst>]] --source "Payhip orders export" [--evidence <file>]
+    ve sales refund <order> --amount 12 --date YYYY-MM-DD --source "Payhip refund"
+    ve sales report [product]
+
+Launch packages are written to `launch/<lch-id>/` from the product's checked
+files only (no invented features or results); prices, Payhip listings and
+campaigns are never changed, and an unchanged product returns the existing
+package. Messages that repeat an existing campaign post are flagged.
+
+Readiness criteria (weights): QA passed (10), sign-off (10), launch approved
+(10), package prepared (10), Payhip listing live and recorded (20), campaign
+with the live URL (10), a post approved (10), a post published with its link
+(10), verified sales recorded (10). A criterion blocked by an outside blocker
+(for example the Facebook verification) counts as not done.
+
+Orders keep only the Payhip order reference, date and amounts (pence); no
+customer details. Duplicate references are refused; attribution is allowed
+only to the product's own campaign and to posts with a recorded publication;
+refunds cannot exceed the order; fees are "not recorded" unless given. The
+daily report and owner dashboard show launch stages, readiness and verified
+orders. The autopilot refreshes at most one launch package per day before it
+considers any new draft.
