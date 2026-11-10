@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { aiReadiness, MOCK_IDEAS, MOCK_PRODUCT, mockModel, validateIdeas, validateSpec, worksheetHtml } from "../../venture-engine/ai-factory.js";
+import { aiReadiness, MOCK_IDEAS, MOCK_PRODUCT, mockModel, normalizeCsv, productPrompt, validateIdeas, validateSpec, worksheetHtml } from "../../venture-engine/ai-factory.js";
+import { csv } from "../../venture-engine/blueprints/common.js";
+import { parseCsv } from "../../venture-engine/products.js";
 import { EXTRA_CONCEPTS } from "../../venture-engine/blueprints/toolkit.js";
 import { createCampaign, decidePost } from "../../venture-engine/campaign.js";
 import { main } from "../../venture-engine/cli.js";
@@ -107,7 +109,7 @@ describe("AI factory: invalid answers, unavailable providers, cost safety", () =
       [{ ideas: [{ ...MOCK_IDEAS.ideas[0], demandEvidence: "strong: 40% of freelancers want this" }] }, MOCK_PRODUCT, /ideas were unusable/],
       [MOCK_IDEAS, { ...MOCK_PRODUCT, files: [{ name: "../x.md", kind: "markdown", description: "x", template: false, content: "y".repeat(300) }] }, /product was unusable.*safe lowercase name/],
       [MOCK_IDEAS, { ...MOCK_PRODUCT, headline: "Guaranteed results for every freelancer" }, /product was unusable.*misleading claims/],
-      [MOCK_IDEAS, { ...MOCK_PRODUCT, files: MOCK_PRODUCT.files.map((f) => (f.kind === "csv" ? { ...f, rows: [["only one cell"]] } : f)) }, /CSV needs/],
+      [MOCK_IDEAS, { ...MOCK_PRODUCT, files: MOCK_PRODUCT.files.filter((f) => f.kind === "csv").concat({ ...MOCK_PRODUCT.files[4], name: "third.csv", rows: [["a", "b", "c", "d", "e", "f", "g", "h", "extra content"]] } as typeof MOCK_PRODUCT.files[4]).map((f) => ({ ...f, rows: [["a", "b", "c", "d", "e", "f", "g", "h", "extra content"]] })) }, /too few usable files/],
     ] as [unknown, unknown, RegExp][]) {
       const s = new Store(fs.mkdtempSync(path.join(DIR, "s-")));
       const raw = typeof ideas === "string" ? () => ideas as string : answers(ideas, product);
@@ -211,3 +213,71 @@ describe("AI factory: limits, duplicates, failed QA and preservation", () => {
     for (const a of [["--ai", "--offline"], ["--mock"], ["--ai", "--mock", "--paid"], ["--offline", "--paid"]]) expect(await cli(null, "factory", "run", ...a)).toBe(1);
   });
 });
+
+describe("CSV reliability (regression: fct-9cdd3785, charge-register.csv)", () => {
+  const H = ["Date", "Client", "Charge", "Amount", "Paid", "Notes"];
+  const ok = (x: ReturnType<typeof normalizeCsv>) => { if ("problem" in x) throw new Error(x.problem); return x; };
+
+  it("quoted commas, quotes and line breaks inside cells are written and read back exactly (the factory writes the CSV)", () => {
+    const rows = [["2026-02-01", "Example Ltd, London", "Design \"phase 1\"", 120, "No", "Line one\nline two"]];
+    const n = ok(normalizeCsv({ header: H, rows }));
+    expect(n.repairs).toEqual([]);
+    const back = parseCsv(csv([n.header, ...n.rows]));
+    expect(back).toEqual([H, rows[0].map(String)]);
+  });
+
+  it("safe repairs: null and missing cells, booleans, short rows, empty extra cells, object rows, duplicate names, CSV text", () => {
+    const n = ok(normalizeCsv({ header: [...H.slice(0, 5), "Paid"], rows: [["2026-02-01", "A", "Logo", 50, null], ["2026-02-02", "B", "Site", 90, true, "", "", ""], { Date: "2026-02-03", Client: "C", Charge: "Copy", Amount: 30 }] }));
+    expect(n.header).toEqual(["Date", "Client", "Charge", "Amount", "Paid", "Paid (2)"]);
+    expect(n.rows).toEqual([["2026-02-01", "A", "Logo", 50, "", ""], ["2026-02-02", "B", "Site", 90, "Yes", ""], ["2026-02-03", "C", "Copy", 30, "", ""]]);
+    expect(n.repairs.join("; ")).toMatch(/duplicate column name[\s\S]*missing cell[\s\S]*empty extra cells dropped[\s\S]*objects were mapped/);
+    const t = ok(normalizeCsv({ content: 'Client,Notes\r\n"Example, Ltd","said ""yes""\nlater"\r\n' }));
+    expect(t.rows).toEqual([["Example, Ltd", 'said "yes"\nlater']]);
+  });
+
+  it("unsafe cases are problems, never silently fixed: content beyond the columns, oversized cells, no rows, bad header", () => {
+    expect(normalizeCsv({ header: H, rows: [[...H.map(() => "x"), "data that would shift"]] })).toMatchObject({ problem: expect.stringMatching(/content beyond the 6 columns/) });
+    expect(normalizeCsv({ header: H, rows: [["x".repeat(501)]] })).toMatchObject({ problem: expect.stringMatching(/longer than 500/) });
+    expect(normalizeCsv({ header: H, rows: [] })).toMatchObject({ problem: expect.stringMatching(/at least one example row/) });
+    expect(normalizeCsv({ header: ["Only"], rows: [["x"]] })).toMatchObject({ problem: expect.stringMatching(/2 to 16 column names/) });
+    expect(normalizeCsv({ header: H, rows: [[{ nested: 1 }]] })).toMatchObject({ problem: expect.stringMatching(/text or numbers/) });
+  });
+
+  it("reproduction: a short-row charge register is repaired and the paid run is not wasted (review-ready, repairs listed)", async () => {
+    const charge = { name: "charge-register.csv", kind: "csv", description: "Charges per client", template: true, header: H,
+      rows: [["2026-02-01", "Example Ltd", "Design, phase 1", 120, "No"], ["2026-02-03", "Example Studio", "Copy edits", 45, "Yes", "Paid by transfer, thank you"]] };
+    const product = { ...MOCK_PRODUCT, files: [...MOCK_PRODUCT.files, charge] };
+    expect("problems" in validateSpec(product)).toBe(false);
+    const { run } = await runAiFactory(store, DEFAULT_CONFIG, NOW, { client: fakeModel(answers(MOCK_IDEAS, product)), mock: false, paidApproved: false });
+    expect(run).toMatchObject({ status: "review-ready", modelCalls: 2 });
+    const review = fs.readFileSync(path.join(run.dir, "review-package.md"), "utf8");
+    expect(review).toMatch(/model-output-complete \| pass \| every file the model wrote was usable; safe repairs: charge-register\.csv: row 1: 1 missing cell\(s\) left empty/);
+    expect(fs.existsSync(path.join(run.dir, "model-answers.json"))).toBe(true);
+  });
+
+  it("reproduction: an unrepairable CSV is left out and the run is needs-repair (never review-ready); answers are kept", async () => {
+    const charge = { name: "charge-register.csv", kind: "csv", description: "Charges", template: true, header: H, rows: [["2026-02-01", "A", "B", 1, "No", "", "unexpected extra value"]] };
+    const { run } = await runAiFactory(store, DEFAULT_CONFIG, NOW, { client: fakeModel(answers(MOCK_IDEAS, { ...MOCK_PRODUCT, files: [...MOCK_PRODUCT.files, charge] })), mock: false, paidApproved: false });
+    expect(run.status).toBe("needs-repair");
+    expect(run.failedChecks).toEqual(["model-output-complete"]);
+    const p = store.products().find((x) => x.id === run.productId)!;
+    expect(p.deliverables).not.toContain("charge-register.csv");
+    expect(fs.readFileSync(path.join(run.dir, "review-package.md"), "utf8")).toMatch(/NEEDS REPAIR[\s\S]*model-output-complete \| FAIL \| left out \(could not be repaired safely\): charge-register\.csv: row 1 has 7 cells with content beyond the 6 columns/);
+    const kept = JSON.parse(fs.readFileSync(path.join(run.dir, "model-answers.json"), "utf8"));
+    expect(kept.product.files.at(-1).name).toBe("charge-register.csv");
+  });
+
+  it("a failed product answer is kept on disk; no automatic retry is made", async () => {
+    const m = fakeModel(answers(MOCK_IDEAS, { ...MOCK_PRODUCT, files: [] }), { paid: true });
+    const { run } = await runAiFactory(store, claude, NOW, { client: m, mock: false, paidApproved: true });
+    expect(run.status).toBe("ai-failed");
+    expect(m.prompts).toHaveLength(2); // ideas + product, nothing more
+    expect(JSON.parse(fs.readFileSync(path.join(run.dir, "model-answers.json"), "utf8")).product.files).toEqual([]);
+  });
+
+  it("the prompt states the strict CSV rules with an example", () => {
+    const p = productPrompt(MOCK_IDEAS.ideas[0] as Parameters<typeof productPrompt>[0], 4000);
+    expect(p).toMatch(/EXACTLY as many items as "header"[\s\S]*Use "" for an empty cell, never null[\s\S]*Never write CSV text[\s\S]*"rows":\[\["Example Ltd"/);
+  });
+});
+

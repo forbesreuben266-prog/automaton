@@ -261,7 +261,7 @@ function record(store: Store, now: Date, run: FactoryRun, extra: Record<string, 
 }
 
 /** Builds the product for a selected concept and writes the ZIP and the review package. */
-function produce(store: Store, now: Date, r: ReturnType<typeof newRunDir>, base: { date: string; mode: FactoryMode; model: string | null; modelCalls: number }, c: Concept, pick: Scored, scores: readonly Scored[]): FactoryRun {
+function produce(store: Store, now: Date, r: ReturnType<typeof newRunDir>, base: { date: string; mode: FactoryMode; model: string | null; modelCalls: number }, c: Concept, pick: Scored, scores: readonly Scored[], extraChecks: readonly Check[] = []): FactoryRun {
   const at = now.toISOString();
   const venture: Venture = { id: newId("ven"), status: "factory-draft", experiments: [], decisions: [], createdAt: at, updatedAt: at,
     opportunity: { id: newId("opp"), kind: "digital-product", title: c.name, problem: c.problem, audience: c.audience, offer: c.offer,
@@ -280,7 +280,7 @@ function produce(store: Store, now: Date, r: ReturnType<typeof newRunDir>, base:
   const onDisk = fs.readFileSync(path.join(r.dir, zipName));
   const listingText = listing(p, c, landing);
   const drafts = marketingDrafts(p, c, landing);
-  const checks = [...p.checks, ...factoryChecks(store, p, c, onDisk, manifest, listingText, drafts)];
+  const checks = [...p.checks, ...factoryChecks(store, p, c, onDisk, manifest, listingText, drafts), ...extraChecks];
   const failed = checks.filter((x) => !x.passed).map((x) => x.name);
   const status: FactoryStatus = failed.length ? "needs-repair" : "review-ready";
   r.write("listing.md", listingText);
@@ -337,13 +337,17 @@ export async function runAiFactory(store: Store, cfg: EngineConfig, now: Date, o
   const counted: ModelClient = { id: client.id, paid: client.paid, complete: (req) => { calls += 1; return client.complete(req); } };
   const use = { client: counted, budget, log: (e: Record<string, unknown>) => log.push(e), paidApproved: opts.paidApproved };
   const r = newRunDir(store);
+  const answers: Record<string, unknown> = {};
+  // The model's answers are kept (private, mode 600) so a paid answer is never lost: the owner can inspect or repair it.
+  const keep = () => { if (Object.keys(answers).length) r.write("model-answers.json", JSON.stringify(answers, null, 2) + "\n"); };
   const fail = (reason: string, scores: Scored[] = []): FactoryResult => {
+    keep();
     r.write("summary.json", JSON.stringify({ id: r.id, date, mode, model: client.id, status: "ai-failed", reason, modelLog: log, scores, generated: false }, null, 2) + "\n");
     return { run: record(store, now, { id: r.id, date, startedAt: now.toISOString(), mode, status: "ai-failed", concept: null, ventureId: null, productId: null, score: null, failedChecks: [], dir: r.dir, files: r.files, model: client.id, modelCalls: calls, reason }), reused: false, scores };
   };
   const why = (purpose: string) => String(log.filter((e) => e.purpose === purpose).at(-1)?.reason ?? log.filter((e) => e.purpose === purpose).at(-1)?.error ?? "no answer");
   let rejected: string[] = [];
-  const ideas = await askJson(use, "factory-ideas", prompt1, (v) => { const x = validateIdeas(v); if (x) rejected = x.rejected; return x?.ideas ?? null; }, IDEAS_MAX_TOKENS);
+  const ideas = await askJson(use, "factory-ideas", prompt1, (v) => { answers.ideas = v; const x = validateIdeas(v); if (x) rejected = x.rejected; return x?.ideas ?? null; }, IDEAS_MAX_TOKENS);
   if (!ideas) return fail(`the model's ideas were unusable (${why("factory-ideas")}); nothing was generated in their place`);
   const ids = new Map(ideas.map((i) => [i.slug, i] as [string, AiIdea]));
   const scores = scoreCandidates(store, ideas.map((i) => ({ id: `${opts.mock ? "mock" : "ai"}-${i.slug}`, name: i.name, problem: i.problem, ai: true, needsAdvice: ideaNeedsAdvice(i),
@@ -353,13 +357,17 @@ export async function runAiFactory(store: Store, cfg: EngineConfig, now: Date, o
   if (!pick) return fail(`no eligible idea (${scores.map((s) => `${s.name}: ${s.excluded}`).join("; ")}${rejected.length ? `; rejected: ${rejected.join("; ")}` : ""})`, scores);
   const idea = ids.get(pick.concept.replace(/^(mock|ai)-/, ""))!;
   let problems: string[] = [];
-  const spec = await askJson(use, "factory-product", productPrompt(idea, maxTokens), (v) => { const x = validateSpec(v); if ("problems" in x) { problems = x.problems; return null; } return x.spec as ProductSpec; }, maxTokens);
+  const spec = await askJson(use, "factory-product", productPrompt(idea, maxTokens), (v) => { answers.product = v; const x = validateSpec(v); if ("problems" in x) { problems = x.problems; return null; } return x.spec as ProductSpec; }, maxTokens);
   if (!spec) return fail(`the model's product was unusable (${problems.length ? problems.slice(0, 6).join("; ") : why("factory-product")}); nothing was generated in its place`, scores);
   const c = specToConcept(spec, idea, pick.concept, { mode: opts.mock ? "mock-demo" : "ai", model: client.id, run: r.id });
   store.saveAiConcepts([...store.aiConcepts().filter((x) => x.id !== c.id), c]);
   if (!EXTRA_CONCEPTS.some((x) => x.id === c.id)) EXTRA_CONCEPTS.push(c);
   r.write("model-log.json", JSON.stringify({ model: client.id, calls, log, rejectedIdeas: rejected }, null, 2) + "\n");
-  return { run: produce(store, now, r, { date, mode, model: client.id, modelCalls: calls }, c, pick, scores), reused: false, scores };
+  keep();
+  const dropped = spec.dropped ?? [], repairs = spec.repairs ?? [];
+  const outputCheck: Check = { name: "model-output-complete", passed: dropped.length === 0,
+    detail: (dropped.length ? `left out (could not be repaired safely): ${dropped.join("; ")}` : "every file the model wrote was usable") + (repairs.length ? `; safe repairs: ${repairs.join("; ")}` : "") };
+  return { run: produce(store, now, r, { date, mode, model: client.id, modelCalls: calls }, c, pick, scores, [outputCheck]), reused: false, scores };
 }
 
 export const FACTORY_USAGE = "factory run --offline | factory run --ai [--paid] | factory run --ai --mock | factory preflight | factory list | factory show <run>";

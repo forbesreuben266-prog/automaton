@@ -17,7 +17,7 @@ import { anthropicEnvVars, maxCostGbp } from "./claude.js";
 import { type EngineConfig } from "./control.js";
 import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { text, type ModelClient } from "./model.js";
-import { isSensitive, misleadingClaims } from "./products.js";
+import { isSensitive, misleadingClaims, parseCsv } from "./products.js";
 import type { Store } from "./store.js";
 
 export const IDEAS_MAX_TOKENS = 1500;
@@ -89,6 +89,66 @@ export interface ProductSpec {
   readonly name: string; readonly headline: string; readonly subheadline: string; readonly offer: string; readonly hook: string;
   readonly benefits: readonly string[]; readonly faq: readonly { q: string; a: string }[]; readonly setup: readonly string[];
   readonly price: number; readonly priceRationale: string; readonly imageBrief: string; readonly files: readonly SpecFile[];
+  /** Files the model got wrong and the factory could not safely repair: left out, and the run is marked needs-repair. */
+  readonly dropped?: readonly string[];
+  /** Safe, deterministic repairs made to the model's CSV structure (recorded in the review package). */
+  readonly repairs?: readonly string[];
+}
+
+export const CSV_MAX_COLUMNS = 16, CSV_MAX_ROWS = 30, CSV_MAX_CELL = 500;
+type Cell = string | number;
+/**
+ * Turns the model's CSV structure into a header and rows the factory writes itself (csv() quotes commas, quotes and
+ * line breaks). Accepts rows as arrays or as objects keyed by column name, and CSV text in "content" (parsed, never
+ * written as given). Safe repairs only: null/missing cells become empty, booleans Yes/No, short rows are padded with
+ * empty cells, trailing empty extra cells are dropped, duplicate column names get a suffix, rows beyond 30 are cut.
+ * Anything that would lose or move data (a long row with content in its extra cells, an oversized cell) is a problem.
+ */
+export function normalizeCsv(f: Record<string, unknown>): { header: string[]; rows: Cell[][]; repairs: string[] } | { problem: string } {
+  const repairs: string[] = [];
+  let header: unknown = f.header, rawRows: unknown = f.rows;
+  if ((!Array.isArray(header) || header.length === 0) && typeof f.content === "string") {
+    const parsed = parseCsv(f.content.replace(/^\uFEFF/, "")).filter((r) => r.some((c) => c.trim() !== ""));
+    header = parsed[0]; rawRows = parsed.slice(1); repairs.push("CSV text was parsed into rows");
+  }
+  if (!Array.isArray(header) || header.length < 2 || header.length > CSV_MAX_COLUMNS) return { problem: `needs 2 to ${CSV_MAX_COLUMNS} column names (got ${Array.isArray(header) ? header.length : "none"})` };
+  const names: string[] = [];
+  for (const [i, h] of (header as unknown[]).entries()) {
+    const n = typeof h === "string" || typeof h === "number" ? String(h).replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "";
+    if (!n || n.length > 60) return { problem: `column ${i + 1} needs a name of 1 to 60 characters` };
+    let u = n, k = 2; while (names.includes(u)) u = `${n} (${k++})`;
+    if (u !== n) repairs.push(`duplicate column name "${n}" renamed "${u}"`);
+    names.push(u);
+  }
+  if (!Array.isArray(rawRows) || rawRows.length === 0) return { problem: "needs at least one example row" };
+  const cell = (c: unknown, where: string): Cell | { problem: string } => {
+    if (c === null || c === undefined) return "";
+    if (typeof c === "boolean") return c ? "Yes" : "No";
+    if (typeof c === "number") return Number.isFinite(c) ? c : { problem: `${where}: not a finite number` };
+    if (typeof c !== "string") return { problem: `${where}: cells must be text or numbers` };
+    const s = c.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+    return s.length > CSV_MAX_CELL ? { problem: `${where}: cell longer than ${CSV_MAX_CELL} characters` } : s;
+  };
+  const rows: Cell[][] = [];
+  const OBJ = "rows given as objects were mapped to the columns";
+  for (const [ri, r] of (rawRows as unknown[]).entries()) {
+    let arr: unknown[];
+    if (Array.isArray(r)) arr = r;
+    else if (r && typeof r === "object") { arr = names.map((n, i) => (r as Record<string, unknown>)[n] ?? (r as Record<string, unknown>)[String((header as unknown[])[i])]); if (!repairs.includes(OBJ)) repairs.push(OBJ); }
+    else return { problem: `row ${ri + 1}: not a list of cells` };
+    const out: Cell[] = [];
+    for (const [ci, c] of arr.entries()) { const v = cell(c, `row ${ri + 1}, cell ${ci + 1}`); if (typeof v === "object") return v; out.push(v); }
+    if (out.length > names.length) {
+      if (out.slice(names.length).some((c) => String(c).trim() !== "")) return { problem: `row ${ri + 1} has ${out.length} cells with content beyond the ${names.length} columns (data would shift)` };
+      out.length = names.length; repairs.push(`row ${ri + 1}: empty extra cells dropped`);
+    }
+    if (out.length < names.length) { repairs.push(`row ${ri + 1}: ${names.length - out.length} missing cell(s) left empty`); while (out.length < names.length) out.push(""); }
+    if (out.every((c) => String(c).trim() === "")) continue;
+    rows.push(out);
+  }
+  if (!rows.length) return { problem: "needs at least one row with content" };
+  if (rows.length > CSV_MAX_ROWS) { repairs.push(`${rows.length - CSV_MAX_ROWS} row(s) beyond ${CSV_MAX_ROWS} left out`); rows.length = CSV_MAX_ROWS; }
+  return { header: names, rows, repairs };
 }
 
 export function productPrompt(idea: AiIdea, maxTokens: number): string {
@@ -96,7 +156,13 @@ export function productPrompt(idea: AiIdea, maxTokens: number): string {
 Write the complete product "${idea.name}" for ${idea.customer}. Problem: ${idea.problem}. Concept: ${idea.concept}.
 Make it genuinely usable: real wording, real steps, real example rows; no placeholders except buyer fill-in fields written [[Like this]]
 in files marked "template": true. No legal, tax or financial advice; no claims about results, demand, customers or income.
-3 to 8 files; do NOT include start-here.md (it is generated). Stay within ${maxTokens} output tokens. Return JSON only:
+3 to 8 files; do NOT include start-here.md (it is generated). Stay within ${maxTokens} output tokens.
+CSV RULES (strict): give CSV files ONLY as "header" (2 to ${CSV_MAX_COLUMNS} unique column names) and "rows" (1 to 10 example rows).
+Every row is a JSON array with EXACTLY as many items as "header", in the same order. Use "" for an empty cell, never null or
+omitted cells. Cells are JSON strings or numbers only (no formulas, nothing starting with = + - @). Commas, quotes and line
+breaks inside a cell are fine: the factory writes the CSV file itself. Never write CSV text.
+Example: "header":["Client","Due date","Amount","Notes"],"rows":[["Example Ltd","2026-02-01",120,""],["Example Studio","2026-02-15",80,"Paid, thank you"]]
+Return JSON only:
 {"name":"...","headline":"...","subheadline":"...","offer":"...","hook":"one plain opening line for social posts",
 "benefits":["3-6 items"],"faq":[{"q":"...","a":"..."}],"setup":["2-6 setup steps"],"price":number (GBP, a suggestion),"priceRationale":"...",
 "imageBrief":"what product images should show",
@@ -125,6 +191,7 @@ export function validateSpec(v: unknown): { spec: ProductSpec } | { problems: st
   const files = Array.isArray(x?.files) ? x.files as Record<string, unknown>[] : [];
   if (files.length < 3 || files.length > 8) p.push("files: 3 to 8 files");
   const names = new Set<string>();
+  const dropped: string[] = [], repairs: string[] = [];
   for (const f of files.slice(0, 8)) {
     const name = typeof f?.name === "string" ? f.name : "";
     const kind = f?.kind as keyof typeof EXT;
@@ -138,10 +205,10 @@ export function validateSpec(v: unknown): { spec: ProductSpec } | { problems: st
       if (!content || content.trim().length < 200 || /<script|<iframe|javascript:/i.test(content)) { p.push(`${name}: Markdown content of 200 to 20000 characters, without HTML scripts`); continue; }
       spec.files.push({ name, kind, description, template: f.template === true, content });
     } else if (kind === "csv") {
-      const header = list(f.header, 2, 12, 40);
-      const rows = Array.isArray(f.rows) && f.rows.length >= 1 && f.rows.length <= 30 && header && (f.rows as unknown[]).every((r) => Array.isArray(r) && r.length === header.length && r.every((c) => (typeof c === "string" && c.length <= 200 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(c)) || (typeof c === "number" && Number.isFinite(c)))) ? f.rows as (string | number)[][] : null;
-      if (!header || new Set(header).size !== header.length || !rows) { p.push(`${name}: CSV needs 2-12 unique column names and 1-30 rows with exactly that many cells`); continue; }
-      spec.files.push({ name, kind, description, template: f.template === true, header, rows });
+      const n = normalizeCsv(f);
+      if ("problem" in n) { dropped.push(`${name}: ${n.problem}`); continue; }
+      repairs.push(...n.repairs.map((x) => `${name}: ${x}`));
+      spec.files.push({ name, kind, description, template: f.template === true, header: n.header, rows: n.rows });
     } else {
       const title = text(f.title, 120), intro = text(f.intro, 600);
       const sections = Array.isArray(f.sections) && f.sections.length >= 1 && f.sections.length <= 8 ? (f.sections as Record<string, unknown>[]).map((s) => ({
@@ -154,7 +221,9 @@ export function validateSpec(v: unknown): { spec: ProductSpec } | { problems: st
   }
   const claims = misleadingClaims(JSON.stringify(x ?? {}));
   if (claims.length) p.push(`misleading claims: ${claims.join(", ")}`);
-  return p.length ? { problems: p } : { spec: spec as ProductSpec };
+  // A file the factory could not repair is left out (the run then needs repair) unless too few usable files remain.
+  if (files.length >= 3 && spec.files.length < 3) p.push(`too few usable files (${spec.files.length}); ${dropped.join("; ")}`);
+  return p.length ? { problems: [...p, ...(spec.files.length < 3 ? [] : dropped)] } : { spec: { ...spec, dropped, repairs } as ProductSpec };
 }
 
 /** An offline, printable worksheet: inputs only, no scripts, a CSP that blocks all network access. */
