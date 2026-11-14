@@ -222,6 +222,7 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
   }, null);
   for (const g of revenue?.goals ?? []) if (g.remaining > 0 && !activePlan(store, g.productId, today)) actions.push({ priority: 1, ref: g.productId, text: `${g.name}: ${g.sales}/${g.target} verified sales and no active 14-day experiment: prepare one`, command: `audience plan ${g.productId}` });
   section("social publishing queue", () => {
+    for (const it of socialQueue(store).filter((x) => x.status === "published" && !x.url)) actions.push({ priority: 1, ref: it.id, text: `${it.platform} post ${it.externalId} was published but its link is not recorded: open it and record the link`, command: `audience posted ${it.planId} --day ${it.day} --url <post link>` });
     for (const it of socialQueue(store).filter((x) => x.status === "needs-check" || x.status === "failed")) problems.push({ priority: it.status === "needs-check" ? 1 : 2, ref: it.id, text: `${it.platform} post (plan ${it.planId} day ${it.day}) ${it.status}: ${it.lastError ?? ""}${it.status === "needs-check" ? "; check the account: it may have been published" : ""}`, command: "social list" });
     return null;
   }, null);

@@ -3,12 +3,14 @@
  * product name, link). No product mockups, ratings, results or invented imagery. Same inputs give the same PNG.
  */
 
-import { canvas, encodePng, lineHeight, measure, rect, text, wrap, type RGB } from "./raster.js";
+import { canvas, encodePng, lineHeight, measure, rect, text, wrap, type Canvas, type RGB } from "./raster.js";
 
 export interface CardInput { readonly brand: string; readonly hook: string; readonly body: string; readonly footer: string; readonly link: string; readonly width: number; readonly height: number }
 const NAVY: RGB = [31, 42, 68], CREAM: RGB = [246, 244, 239], WHITE: RGB = [255, 255, 255], INK: RGB = [24, 28, 38], MUTED: RGB = [80, 92, 115], ACCENT: RGB = [196, 140, 60];
 
-export function renderCard(i: CardInput): Buffer {
+export const renderCard = (i: CardInput): Buffer => encodePng(cardCanvas(i));
+
+export function cardCanvas(i: CardInput): Canvas {
   const c = canvas(i.width, i.height, CREAM);
   const m = Math.round(i.width * 0.07), inner = i.width - 2 * m;
   rect(c, 0, 0, i.width, Math.round(i.height * 0.1), NAVY);
@@ -27,5 +29,5 @@ export function renderCard(i: CardInput): Buffer {
   for (const [k, l] of wrap(i.footer, "regular", inner).slice(0, 2).entries()) text(c, l, m, fy + k * lineHeight("regular"), "regular", INK);
   const link = i.link.replace(/^https:\/\//, "");
   text(c, link, Math.max(m, i.width - m - measure(link, "regular")), i.height - Math.round(i.height * 0.06), "regular", MUTED);
-  return encodePng(c);
+  return c;
 }

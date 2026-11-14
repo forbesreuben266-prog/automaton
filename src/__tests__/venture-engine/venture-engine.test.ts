@@ -206,9 +206,14 @@ describe("isolation", () => {
       for (const m of src.matchAll(/from "([^"]+)"/g)) expect(/^\.{1,2}\/[a-z/-]+\.js$/.test(m[1]) || /^node:(fs|os|path|crypto)$/.test(m[1]) || (f === "claude.ts" && m[1] === "@anthropic-ai/sdk") || ((f === "zip.ts" || f === "raster.ts") && m[1] === "node:zlib"), `${f}: ${m[1]}`).toBe(true);
       const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(/child_process|https?\.request|net\.connect|eval\(|new Function|wallet|solana|viem|broker|placeorder|docker|sudo/i.test(code), f).toBe(false);
-      expect((code.match(/\bfetch\(/g) ?? []).length, f).toBe(f === "cli.ts" ? 1 : 0);
+      expect((code.match(/\bfetch\(/g) ?? []).length, f).toBe(f === "cli.ts" || f === "social-http.ts" ? 1 : 0);
     }
     expect(fs.readFileSync(path.join(SRC, "venture-engine", "cli.ts"), "utf8")).toContain("loopbackUrl(url); return fetch(url, init)");
+    // the social client reaches only the pinned API hosts (and the owner's media host), checked before its one fetch
+    const socialHttp = fs.readFileSync(path.join(SRC, "venture-engine", "social-http.ts"), "utf8");
+    expect(socialHttp).toContain('new Set(["graph.instagram.com", "api.pinterest.com", "api-sandbox.pinterest.com"])');
+    expect(socialHttp.indexOf("const u = checkUrl(r.url, extraHosts);")).toBeLessThan(socialHttp.indexOf("fetch("));
+    expect(socialHttp).toContain('redirect: "manual"');
     const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
     for (const f of walk(SRC).filter((f) => f.endsWith(".ts") && !f.startsWith(DIRS[0] + path.sep) && !f.includes(`${path.sep}__tests__${path.sep}`))) expect(fs.readFileSync(f, "utf8").includes("venture-engine"), path.relative(SRC, f)).toBe(false);
   });

@@ -614,21 +614,60 @@ What exists now:
   PNG/JPEG screenshot.
 - The 08:00 timer is unchanged and does not run `social run`.
 
-What is NOT implemented, on purpose: the Instagram and Pinterest adapters (the HTTP calls). The official docs were
-unreachable from the development environment (`developers.facebook.com`, `developers.pinterest.com` were blocked),
-and endpoints, scopes and limits were not guessed. Until each adapter is written from the official docs and marked
-verified, `social live ... on` is refused and every run is a dry run.
+Adapters (implemented from the official docs; facts and sources in docs/SOCIAL-API-FACTS.md):
 
-To enable later (each step confirmed against the official docs at the time):
+- Instagram: Instagram API with Instagram Login (graph.instagram.com, v27.0). Each publish checks the publishing
+  quota, checks that the public JPEG is byte-identical to the queued file, creates a container (`image_url`,
+  `caption`, `alt_text`), waits for `FINISHED`, calls `media_publish`, then reads the `permalink`. Cards are JPEG
+  1080x1350 (Instagram accepts JPEG only, 4:5 to 1.91:1). Instagram fetches media from a public HTTPS URL, so the
+  owner uploads each queued JPEG to the `--media-base-url` folder shown by `social list`.
+- Pinterest: API v5 `POST /v5/pins` with the image sent as base64 (no hosting needed), on the connected board;
+  `--sandbox` uses api-sandbox.pinterest.com. The API returns the Pin id but no public URL, so the owner records the
+  Pin link with `audience posted` (the daily report asks for it).
+- Network: only `social-http.ts` talks to the network, pinned to graph.instagram.com, api.pinterest.com,
+  api-sandbox.pinterest.com and the owner's media host; no redirects; time-outs; nothing else.
+- Classification: failures before publishing or definite transient refusals are retried (at most 3 times);
+  definite refusals fail; an incomplete answer to the publishing request becomes `needs-check` (Instagram first
+  checks the container status: `FINISHED` means not published and safe to retry).
+- `social check <platform>` makes one read-only call (Instagram `/me`, Pinterest board lookup).
+  `social refresh <platform>` uses the documented refresh calls (Instagram long-lived token at least 24 hours old;
+  Pinterest refresh token with the app's client id and secret).
 
-1. Allow network access to the docs (`developers.facebook.com`, `developers.pinterest.com`) so the adapters can be
-   written and verified, and, for live use from the VPS, to the platforms' API hosts named in those docs.
-2. Instagram: a professional (Business or Creator) account; a Meta developer app with the content-publishing
-   permission the docs name; confirm whether a Facebook Page or Facebook login is required (relevant while the
-   Facebook account is blocked), whether images must be at a public HTTPS URL, the accepted formats and the
-   publishing limits. Then `social connect instagram ...` with the token and account id.
-3. Pinterest: a business account; an app at developers.pinterest.com with the scopes for boards and pins; confirm
-   whether trial access restricts publishing (for example to a sandbox) and how to get standard access; the image
-   rules and token lifetime. Then `social connect pinterest ...` with the token and the board id.
-4. After an adapter is verified: `social live <platform> on` at a terminal, a supervised `social run --live`, and
-   only then (separately approved) a timer for `social run --live`.
+Live posting stays off until the owner connects an account and turns it on at a terminal; every run is a dry run
+without `--live`. No timer runs `social run`.
+
+### Connecting Instagram (owner steps)
+
+1. The Instagram account must be a professional account (Business or Creator). With Instagram Login no Facebook
+   Page is needed.
+2. At developers.facebook.com create a Meta app of type Business and add the Instagram product with "API setup with
+   Instagram business login". Meta's developer account sign-in may need a Facebook login: if the blocked Facebook
+   account prevents this, Instagram publishing cannot be set up until it is resolved.
+3. For a business you own: Standard Access, no App Review. Generate a token in the App Dashboard (Instagram > API
+   setup with Instagram business login > Generate token), which is valid for 60 days, with
+   `instagram_business_basic` and `instagram_business_content_publish`.
+4. Find the account id: `GET https://graph.instagram.com/v27.0/me?fields=user_id,username` (or `social check`
+   after connecting reports a mismatch).
+5. Choose a public HTTPS folder you control for the JPEGs (for example a static site), then:
+   `ve social connect instagram --account <user_id> --token-file ~/ig-token.txt --media-base-url https://<your-host>/<folder>/ --expires <date>`
+   and delete the token file. Allow that media host, graph.instagram.com, in the VPS firewall if it filters
+   outbound traffic.
+6. `ve social check instagram` (read-only). Refresh before expiry: `ve social refresh instagram`.
+
+### Connecting Pinterest (owner steps)
+
+1. A Pinterest business account; at developers.pinterest.com accept the terms and "Connect app" (request Trial
+   access; Pinterest reviews it).
+2. Trial access: Pins are visible only to you (Sandbox). To publish publicly, upgrade to Standard access: Pinterest
+   requires a video recording of the OAuth flow even if you are the only user.
+3. Get an OAuth access token through the authorization-code flow with scopes `boards:read,pins:read,pins:write`
+   (plus `boards:write` if wanted), keeping the refresh token; access tokens last 30 days.
+4. `ve social connect pinterest --account <board id> --token-file ~/pin-token.txt --refresh-file ~/pin-refresh.txt --client-file ~/pin-client.txt --expires <date>`
+   (`client-file` holds `client_id:client_secret`; add `--sandbox` for a Sandbox token). Delete the files.
+5. `ve social check pinterest` (read-only board lookup). Refresh: `ve social refresh pinterest`.
+
+### Going live (each step needs your explicit decision)
+
+1. `ve social queue <plan>`, upload the Instagram JPEGs, `ve social run` (dry run) and read the output.
+2. `ve social live instagram on` / `ve social live pinterest on` at a terminal.
+3. `ve social run --live` when items are due (supervised first). A timer for it would be a separate change.
