@@ -82,7 +82,15 @@ function readPrivate(file: string): string | null {
   let fd: number; try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { return null; }
   try { const s = fs.fstatSync(fd); if (!s.isFile() || (s.mode & 0o077) !== 0) throw new Error(`${path.basename(file)} must be a regular file with mode 600`); return fs.readFileSync(fd, "utf8"); } finally { fs.closeSync(fd); }
 }
-function writePrivate(file: string, text: string): void { const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, text, { mode: 0o600, flag: "wx" }); fs.renameSync(tmp, file); }
+/** Atomic, durable write: temp file (mode 600, exclusive) -> fsync -> rename -> fsync of the folder. */
+function writePrivate(file: string, text: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try { fs.unlinkSync(tmp); } catch { /* no leftover from an earlier crash of this pid */ }
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+  try { fs.writeSync(fd, text); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);
+  try { const d = fs.openSync(path.dirname(file), fs.constants.O_RDONLY); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* folder fsync is best effort on platforms without it */ }
+}
 const platform = (s: string | undefined): Platform => { if (!PLATFORMS.includes(s as Platform)) throw new Error(`platform: ${PLATFORMS.join(" or ")}`); return s as Platform; };
 export const settings = (store: Store): Settings => { const t = readPrivate(at(store, "settings.json")); return t ? { ...DEFAULT_SETTINGS, ...JSON.parse(t) } : DEFAULT_SETTINGS; };
 export const connection = (store: Store, p: Platform): Secret | null => { const t = readPrivate(at(store, `${p}.json`)); return t ? JSON.parse(t) : null; };
@@ -137,7 +145,8 @@ export function setLive(store: Store, p: Platform, on: boolean, a: { interactive
 
 // ---------------------------------------------------------------- queue
 
-export type QueueStatus = "queued" | "retry-wait" | "published" | "needs-check" | "failed" | "cancelled";
+/** "publishing" is written (durably) before any external publishing request; finding it later means the run was interrupted. */
+export type QueueStatus = "queued" | "retry-wait" | "publishing" | "published" | "needs-check" | "failed" | "cancelled";
 export interface QueueItem {
   readonly id: string; readonly brand: string; readonly key: string; readonly planId: string; readonly day: number; readonly platform: Platform;
   readonly approvedHash: string; readonly scheduledAt: string; readonly caption: string; readonly title: string | null; readonly altText: string | null; readonly link: string;
@@ -233,6 +242,7 @@ export function cancel(store: Store, itemId: string, now: Date): QueueItem {
   const q = queue(store), it = q.find((x) => x.id === itemId);
   if (!it) throw new Error(`no queue item ${itemId}`);
   if (it.status === "published") throw new Error(`${itemId} is already published (${it.url}); remove it on the platform itself if needed`);
+  if (it.status === "publishing") throw new Error(`${itemId} was being published when Automaton stopped: run 'social run' (it becomes needs-check), check the account, then decide`);
   const next = { ...it, status: "cancelled" as const, updatedAt: now.toISOString() };
   saveQueue(store, q.map((x) => (x.id === itemId ? next : x)));
   store.audit({ kind: "social-cancelled", item: itemId }, now);
@@ -244,11 +254,18 @@ export interface RunOutcome { readonly item: string; readonly platform: Platform
 /** Publishes due items. Dry run unless live is requested AND enabled for the platform AND its adapter is verified. */
 export async function runQueue(store: Store, now: Date, opts: { live: boolean; adapters?: Adapters }): Promise<{ dryRun: boolean; outcomes: RunOutcome[] }> {
   const adapters = opts.adapters ?? realAdapters(store);
-  const why = stopReason(store.dir);
-  if (why) return { dryRun: !opts.live, outcomes: [{ item: "-", platform: "instagram", day: 0, result: `STOP is set (${why}): nothing was published` }] };
-  const s = settings(store), today = londonDate(now), outcomes: RunOutcome[] = [];
+  const outcomes: RunOutcome[] = [];
   let q = queue(store);
   const save = (it: QueueItem) => { q = q.map((x) => (x.id === it.id ? it : x)); saveQueue(store, q); };
+  // Crash recovery first (even while STOP is set): an item left "publishing" may or may not be live. Never resend it.
+  for (const it of q.filter((x) => x.status === "publishing")) {
+    save({ ...it, status: "needs-check", lastError: "interrupted while publishing (Automaton stopped before the result was recorded): it may be live; check the account", updatedAt: now.toISOString() });
+    store.audit({ kind: "social-needs-check", item: it.id, reason: "interrupted while publishing" }, now);
+    outcomes.push({ item: it.id, platform: it.platform, day: it.day, result: "needs-check: interrupted while publishing in an earlier run (it may be live: check the account; it will not be resent)" });
+  }
+  const why = stopReason(store.dir);
+  if (why) return { dryRun: !opts.live, outcomes: [...outcomes, { item: "-", platform: "instagram", day: 0, result: `STOP is set (${why}): nothing was published` }] };
+  const s = settings(store), today = londonDate(now);
   const plans = store.audiencePlans();
   for (const it of q.filter((x) => (x.status === "queued" && x.scheduledAt <= now.toISOString()) || (x.status === "retry-wait" && (x.nextAttemptAt ?? "") <= now.toISOString())).sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))) {
     const out = (result: string) => outcomes.push({ item: it.id, platform: it.platform, day: it.day, result });
@@ -269,6 +286,8 @@ export async function runQueue(store: Store, now: Date, opts: { live: boolean; a
     else if (conn.expiresOn && conn.expiresOn < today) blockers.push(`the ${it.platform} token expired on ${conn.expiresOn}`);
     else if (it.platform === "instagram" && !conn.mediaBaseUrl) blockers.push("Instagram needs a public media URL (--media-base-url)");
     if (blockers.length) { out(`DRY RUN: would publish day ${it.day} to ${it.platform} (${it.media.source}, ${it.media.width}x${it.media.height}); not sent because: ${blockers.join("; ")}`); continue; }
+    // Durably mark the item before anything leaves this machine: a crash from here on leaves "publishing", never "queued".
+    save({ ...it, status: "publishing", updatedAt: now.toISOString() });
     store.audit({ kind: "social-publish-attempt", item: it.id, platform: it.platform, attempt: it.attempts + 1 }, now);
     let r: PublishResult;
     const publicUrl = it.platform === "instagram" && conn!.mediaBaseUrl ? new URL(path.basename(it.media.file), conn!.mediaBaseUrl).toString() : null;
@@ -300,7 +319,7 @@ export function socialStatus(store: Store, now: Date, adapters: Adapters = realA
   return PLATFORMS.map((p) => {
     const c = connection(store, p), a = adapters[p];
     const days = c?.expiresOn ? Math.round((Date.parse(c.expiresOn) - Date.parse(today)) / 86_400_000) : null;
-    return `${CHANNEL_INFO[p].label}: ${c ? `connected (account ${c.accountId}, token fingerprint ${c.tokenSha256.slice(0, 12)}${c.expiresOn ? `, expires ${c.expiresOn}${days !== null && days < 7 ? ` (in ${days} day(s): run 'social refresh ${p}')` : ""}` : ", expiry not given"}${p === "instagram" ? `, media URL ${c.mediaBaseUrl ?? "NOT SET"}` : `, ${c.environment ?? "production"}`})` : "not connected"}; live publishing ${s.live[p] ? "ON" : "off"}; adapter ${a.note}${a.verified ? "" : " (not verified)"}; queue: ${["queued", "retry-wait", "published", "needs-check", "failed"].map((st) => `${q.filter((x) => x.platform === p && x.status === st).length} ${st}`).join(", ")}`;
+    return `${CHANNEL_INFO[p].label}: ${c ? `connected (account ${c.accountId}, token fingerprint ${c.tokenSha256.slice(0, 12)}${c.expiresOn ? `, expires ${c.expiresOn}${days !== null && days < 7 ? ` (in ${days} day(s): run 'social refresh ${p}')` : ""}` : ", expiry not given"}${p === "instagram" ? `, media URL ${c.mediaBaseUrl ?? "NOT SET"}` : `, ${c.environment ?? "production"}`})` : "not connected"}; live publishing ${s.live[p] ? "ON" : "off"}; adapter ${a.note}${a.verified ? "" : " (not verified)"}; queue: ${["queued", "retry-wait", "publishing", "published", "needs-check", "failed"].map((st) => `${q.filter((x) => x.platform === p && x.status === st).length} ${st}`).join(", ")}`;
   }).join("\n") + `\nPosting time ${s.postTime} UK, at most ${s.maxPostsPerDay} post(s) per platform per day. Tokens are never shown.\n`;
 }
 

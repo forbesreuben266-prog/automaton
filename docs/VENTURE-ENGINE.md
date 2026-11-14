@@ -671,3 +671,12 @@ without `--live`. No timer runs `social run`.
 1. `ve social queue <plan>`, upload the Instagram JPEGs, `ve social run` (dry run) and read the output.
 2. `ve social live instagram on` / `ve social live pinterest on` at a terminal.
 3. `ve social run --live` when items are due (supervised first). A timer for it would be a separate change.
+
+## Deploying to the VPS (owner, after approval)
+
+Backups of `~/.automaton-ventures` contain tokens and keys, so every deploy command runs with `umask 077` and keeps
+`~/automaton-backups` private (folder 700, files 600). The daily report flags any backup another user can read.
+
+    (umask 077 && cd ~/automaton && [ -z "$(git status --porcelain --untracked-files=no)" ] && mkdir -p ~/automaton-backups && chmod 700 ~/automaton-backups && (chmod 600 ~/automaton-backups/* 2>/dev/null || true) && tar -czf ~/automaton-backups/ventures-$(date +%Y%m%dT%H%M%S).tgz -C ~ .automaton-ventures && git fetch origin <branch> && (git checkout -q <branch> 2>/dev/null || git checkout -q -b <branch> origin/<branch>) && git merge -q --ff-only origin/<branch> && pnpm build >~/automaton-build.log 2>&1 && echo "DEPLOY OK") || echo "STOPPED: see above"
+
+To fix existing backups once: `chmod 700 ~/automaton-backups && chmod 600 ~/automaton-backups/*`.

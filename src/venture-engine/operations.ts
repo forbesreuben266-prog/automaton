@@ -221,7 +221,17 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
       awaitingApproval: plans.reduce((a, pl) => a + pl.days.filter((d) => !d.approval && d.date >= today).length, 0) + store.campaigns().reduce((a, c) => a + c.posts.filter((x) => x.status === "draft").length, 0), plannedToday };
   }, null);
   for (const g of revenue?.goals ?? []) if (g.remaining > 0 && !activePlan(store, g.productId, today)) actions.push({ priority: 1, ref: g.productId, text: `${g.name}: ${g.sales}/${g.target} verified sales and no active 14-day experiment: prepare one`, command: `audience plan ${g.productId}` });
+  section("backup privacy", () => {
+    // Backups of the data folder contain tokens and keys: they must be readable by the owner only.
+    const dir = path.join(path.dirname(store.dir), "automaton-backups");
+    let st: fs.Stats; try { st = fs.lstatSync(dir); } catch { return null; }
+    const open = (st.mode & 0o077) !== 0 ? [dir] : [];
+    for (const n of fs.readdirSync(dir)) { try { const f = fs.lstatSync(path.join(dir, n)); if ((f.mode & 0o077) !== 0) open.push(n); } catch { /* vanished */ } }
+    if (open.length) problems.push({ priority: 1, ref: "backups", text: `${open.length} backup item(s) can be read by other users (backups contain tokens and keys): ${open.slice(0, 3).join(", ")}${open.length > 3 ? ", ..." : ""}`, command: "chmod 700 ~/automaton-backups && chmod 600 ~/automaton-backups/*" });
+    return null;
+  }, null);
   section("social publishing queue", () => {
+    for (const it of socialQueue(store).filter((x) => x.status === "publishing")) problems.push({ priority: 1, ref: it.id, text: `${it.platform} post (plan ${it.planId} day ${it.day}) was interrupted while publishing: it may be live; it will become needs-check and is never resent`, command: "social run" });
     for (const it of socialQueue(store).filter((x) => x.status === "published" && !x.url)) actions.push({ priority: 1, ref: it.id, text: `${it.platform} post ${it.externalId} was published but its link is not recorded: open it and record the link`, command: `audience posted ${it.planId} --day ${it.day} --url <post link>` });
     for (const it of socialQueue(store).filter((x) => x.status === "needs-check" || x.status === "failed")) problems.push({ priority: it.status === "needs-check" ? 1 : 2, ref: it.id, text: `${it.platform} post (plan ${it.planId} day ${it.day}) ${it.status}: ${it.lastError ?? ""}${it.status === "needs-check" ? "; check the account: it may have been published" : ""}`, command: "social list" });
     return null;

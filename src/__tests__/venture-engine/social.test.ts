@@ -16,7 +16,7 @@ import { imageInfo } from "../../venture-engine/raster.js";
 import { channelPerformance } from "../../venture-engine/revenue.js";
 import { instagramAdapter, pinterestAdapter } from "../../venture-engine/social-adapters.js";
 import { checkUrl, type Http, type HttpRequest } from "../../venture-engine/social-http.js";
-import { connect, connection, enqueue, londonInstant, queue, realAdapters, refreshConnection, runQueue, setLive, useScreenshot, type Adapters, type Platform, type PublishAdapter, type PublishRequest, type PublishResult } from "../../venture-engine/social.js";
+import { cancel, connect, connection, enqueue, londonInstant, queue, realAdapters, refreshConnection, runQueue, setLive, useScreenshot, type Adapters, type Platform, type PublishAdapter, type PublishRequest, type PublishResult } from "../../venture-engine/social.js";
 import { Store } from "../../venture-engine/store.js";
 import type { Venture } from "../../venture-engine/types.js";
 
@@ -301,3 +301,65 @@ describe("runs: dry run by default; mocked publishing through the queue", () => 
     expect(fetches).toBe(0);
   });
 });
+
+describe("crash safety: durable 'publishing' state, restart recovery, never resent", () => {
+  const qfile = () => path.join(store.dir, "social", "queue.json");
+  it("the item is durably 'publishing' on disk before the external request is made", async () => {
+    const plan = setup(); enqueue(store, plan.id, NOW);
+    const seenOnDisk: string[] = [];
+    const m = mock([(req) => { seenOnDisk.push(JSON.parse(fs.readFileSync(qfile(), "utf8")).find((x: { day: number }) => x.day === 2).status); return { kind: "published", externalId: "M1", url: "https://www.instagram.com/p/M1/" }; }]);
+    goLive(m.adapters);
+    await runQueue(store, at("2026-11-15T12:31:00Z"), { live: true, adapters: m.adapters });
+    expect(seenOnDisk).toEqual(["publishing"]);
+    expect(queue(store).find((x) => x.day === 2)!.status).toBe("published");
+  });
+
+  it("a crash during the request leaves 'publishing'; the next run marks it needs-check and never resends it", async () => {
+    const plan = setup(); enqueue(store, plan.id, NOW);
+    let atCrash = "";
+    const m = mock([() => { atCrash = fs.readFileSync(qfile(), "utf8"); return { kind: "published", externalId: "M1", url: "https://www.instagram.com/p/M1/" }; }]);
+    goLive(m.adapters);
+    await runQueue(store, at("2026-11-15T12:31:00Z"), { live: true, adapters: m.adapters });
+    // Simulate the process dying mid-request: the result was never recorded, only the pre-request state survived.
+    fs.writeFileSync(qfile(), atCrash);
+    expect(queue(store).find((x) => x.day === 2)!.status).toBe("publishing");
+    const before = runDaily(store, DEFAULT_CONFIG, at("2026-11-15T12:40:00Z")).report;
+    expect(before.problems.some((p) => p.priority === 1 && /interrupted while publishing: it may be live; it will become needs-check and is never resent/.test(p.text))).toBe(true);
+    expect(() => cancel(store, queue(store).find((x) => x.day === 2)!.id, NOW)).toThrow(/was being published when Automaton stopped/);
+    const m2 = mock();
+    const r = await runQueue(store, at("2026-11-15T13:00:00Z"), { live: true, adapters: m2.adapters });
+    expect(r.outcomes[0].result).toBe("needs-check: interrupted while publishing in an earlier run (it may be live: check the account; it will not be resent)");
+    expect(m2.calls).toEqual([]);
+    const it = queue(store).find((x) => x.day === 2)!;
+    expect(it).toMatchObject({ status: "needs-check", lastError: expect.stringMatching(/interrupted while publishing/) });
+    // later runs leave it alone; re-queueing the same day is refused while it is needs-check
+    await runQueue(store, at("2026-11-16T13:00:00Z"), { live: true, adapters: m2.adapters });
+    expect(m2.calls).toEqual([]);
+    expect(enqueue(store, plan.id, at("2026-11-16T13:00:00Z")).skipped.join(" ")).toMatch(/day 2: already queued/);
+    expect(fs.readFileSync(path.join(store.dir, "audit.jsonl"), "utf8")).toMatch(/"kind":"social-needs-check".*interrupted while publishing/);
+  });
+
+  it("recovery also happens while STOP is set (a local state change only; nothing is sent)", async () => {
+    const plan = setup(); enqueue(store, plan.id, NOW);
+    const q = queue(store); fs.writeFileSync(qfile(), JSON.stringify(q.map((x) => (x.day === 2 ? { ...x, status: "publishing" } : x))));
+    stop(store.dir, "pause", NOW);
+    const m = mock();
+    const r = await runQueue(store, at("2026-11-15T13:00:00Z"), { live: true, adapters: m.adapters });
+    expect(r.outcomes.map((o) => o.result)).toEqual([expect.stringMatching(/^needs-check: interrupted/), expect.stringMatching(/STOP is set/)]);
+    expect(m.calls).toEqual([]);
+    expect(queue(store).find((x) => x.day === 2)!.status).toBe("needs-check");
+  });
+});
+
+describe("backup privacy", () => {
+  it("the daily report flags backups that other users can read, and is quiet once they are private", () => {
+    const b = path.join(DIR, "automaton-backups"); fs.mkdirSync(b, { mode: 0o755 }); fs.chmodSync(b, 0o755);
+    fs.writeFileSync(path.join(b, "ventures-20261114T090000.tgz"), "x", { mode: 0o644 }); fs.chmodSync(path.join(b, "ventures-20261114T090000.tgz"), 0o644);
+    let d = runDaily(store, DEFAULT_CONFIG, NOW).report;
+    expect(d.problems.find((p) => p.ref === "backups")).toMatchObject({ priority: 1, text: expect.stringMatching(/^2 backup item\(s\) can be read by other users/), command: "chmod 700 ~/automaton-backups && chmod 600 ~/automaton-backups/*" });
+    fs.chmodSync(b, 0o700); fs.chmodSync(path.join(b, "ventures-20261114T090000.tgz"), 0o600);
+    d = runDaily(store, DEFAULT_CONFIG, NOW).report;
+    expect(d.problems.some((p) => p.ref === "backups")).toBe(false);
+  });
+});
+
