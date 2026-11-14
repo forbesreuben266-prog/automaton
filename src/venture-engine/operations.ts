@@ -26,6 +26,7 @@ import { HARD_CAP_GBP, Ledger } from "./ledger.js";
 import { approved, launchReadiness, type Readiness as LaunchReadiness } from "./launch.js";
 import { pounds, salesTotals, type SalesTotals } from "./sales.js";
 import { activePlan, CHANNEL_INFO } from "./audience.js";
+import { queue as socialQueue } from "./social.js";
 import { channelPerformance, experimentResult, goals, type ChannelRow, type GoalProgress } from "./revenue.js";
 
 export const TIMEZONE = "Europe/London";
@@ -220,6 +221,10 @@ export function inspect(store: Store, cfg: EngineConfig, now: Date): Omit<DailyR
       awaitingApproval: plans.reduce((a, pl) => a + pl.days.filter((d) => !d.approval && d.date >= today).length, 0) + store.campaigns().reduce((a, c) => a + c.posts.filter((x) => x.status === "draft").length, 0), plannedToday };
   }, null);
   for (const g of revenue?.goals ?? []) if (g.remaining > 0 && !activePlan(store, g.productId, today)) actions.push({ priority: 1, ref: g.productId, text: `${g.name}: ${g.sales}/${g.target} verified sales and no active 14-day experiment: prepare one`, command: `audience plan ${g.productId}` });
+  section("social publishing queue", () => {
+    for (const it of socialQueue(store).filter((x) => x.status === "needs-check" || x.status === "failed")) problems.push({ priority: it.status === "needs-check" ? 1 : 2, ref: it.id, text: `${it.platform} post (plan ${it.planId} day ${it.day}) ${it.status}: ${it.lastError ?? ""}${it.status === "needs-check" ? "; check the account: it may have been published" : ""}`, command: "social list" });
+    return null;
+  }, null);
   const order = (xs: Item[]) => xs.sort((a, b) => a.priority - b.priority || a.ref.localeCompare(b.ref) || a.text.localeCompare(b.text));
   return { schema: 1, date: today, timezone: TIMEZONE, generatedAt: now.toISOString(), status: errors.length ? "partial" : "ok", business, products, campaigns, sales, factory, aiProvider, spending, launch: launches, orders, revenue, nextAction: null, summary: "", engagement,
     actions: order(actions), blocked: order(blocked), approvals: order(approvals), problems: order(problems), checked, completed: [], errors, limitations };

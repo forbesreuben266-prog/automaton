@@ -584,3 +584,51 @@ marketing costs. The first-sales goal is 10 verified orders per live product
 autopilot keeps a 14-day experiment active and makes no new product drafts.
 Brands: every new record carries `brand` (default `avenor-studio`); existing
 records without one belong to the default brand.
+
+## Social publishing (Instagram and Pinterest): built, live posting not enabled
+
+    ve social connect instagram --account <id> --token-file <file> [--expires YYYY-MM-DD]
+    ve social connect pinterest --account <board id> --token-file <file> [--expires YYYY-MM-DD]
+    ve social status                       # connection, token fingerprint and expiry, live mode, adapter state, queue
+    ve social queue <plan> [--day N]       # approved, unposted Instagram/Pinterest days -> queue, with a rendered card
+    ve social media <item> --file shot.png # use a real product screenshot instead of the card
+    ve social list | ve social cancel <item>
+    ve social run [--live]                 # dry run unless --live AND live mode is on AND the adapter is verified
+    ve social live <platform> on|off       # interactive terminal; refused until the adapter is verified
+
+What exists now:
+
+- Official-API only: an OAuth access token the owner gets from the platform's own developer tools, read from a
+  file (never from the command line) and stored in `social/<platform>.json` (mode 600). Passwords, cookies and
+  browser automation are not supported. Only a fingerprint of the token is ever shown or audited.
+- Queue (`social/queue.json`): one item per plan day (idempotency key), only for days whose owner approval still
+  matches the exact text, scheduled at 12:30 UK time on the planned date, at most 1 post per platform per day.
+- Retries: only for failures the adapter reports as clearly transient and pre-publication, at most 3 attempts
+  (15 min, 1 h, 4 h back-off). A failure after the publishing request was sent is `needs-check` and never retried.
+  Approval changes, changed media files, STOP and expired tokens stop an item before anything is sent.
+- After a publish, the post URL is recorded with `audience posted`, so audience status, revenue channel counts,
+  the daily report and the dashboard update. `needs-check` and `failed` items appear in the daily report.
+- Media: a deterministic typographic card (brand, hook, the approved step, product name, link; no mockups, ratings
+  or results) rendered without dependencies (embedded Inter glyphs, OFL 1.1; PNG), 1080x1350 for Instagram and
+  1000x1500 for Pinterest (defaults; confirm against current platform requirements), or the owner's own
+  PNG/JPEG screenshot.
+- The 08:00 timer is unchanged and does not run `social run`.
+
+What is NOT implemented, on purpose: the Instagram and Pinterest adapters (the HTTP calls). The official docs were
+unreachable from the development environment (`developers.facebook.com`, `developers.pinterest.com` were blocked),
+and endpoints, scopes and limits were not guessed. Until each adapter is written from the official docs and marked
+verified, `social live ... on` is refused and every run is a dry run.
+
+To enable later (each step confirmed against the official docs at the time):
+
+1. Allow network access to the docs (`developers.facebook.com`, `developers.pinterest.com`) so the adapters can be
+   written and verified, and, for live use from the VPS, to the platforms' API hosts named in those docs.
+2. Instagram: a professional (Business or Creator) account; a Meta developer app with the content-publishing
+   permission the docs name; confirm whether a Facebook Page or Facebook login is required (relevant while the
+   Facebook account is blocked), whether images must be at a public HTTPS URL, the accepted formats and the
+   publishing limits. Then `social connect instagram ...` with the token and account id.
+3. Pinterest: a business account; an app at developers.pinterest.com with the scopes for boards and pins; confirm
+   whether trial access restricts publishing (for example to a sandbox) and how to get standard access; the image
+   rules and token lifetime. Then `social connect pinterest ...` with the token and the board id.
+4. After an adapter is verified: `social live <platform> on` at a terminal, a supervised `social run --live`, and
+   only then (separately approved) a timer for `social run --live`.
