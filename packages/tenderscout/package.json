@@ -1,0 +1,32 @@
+{
+  "name": "@conway/tenderscout",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TenderScout UK - daily UK government cleaning-contract alerts",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": { "tenderscout": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/cli.js start",
+    "cli": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "cron-parser": "^4.9.0",
+    "nodemailer": "^6.9.16",
+    "stripe": "^23.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^20.10.0",
+    "@types/nodemailer": "^6.4.17",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vitest": "^2.0.0"
+  },
+  "engines": { "node": ">=20.0.0" }
+}
